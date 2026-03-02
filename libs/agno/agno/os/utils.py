@@ -21,6 +21,7 @@ from agno.run.team import TeamRunOutputEvent
 from agno.run.workflow import WorkflowRunOutputEvent
 from agno.team import RemoteTeam, Team
 from agno.tools import Function, Toolkit
+from agno.tools.toolkit import get_tool_category
 from agno.utils.log import log_warning, logger
 from agno.workflow import RemoteWorkflow, Workflow
 
@@ -1049,6 +1050,8 @@ def format_team_tools(team_tools: List[Union[Function, dict]]):
             if isinstance(tool, dict):
                 formatted_tools.append(tool)
             elif isinstance(tool, Function):
+                if not tool.tool_type:
+                    tool.tool_type = "custom"
                 formatted_tools.append(tool.to_dict())
     return formatted_tools
 
@@ -1060,12 +1063,18 @@ def format_tools(agent_tools: List[Union[Dict[str, Any], Toolkit, Function, Call
             if isinstance(tool, dict):
                 formatted_tools.append(tool)
             elif isinstance(tool, Toolkit):
+                category = get_tool_category(tool.name)
                 for _, f in tool.functions.items():
+                    if not f.tool_type:
+                        f.tool_type = category
                     formatted_tools.append(f.to_dict())
             elif isinstance(tool, Function):
+                if not tool.tool_type:
+                    tool.tool_type = "custom"
                 formatted_tools.append(tool.to_dict())
             elif callable(tool):
                 func = Function.from_callable(tool)
+                func.tool_type = func.tool_type or "custom"
                 formatted_tools.append(func.to_dict())
             else:
                 logger.warning(f"Unknown tool type: {type(tool)}")

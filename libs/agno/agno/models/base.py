@@ -2081,6 +2081,7 @@ class Model(ABC):
                 ToolExecution(
                     tool_call_id=function_call.call_id,
                     tool_name=function_call.function.name,
+                    tool_type=function_call.function.tool_type,
                     tool_args=function_call.arguments,
                 )
             ],
@@ -2218,6 +2219,7 @@ class Model(ABC):
                 ToolExecution(
                     tool_call_id=function_call_result.tool_call_id,
                     tool_name=function_call_result.tool_name,
+                    tool_type=function_call.function.tool_type,
                     tool_args=function_call_result.tool_args,
                     tool_call_error=function_call_result.tool_call_error,
                     result=str(function_call_result.content),
@@ -2265,6 +2267,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_confirmation=True,
                         approval_type=fc.function.approval_type,
@@ -2285,6 +2288,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         approval_type=fc.function.approval_type,
@@ -2324,6 +2328,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         user_input_schema=user_input_schema,
@@ -2353,6 +2358,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         user_feedback_schema=user_feedback_schema,
@@ -2365,6 +2371,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         external_execution_required=True,
                         approval_type=fc.function.approval_type,
@@ -2461,6 +2468,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_confirmation=True,
                         approval_type=fc.function.approval_type,
@@ -2480,6 +2488,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         approval_type=fc.function.approval_type,
@@ -2524,6 +2533,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         user_input_schema=user_input_schema,
@@ -2558,6 +2568,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         requires_user_input=True,
                         user_feedback_schema=user_feedback_schema,
@@ -2569,6 +2580,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                         external_execution_required=True,
                         approval_type=fc.function.approval_type,
@@ -2590,6 +2602,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=fc.call_id,
                         tool_name=fc.function.name,
+                        tool_type=fc.function.tool_type,
                         tool_args=fc.arguments,
                     )
                 ],
@@ -2879,6 +2892,7 @@ class Model(ABC):
                     ToolExecution(
                         tool_call_id=function_call_result.tool_call_id,
                         tool_name=function_call_result.tool_name,
+                        tool_type=function_call.function.tool_type,
                         tool_args=function_call_result.tool_args,
                         tool_call_error=function_call_result.tool_call_error,
                         result=str(function_call_result.content),

@@ -29,6 +29,7 @@ class ToolExecution:
 
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
+    tool_type: Optional[str] = None
     tool_args: Optional[Dict[str, Any]] = None
     tool_call_error: Optional[bool] = None
     result: Optional[str] = None
@@ -82,6 +83,7 @@ class ToolExecution:
         return cls(
             tool_call_id=data.get("tool_call_id"),
             tool_name=data.get("tool_name"),
+            tool_type=data.get("tool_type"),
             tool_args=data.get("tool_args"),
             tool_call_error=data.get("tool_call_error"),
             result=data.get("result"),

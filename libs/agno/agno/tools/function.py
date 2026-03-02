@@ -187,6 +187,11 @@ class Function(BaseModel):
     # Set via the @approval decorator, not directly via @tool().
     approval_type: Optional[str] = None
 
+    # Categorisation label for the tool, typically the Toolkit.name that owns
+    # this function (e.g. "shell_tools", "websearch").  For standalone callables
+    # it defaults to "custom"; for agent-internal helpers it is "builtin".
+    tool_type: Optional[str] = None
+
     # Caching configuration
     cache_results: bool = False
     cache_dir: Optional[str] = None
@@ -217,6 +222,7 @@ class Function(BaseModel):
                 "requires_confirmation",
                 "external_execution",
                 "approval_type",
+                "tool_type",
             },
         )
 
@@ -232,6 +238,7 @@ class Function(BaseModel):
             requires_confirmation=data.get("requires_confirmation", False),
             external_execution=data.get("external_execution", False),
             approval_type=data.get("approval_type"),
+            tool_type=data.get("tool_type"),
         )
 
     def model_copy(self, *, deep: bool = False) -> "Function":
