@@ -40,6 +40,8 @@ class FirecrawlTools(Toolkit):
         api_url (Optional[str]): The API URL to use for the Firecrawl app.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

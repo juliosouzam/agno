@@ -13,6 +13,8 @@ except ImportError:
 
 
 class CalComTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

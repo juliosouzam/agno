@@ -9,6 +9,8 @@ except ImportError:
 
 
 class AWSLambdaTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     def __init__(
         self,
         region_name: str = "us-east-1",

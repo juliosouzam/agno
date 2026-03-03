@@ -56,6 +56,8 @@ except ImportError:
 
 
 class DockerTools(Toolkit):
+    _tool_type: str = "local"
+
     def __init__(
         self,
         **kwargs,

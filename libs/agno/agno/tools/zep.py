@@ -34,6 +34,8 @@ DEFAULT_INSTRUCTIONS = dedent(
 
 
 class ZepTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         session_id: Optional[str] = None,
@@ -240,6 +242,8 @@ class ZepTools(Toolkit):
 
 
 class ZepAsyncTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         session_id: Optional[str] = None,

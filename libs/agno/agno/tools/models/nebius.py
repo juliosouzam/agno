@@ -12,6 +12,8 @@ from agno.utils.log import log_error, log_warning
 
 
 class NebiusTools(Toolkit):
+    _tool_type: str = "native_model_toolkit"
+
     """Tools for interacting with Nebius Token Factory's text-to-image API"""
 
     def __init__(

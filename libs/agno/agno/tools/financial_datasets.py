@@ -8,6 +8,8 @@ from agno.utils.log import log_error
 
 
 class FinancialDatasetsTools(Toolkit):
+    _tool_type: str = "finance"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

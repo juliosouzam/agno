@@ -8,6 +8,8 @@ from agno.utils.log import log_debug
 
 
 class WebsiteTools(Toolkit):
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         knowledge: Optional[Knowledge] = None,

@@ -7,6 +7,8 @@ from agno.tools import Toolkit
 class WebBrowserTools(Toolkit):
     """Tools for opening a page on the web browser"""
 
+    _tool_type: str = "web_scraping"
+
     def __init__(self, enable_open_page: bool = True, all: bool = False, **kwargs):
         tools: List[Any] = []
         if all or enable_open_page:

@@ -102,6 +102,8 @@ def authenticate(func):
 
 
 class GoogleDriveTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     # Default scopes for Google Drive API access
     DEFAULT_SCOPES = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.readonly"]
 

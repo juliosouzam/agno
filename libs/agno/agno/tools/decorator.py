@@ -74,6 +74,7 @@ def tool(
     pre_hook: Optional[Callable] = None,
     post_hook: Optional[Callable] = None,
     tool_hooks: Optional[List[Callable]] = None,
+    tool_type: Optional[str] = None,
     cache_results: bool = False,
     cache_dir: Optional[str] = None,
     cache_ttl: int = 3600,
@@ -103,6 +104,8 @@ def tool(*args, **kwargs) -> Union[Function, Callable[[F], Function]]:
         pre_hook: Optional[Callable] - Hook that runs before the function is executed.
         post_hook: Optional[Callable] - Hook that runs after the function is executed.
         tool_hooks: Optional[List[Callable]] - List of hooks that run before and after the function is executed.
+        tool_type: Optional[str] - Categorisation label for the tool (e.g., "search", "local", "custom").
+            If not set, defaults to the toolkit's category or "custom" for standalone tools.
         cache_results: bool - If True, enable caching of function results
         cache_dir: Optional[str] - Directory to store cache files
         cache_ttl: int - Time-to-live for cached results in seconds
@@ -141,6 +144,7 @@ def tool(*args, **kwargs) -> Union[Function, Callable[[F], Function]]:
             "pre_hook",
             "post_hook",
             "tool_hooks",
+            "tool_type",
             "cache_results",
             "cache_dir",
             "cache_ttl",

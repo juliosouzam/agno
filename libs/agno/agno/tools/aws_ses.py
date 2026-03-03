@@ -10,6 +10,8 @@ except ImportError:
 
 
 class AWSSESTool(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         sender_email: Optional[str] = None,

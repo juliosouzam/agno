@@ -14,6 +14,8 @@ except ImportError:
 
 
 class Mem0Tools(Toolkit):
+    _tool_type: str = "builtin"
+
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,

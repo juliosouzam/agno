@@ -23,6 +23,8 @@ class AskUserQuestion(BaseModel):
 
 
 class UserFeedbackTools(Toolkit):
+    _tool_type: str = "builtin"
+
     def __init__(
         self,
         instructions: Optional[str] = None,

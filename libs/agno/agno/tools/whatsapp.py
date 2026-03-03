@@ -10,6 +10,8 @@ from agno.utils.log import logger
 class WhatsAppTools(Toolkit):
     """WhatsApp Business API toolkit for sending messages."""
 
+    _tool_type: str = "social"
+
     base_url = "https://graph.facebook.com"
 
     def __init__(

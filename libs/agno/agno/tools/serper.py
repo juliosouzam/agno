@@ -9,6 +9,8 @@ from agno.utils.log import log_debug, log_error, log_warning
 
 
 class SerperTools(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

@@ -5,6 +5,8 @@ from agno.utils.log import log_info, logger
 
 
 class EmailTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         receiver_email: Optional[str] = None,

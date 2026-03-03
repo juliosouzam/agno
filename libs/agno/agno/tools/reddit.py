@@ -12,6 +12,8 @@ except ImportError:
 
 
 class RedditTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         reddit_instance: Optional[praw.Reddit] = None,

@@ -9,6 +9,8 @@ from agno.utils.log import log_debug
 
 
 class PubmedTools(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         email: str = "your_email@example.com",

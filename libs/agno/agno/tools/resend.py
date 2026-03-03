@@ -11,6 +11,8 @@ except ImportError:
 
 
 class ResendTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

@@ -12,6 +12,8 @@ except ImportError:
 
 
 class OpenBBTools(Toolkit):
+    _tool_type: str = "finance"
+
     def __init__(
         self,
         obb: Optional[Any] = None,

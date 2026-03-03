@@ -12,6 +12,8 @@ except ImportError:
 
 
 class BraveSearchTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     BraveSearch is a toolkit for searching Brave easily.
 

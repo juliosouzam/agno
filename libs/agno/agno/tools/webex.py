@@ -13,6 +13,8 @@ except ImportError:
 
 
 class WebexTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         enable_send_message: bool = True,

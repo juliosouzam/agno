@@ -23,6 +23,8 @@ except ImportError:
 
 
 class FileGenerationTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         enable_json_generation: bool = True,

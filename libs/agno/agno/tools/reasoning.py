@@ -8,6 +8,8 @@ from agno.utils.log import log_debug, log_error
 
 
 class ReasoningTools(Toolkit):
+    _tool_type: str = "builtin"
+
     def __init__(
         self,
         enable_think: bool = True,

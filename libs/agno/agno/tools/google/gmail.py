@@ -92,6 +92,8 @@ def validate_email(email: str) -> bool:
 
 
 class GmailTools(Toolkit):
+    _tool_type: str = "social"
+
     # Default scopes for Gmail API access
     DEFAULT_SCOPES = [
         "https://www.googleapis.com/auth/gmail.readonly",

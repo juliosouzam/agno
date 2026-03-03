@@ -9,6 +9,8 @@ from agno.utils.log import log_info
 
 
 class Searxng(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         host: str,

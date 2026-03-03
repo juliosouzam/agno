@@ -14,6 +14,8 @@ except ImportError:
 
 
 class ExaTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     ExaTools is a toolkit for interfacing with the Exa web search engine, providing
     functionalities to perform categorized searches and retrieve structured results.

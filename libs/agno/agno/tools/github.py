@@ -13,6 +13,8 @@ except ImportError:
 
 
 class GithubTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         access_token: Optional[str] = None,

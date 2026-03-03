@@ -11,6 +11,8 @@ except ImportError:
 
 
 class DuckDbTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         db_path: Optional[str] = None,

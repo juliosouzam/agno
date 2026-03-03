@@ -18,6 +18,8 @@ except (ModuleNotFoundError, ImportError):
 
 
 class GeminiTools(Toolkit):
+    _tool_type: str = "native_model_toolkit"
+
     """Tools for interacting with Google Gemini API"""
 
     def __init__(

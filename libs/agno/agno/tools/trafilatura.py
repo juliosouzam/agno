@@ -47,6 +47,8 @@ class TrafilaturaTools(Toolkit):
         max_known_urls (int): Maximum number of known URLs during crawling.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         output_format: str = "txt",

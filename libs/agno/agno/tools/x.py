@@ -12,6 +12,8 @@ except ImportError:
 
 
 class XTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         bearer_token: Optional[str] = None,

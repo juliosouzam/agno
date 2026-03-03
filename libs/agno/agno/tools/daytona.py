@@ -51,6 +51,8 @@ DEFAULT_INSTRUCTIONS = dedent(
 
 
 class DaytonaTools(Toolkit):
+    _tool_type: str = "sandbox"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

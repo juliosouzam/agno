@@ -12,6 +12,8 @@ except ImportError:
 
 
 class JiraTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         server_url: Optional[str] = None,

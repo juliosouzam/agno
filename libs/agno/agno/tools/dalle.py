@@ -15,6 +15,8 @@ except ImportError:
 
 
 class DalleTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         model: str = "dall-e-3",

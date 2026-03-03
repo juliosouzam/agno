@@ -9,6 +9,8 @@ from agno.utils.log import log_debug, log_info
 
 
 class WikipediaTools(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         knowledge: Optional[Knowledge] = None,

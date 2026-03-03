@@ -12,6 +12,8 @@ except ImportError:
 
 
 class OpenWeatherTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     """
     OpenWeather is a toolkit for accessing weather data from OpenWeatherMap API.
 

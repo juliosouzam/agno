@@ -13,6 +13,8 @@ except ImportError:
 
 
 class ZendeskTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     """
     A toolkit class for interacting with the Zendesk API to search articles.
     It requires authentication details and the company name to configure the API access.

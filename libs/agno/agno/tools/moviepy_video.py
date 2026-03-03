@@ -12,6 +12,8 @@ except ImportError:
 class MoviePyVideoTools(Toolkit):
     """Tool for processing video files, extracting audio, transcribing and adding captions"""
 
+    _tool_type: str = "media"
+
     def __init__(
         self,
         enable_process_video: bool = True,

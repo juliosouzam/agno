@@ -14,6 +14,8 @@ except ImportError:
 
 
 class SQLTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         db_url: Optional[str] = None,

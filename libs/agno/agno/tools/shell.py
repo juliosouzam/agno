@@ -6,6 +6,8 @@ from agno.utils.log import log_debug, log_info, logger
 
 
 class ShellTools(Toolkit):
+    _tool_type: str = "local"
+
     def __init__(
         self,
         base_dir: Optional[Union[Path, str]] = None,

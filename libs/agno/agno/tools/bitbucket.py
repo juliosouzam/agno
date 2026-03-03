@@ -10,6 +10,8 @@ from agno.utils.log import logger
 
 
 class BitbucketTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         server_url: str = "api.bitbucket.org",

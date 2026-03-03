@@ -15,6 +15,8 @@ except ImportError:
 
 
 class OxylabsTools(Toolkit):
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         username: Optional[str] = None,

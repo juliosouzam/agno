@@ -18,6 +18,8 @@ except ImportError:
 class OpenCVTools(Toolkit):
     """Tools for capturing images and videos from the webcam using OpenCV"""
 
+    _tool_type: str = "media"
+
     def __init__(
         self,
         show_preview=False,

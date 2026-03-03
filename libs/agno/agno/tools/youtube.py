@@ -15,6 +15,8 @@ except ImportError:
 
 
 class YouTubeTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     def __init__(
         self,
         enable_get_video_captions: bool = True,

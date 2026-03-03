@@ -25,6 +25,8 @@ class SpiderTools(Toolkit):
         optional_params (Optional[dict]): Additional parameters for operations.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         max_results: Optional[int] = None,

@@ -16,6 +16,8 @@ except ImportError:
 
 
 class BaiduSearchTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     BaiduSearch is a toolkit for searching Baidu easily.
 

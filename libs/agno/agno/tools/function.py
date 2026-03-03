@@ -188,8 +188,7 @@ class Function(BaseModel):
     approval_type: Optional[str] = None
 
     # Categorisation label for the tool, typically the Toolkit.name that owns
-    # this function (e.g. "shell_tools", "websearch").  For standalone callables
-    # it defaults to "custom"; for agent-internal helpers it is "builtin".
+    # this function (e.g. "shell_tools", "websearch").  Serializes as "" when not set.
     tool_type: Optional[str] = None
 
     # Caching configuration

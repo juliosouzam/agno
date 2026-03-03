@@ -11,6 +11,8 @@ except ImportError:
 
 
 class Crawl4aiTools(Toolkit):
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         max_length: Optional[int] = 5000,

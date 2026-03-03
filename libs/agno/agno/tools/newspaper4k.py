@@ -19,6 +19,8 @@ class Newspaper4kTools(Toolkit):
         article_length (Optional[int]): The length of the article to read.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         include_summary: bool = False,

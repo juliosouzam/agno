@@ -20,6 +20,8 @@ except ImportError:
 
 
 class FalTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

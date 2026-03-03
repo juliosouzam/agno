@@ -6,6 +6,8 @@ from agno.utils.log import log_debug, log_info, logger
 
 
 class AirflowTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         dags_dir: Optional[Union[Path, str]] = None,

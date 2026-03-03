@@ -13,6 +13,8 @@ except ImportError:
 
 
 class TwilioTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         account_sid: Optional[str] = None,

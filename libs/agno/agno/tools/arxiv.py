@@ -17,6 +17,8 @@ except ImportError:
 
 
 class ArxivTools(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         enable_search_arxiv: bool = True,

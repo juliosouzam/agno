@@ -10,6 +10,8 @@ except ImportError:
 
 
 class PandasTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         enable_create_pandas_dataframe: bool = True,

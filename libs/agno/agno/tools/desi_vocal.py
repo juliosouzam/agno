@@ -13,6 +13,8 @@ from agno.utils.log import logger
 
 
 class DesiVocalTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

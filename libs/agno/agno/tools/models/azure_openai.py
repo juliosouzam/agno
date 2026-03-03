@@ -12,6 +12,8 @@ from agno.utils.log import log_debug, logger
 
 
 class AzureOpenAITools(Toolkit):
+    _tool_type: str = "native_model_toolkit"
+
     """Toolkit for Azure OpenAI services.
 
     Currently supports:

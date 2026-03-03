@@ -39,6 +39,8 @@ class OpenAITools(Toolkit):
         image_style (str, optional): Style setting for image generation.
     """
 
+    _tool_type: str = "media"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

@@ -11,6 +11,8 @@ except ImportError:
 
 
 class YFinanceTools(Toolkit):
+    _tool_type: str = "finance"
+
     """
     YFinanceTools is a toolkit for getting financial data from Yahoo Finance.
 

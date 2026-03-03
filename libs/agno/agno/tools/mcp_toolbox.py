@@ -28,6 +28,8 @@ class MCPToolbox(MCPTools, metaclass=MCPToolsMeta):
     receive only the specific tools they need while maintaining full MCP execution capabilities.
     """
 
+    _tool_type: str = "data"
+
     def __init__(
         self,
         url: str,

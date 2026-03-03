@@ -14,6 +14,8 @@ except (ModuleNotFoundError, ImportError):
 
 
 class ConfluenceTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         username: Optional[str] = None,

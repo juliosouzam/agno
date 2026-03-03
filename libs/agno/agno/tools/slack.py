@@ -18,6 +18,8 @@ except ImportError:
 
 
 class SlackTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         token: Optional[str] = None,

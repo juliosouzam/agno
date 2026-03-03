@@ -8,6 +8,8 @@ from agno.utils.log import log_debug, log_info, logger
 
 
 class CsvTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         csvs: Optional[List[Union[str, Path]]] = None,

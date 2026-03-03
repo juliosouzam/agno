@@ -40,6 +40,8 @@ class UnsplashTools(Toolkit):
         ```
     """
 
+    _tool_type: str = "media"
+
     def __init__(
         self,
         access_key: Optional[str] = None,

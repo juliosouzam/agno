@@ -12,6 +12,8 @@ except ImportError:
 
 
 class TrelloTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

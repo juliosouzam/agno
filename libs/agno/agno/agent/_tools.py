@@ -28,7 +28,6 @@ from agno.run.messages import RunMessages
 from agno.session import AgentSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
-from agno.tools.toolkit import get_tool_category
 from agno.utils.agent import (
     collect_joint_audios,
     collect_joint_files,
@@ -357,7 +356,7 @@ def parse_tools(
                 _function_names.append(name)
                 _func = _func.model_copy(deep=True)
                 _func._agent = agent
-                _func.tool_type = _func.tool_type or get_tool_category(tool.name)
+                _func.tool_type = _func.tool_type or tool._tool_type
                 # Respect the function's explicit strict setting if set
                 effective_strict = strict if _func.strict is None else _func.strict
                 _func.process_entrypoint(strict=effective_strict)
@@ -378,7 +377,6 @@ def parse_tools(
             _function_names.append(tool.name)
 
             tool = tool.model_copy(deep=True)
-            tool.tool_type = tool.tool_type or "custom"
             # Respect the function's explicit strict setting if set
             effective_strict = strict if tool.strict is None else tool.strict
             tool.process_entrypoint(strict=effective_strict)
@@ -404,7 +402,6 @@ def parse_tools(
                 _function_names.append(function_name)
 
                 _func = Function.from_callable(tool, strict=strict)
-                _func.tool_type = _func.tool_type or "custom"
                 # Detect @approval sentinel on raw callable
                 _approval_type = getattr(tool, "_agno_approval_type", None)
                 if _approval_type is not None:

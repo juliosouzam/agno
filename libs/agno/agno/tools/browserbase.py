@@ -13,6 +13,8 @@ except ImportError:
 
 
 class BrowserbaseTools(Toolkit):
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

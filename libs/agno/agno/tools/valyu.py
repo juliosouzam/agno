@@ -12,6 +12,8 @@ except ImportError:
 
 
 class ValyuTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     Valyu is a toolkit for academic and web search capabilities.
 

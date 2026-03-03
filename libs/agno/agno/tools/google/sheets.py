@@ -79,6 +79,8 @@ def authenticate(func):
 
 
 class GoogleSheetsTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     # Default scopes for Google Sheets API access
     DEFAULT_SCOPES = {
         "read": "https://www.googleapis.com/auth/spreadsheets.readonly",

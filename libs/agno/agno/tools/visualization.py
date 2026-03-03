@@ -7,6 +7,8 @@ from agno.utils.log import log_info, logger
 
 
 class VisualizationTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         output_dir: str = "charts",

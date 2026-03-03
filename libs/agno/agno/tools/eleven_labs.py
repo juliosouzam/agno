@@ -32,6 +32,8 @@ ElevenLabsAudioOutputFormat = Literal[
 
 
 class ElevenLabsTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         voice_id: str = "JBFqnCBsd6RMkjVDRZzb",

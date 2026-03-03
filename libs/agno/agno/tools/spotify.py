@@ -20,6 +20,8 @@ from agno.utils.log import log_debug
 
 
 class SpotifyTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     """
     Spotify toolkit for searching songs and managing playlists.
 

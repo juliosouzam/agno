@@ -12,6 +12,8 @@ except ImportError:
 
 
 class NotionTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     """
     Notion toolkit for creating and managing Notion pages.
 

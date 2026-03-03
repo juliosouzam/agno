@@ -16,6 +16,8 @@ sgai_logger.set_logging(level="INFO")
 
 
 class ScrapeGraphTools(Toolkit):
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

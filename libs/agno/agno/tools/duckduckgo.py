@@ -4,6 +4,8 @@ from agno.tools.websearch import WebSearchTools
 
 
 class DuckDuckGoTools(WebSearchTools):
+    _tool_type: str = "search"
+
     """
     DuckDuckGoTools is a convenience wrapper around WebSearchTools with the backend
     defaulting to "duckduckgo".

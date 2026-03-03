@@ -33,6 +33,8 @@ class BrightDataTools(Toolkit):
         timeout (int): Timeout in seconds for operations. Default is 600.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

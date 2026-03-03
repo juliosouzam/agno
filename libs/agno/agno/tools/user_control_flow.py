@@ -5,6 +5,8 @@ from agno.tools import Toolkit
 
 
 class UserControlFlowTools(Toolkit):
+    _tool_type: str = "builtin"
+
     def __init__(
         self,
         instructions: Optional[str] = None,

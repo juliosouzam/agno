@@ -12,6 +12,8 @@ except ImportError:
 
 
 class SerpApiTools(Toolkit):
+    _tool_type: str = "search"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

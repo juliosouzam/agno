@@ -69,6 +69,8 @@ class ToolExecution:
 
     def to_dict(self) -> Dict[str, Any]:
         _dict = asdict(self)
+        # Ensure tool_type is always a string (empty string if None)
+        _dict["tool_type"] = self.tool_type or ""
         if self.metrics is not None:
             _dict["metrics"] = self.metrics.to_dict()
 
@@ -85,7 +87,7 @@ class ToolExecution:
         return cls(
             tool_call_id=data.get("tool_call_id"),
             tool_name=data.get("tool_name"),
-            tool_type=data.get("tool_type"),
+            tool_type=data.get("tool_type") or None,
             tool_args=data.get("tool_args"),
             tool_call_error=data.get("tool_call_error"),
             result=data.get("result"),

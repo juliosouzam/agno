@@ -14,6 +14,8 @@ class NewspaperTools(Toolkit):
         get_article_text (bool): Whether to get the text of an article from a URL.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         enable_get_article_text: bool = True,

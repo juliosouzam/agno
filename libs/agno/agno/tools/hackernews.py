@@ -8,6 +8,8 @@ from agno.utils.log import log_debug, logger
 
 
 class HackerNewsTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     HackerNews is a tool for getting top stories from Hacker News.
 

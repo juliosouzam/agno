@@ -12,6 +12,8 @@ except ImportError:
 
 
 class TodoistTools(Toolkit):
+    _tool_type: str = "dev_tools"
+
     """A toolkit for interacting with Todoist tasks and projects."""
 
     def __init__(

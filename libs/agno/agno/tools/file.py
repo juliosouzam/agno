@@ -55,6 +55,8 @@ def _extract_snippet(content: str, query: str, context_chars: int = 200) -> str:
 
 
 class FileTools(Toolkit):
+    _tool_type: str = "local"
+
     def __init__(
         self,
         base_dir: Optional[Path] = None,

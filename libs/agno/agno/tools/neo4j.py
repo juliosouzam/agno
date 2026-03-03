@@ -11,6 +11,8 @@ from agno.utils.log import log_debug, logger
 
 
 class Neo4jTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         uri: Optional[str] = None,

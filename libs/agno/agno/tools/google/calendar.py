@@ -42,6 +42,8 @@ def authenticate(func):
 
 
 class GoogleCalendarTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     # Default scopes for Google Calendar API access
     DEFAULT_SCOPES = {
         "read": "https://www.googleapis.com/auth/calendar.readonly",

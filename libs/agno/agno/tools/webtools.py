@@ -9,6 +9,8 @@ class WebTools(Toolkit):
     A toolkit for working with web-related tools.
     """
 
+    _tool_type: str = "web_scraping"
+
     def __init__(
         self,
         retries: int = 3,

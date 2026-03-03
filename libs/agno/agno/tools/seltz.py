@@ -35,6 +35,8 @@ class SeltzTools(Toolkit):
         all: Enable all tools. Overrides individual flags when True. Defaults to False.
     """
 
+    _tool_type: str = "media"
+
     def __init__(
         self,
         api_key: Optional[str] = None,

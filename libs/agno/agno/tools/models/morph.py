@@ -13,6 +13,8 @@ except ImportError:
 
 
 class MorphTools(Toolkit):
+    _tool_type: str = "native_model_toolkit"
+
     """Tools for interacting with Morph's Fast Apply API for code editing"""
 
     def __init__(

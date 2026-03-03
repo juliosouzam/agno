@@ -11,6 +11,8 @@ from agno.utils.log import logger
 
 
 class DiscordTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         bot_token: Optional[str] = None,

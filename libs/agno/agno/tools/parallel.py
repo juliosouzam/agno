@@ -22,6 +22,8 @@ class CustomJSONEncoder(json.JSONEncoder):
 
 
 class ParallelTools(Toolkit):
+    _tool_type: str = "builtin"
+
     """
     ParallelTools provides access to Parallel's web search and extraction APIs.
 

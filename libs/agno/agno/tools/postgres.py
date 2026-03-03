@@ -27,6 +27,7 @@ class PostgresTools(Toolkit):
         table_schema (str): Default schema for table operations. Default is "public".
     """
 
+    _tool_type: str = "data"
     _requires_connect: bool = True
 
     def __init__(

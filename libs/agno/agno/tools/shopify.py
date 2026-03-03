@@ -25,6 +25,8 @@ from agno.utils.log import log_debug
 
 
 class ShopifyTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     """
     Shopify toolkit for analyzing sales data and product performance.
 

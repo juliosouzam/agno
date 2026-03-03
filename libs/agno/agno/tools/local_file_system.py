@@ -7,6 +7,8 @@ from agno.utils.log import log_debug, logger
 
 
 class LocalFileSystemTools(Toolkit):
+    _tool_type: str = "local"
+
     def __init__(
         self,
         target_directory: Optional[str] = None,

@@ -21,6 +21,8 @@ def _clean_sql(sql: str) -> str:
 
 
 class GoogleBigQueryTools(Toolkit):
+    _tool_type: str = "data"
+
     def __init__(
         self,
         dataset: str,

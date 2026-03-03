@@ -11,6 +11,8 @@ from agno.utils.log import log_debug, log_info, logger
 
 
 class ZoomTools(Toolkit):
+    _tool_type: str = "social"
+
     def __init__(
         self,
         account_id: Optional[str] = None,

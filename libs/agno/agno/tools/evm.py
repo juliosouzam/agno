@@ -17,6 +17,8 @@ except ImportError:
 
 
 class EvmTools(Toolkit):
+    _tool_type: str = "finance"
+
     def __init__(
         self,
         private_key: Optional[str] = None,

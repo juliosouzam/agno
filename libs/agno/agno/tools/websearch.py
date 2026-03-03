@@ -14,6 +14,8 @@ VALID_TIMELIMITS = frozenset({"d", "w", "m", "y"})
 
 
 class WebSearchTools(Toolkit):
+    _tool_type: str = "search"
+
     """
     Toolkit for searching the web. Uses the meta-search library DDGS.
     Multiple search backends (e.g. google, bing, duckduckgo) are available.

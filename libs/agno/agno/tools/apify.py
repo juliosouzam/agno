@@ -15,6 +15,8 @@ except ImportError:
 
 
 class ApifyTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     def __init__(self, actors: Optional[Union[str, List[str]]] = None, apify_api_token: Optional[str] = None):
         """Initialize ApifyTools with specific Actors.
 

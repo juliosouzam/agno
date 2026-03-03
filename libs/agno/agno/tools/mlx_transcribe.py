@@ -29,6 +29,8 @@ except ImportError:
 
 
 class MLXTranscribeTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         base_dir: Optional[Path] = None,

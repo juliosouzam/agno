@@ -16,6 +16,8 @@ except (ModuleNotFoundError, ImportError):
 
 
 class GroqTools(Toolkit):
+    _tool_type: str = "native_model_toolkit"
+
     """Tools for interacting with Groq API"""
 
     def __init__(

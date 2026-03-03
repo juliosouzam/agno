@@ -26,6 +26,8 @@ except ImportError:
 
 
 class GoogleMapTools(Toolkit):
+    _tool_type: str = "cloud_services"
+
     def __init__(
         self,
         key: Optional[str] = None,

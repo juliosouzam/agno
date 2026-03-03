@@ -8,6 +8,8 @@ from agno.utils.log import log_debug, logger
 
 
 class TelegramTools(Toolkit):
+    _tool_type: str = "social"
+
     base_url = "https://api.telegram.org"
 
     def __init__(

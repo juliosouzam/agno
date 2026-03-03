@@ -36,6 +36,8 @@ MODELS_LAB_FETCH_URLS = {
 
 
 class ModelsLabTools(Toolkit):
+    _tool_type: str = "media"
+
     def __init__(
         self,
         api_key: Optional[str] = None,
