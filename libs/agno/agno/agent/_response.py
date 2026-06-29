@@ -23,6 +23,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from agno.agent.agent import Agent
 
+from agno.exceptions import RunCancelledException
 from agno.media import Audio
 from agno.models.base import Model
 from agno.models.fallback import acall_model_stream_with_fallback, call_model_stream_with_fallback
@@ -1005,12 +1006,21 @@ def update_run_response(
     if model_response.provider_data is not None:
         run_response.model_provider_data = model_response.provider_data
 
-    # Update the run_response tools with the model response tool_executions
+    # Update the run_response tools with the model response tool_executions.
+    # Dedupe by tool_call_id: with checkpoint="tool-batch" the per-batch callback
+    # already wrote tools into run_response, so naive extend would duplicate
+    # every execution. Replace existing entries (in place, preserving order)
+    # and append only genuinely new ones.
     if model_response.tool_executions is not None:
         if run_response.tools is None:
-            run_response.tools = model_response.tool_executions
+            run_response.tools = list(model_response.tool_executions)
         else:
-            run_response.tools.extend(model_response.tool_executions)
+            existing_by_id = {t.tool_call_id: i for i, t in enumerate(run_response.tools) if t.tool_call_id}
+            for tool in model_response.tool_executions:
+                if tool.tool_call_id and tool.tool_call_id in existing_by_id:
+                    run_response.tools[existing_by_id[tool.tool_call_id]] = tool
+                else:
+                    run_response.tools.append(tool)
 
         # For Reasoning/Thinking/Knowledge Tools update reasoning_content in RunOutput
         for tool_call in model_response.tool_executions:
@@ -1070,6 +1080,8 @@ def handle_model_response_stream(
         log_debug("Response model set, model response is not streamed.")
         stream_model_response = False
 
+    from agno.agent._run import build_after_tool_results_callback
+
     for model_response_event in call_model_stream_with_fallback(
         agent.model,
         agent.fallback_config,
@@ -1082,6 +1094,13 @@ def handle_model_response_stream(
         run_response=run_response,
         send_media_to_model=agent.send_media_to_model,
         compression_manager=agent.compression_manager if agent.compress_tool_results else None,
+        after_tool_results=build_after_tool_results_callback(
+            agent,
+            run_response=run_response,
+            session=session,
+            run_messages=run_messages,
+            run_context=run_context,
+        ),
     ):
         # Handle LLM request events and compression events from ModelResponse
         if isinstance(model_response_event, ModelResponse):
@@ -1221,6 +1240,8 @@ async def ahandle_model_response_stream(
         log_debug("Response model set, model response is not streamed.")
         stream_model_response = False
 
+    from agno.agent._run import abuild_after_tool_results_callback
+
     model_response_stream = acall_model_stream_with_fallback(
         agent.model,
         agent.fallback_config,
@@ -1233,6 +1254,13 @@ async def ahandle_model_response_stream(
         run_response=run_response,
         send_media_to_model=agent.send_media_to_model,
         compression_manager=agent.compression_manager if agent.compress_tool_results else None,
+        after_tool_results=abuild_after_tool_results_callback(
+            agent,
+            run_response=run_response,
+            session=session,
+            run_messages=run_messages,
+            run_context=run_context,
+        ),
     )  # type: ignore
 
     async for model_response_event in model_response_stream:  # type: ignore
@@ -1725,10 +1753,15 @@ def _get_followups_response_format(model: Model) -> Optional[Union[Dict, Type[Ba
 
 
 def _build_followup_messages(
-    response_content: Any, num_suggestions: int, user_message: Optional[str] = None
+    response_content: Any,
+    num_suggestions: int,
+    user_message: Optional[str] = None,
+    response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
 ) -> List[Message]:
     """Build the messages for the followups model call."""
     import json
+
+    from agno.utils.prompts import get_json_output_prompt
 
     system_prompt = (
         "Based on the user's message and the assistant's response below, generate follow-up suggestions. "
@@ -1736,13 +1769,18 @@ def _build_followup_messages(
         "Cover different angles: dig deeper, practical next step, or alternative perspective."
     )
 
+    # json_object-only providers (e.g. DeepSeek) require the word "json" in the prompt
+    # and an example of the expected shape when response_format={"type": "json_object"}
+    if isinstance(response_format, dict) and response_format.get("type") == "json_object":
+        system_prompt += "\n\n" + get_json_output_prompt(Followups)  # type: ignore
+
     # Stringify content if needed
     if isinstance(response_content, str):
         content_str = response_content
     elif isinstance(response_content, BaseModel):
         content_str = response_content.model_dump_json()
     elif isinstance(response_content, dict):
-        content_str = json.dumps(response_content)
+        content_str = json.dumps(response_content, ensure_ascii=False)
     else:
         content_str = str(response_content)
 
@@ -1810,7 +1848,9 @@ def generate_followups(
 
     response_format = _get_followups_response_format(model)
     user_message = run_response.input.input_content_string() if run_response.input else None
-    messages = _build_followup_messages(run_response.content, agent.num_followups, user_message=user_message)
+    messages = _build_followup_messages(
+        run_response.content, agent.num_followups, user_message=user_message, response_format=response_format
+    )
 
     try:
         model_response: ModelResponse = model.response(
@@ -1819,6 +1859,8 @@ def generate_followups(
         )
         run_response.followups = _parse_followups_response(model_response)
         _accumulate_followups_metrics(model_response, model, run_response)
+    except RunCancelledException:
+        raise
     except Exception as e:
         log_warning(f"Error generating followups: {str(e)}")
 
@@ -1837,7 +1879,9 @@ async def agenerate_followups(
 
     response_format = _get_followups_response_format(model)
     user_message = run_response.input.input_content_string() if run_response.input else None
-    messages = _build_followup_messages(run_response.content, agent.num_followups, user_message=user_message)
+    messages = _build_followup_messages(
+        run_response.content, agent.num_followups, user_message=user_message, response_format=response_format
+    )
 
     try:
         model_response: ModelResponse = await model.aresponse(
@@ -1846,6 +1890,8 @@ async def agenerate_followups(
         )
         run_response.followups = _parse_followups_response(model_response)
         _accumulate_followups_metrics(model_response, model, run_response)
+    except RunCancelledException:
+        raise
     except Exception as e:
         log_warning(f"Error generating followups: {str(e)}")
 
@@ -1873,7 +1919,9 @@ def generate_followups_stream(
 
     response_format = _get_followups_response_format(model)
     user_message = run_response.input.input_content_string() if run_response.input else None
-    messages = _build_followup_messages(run_response.content, agent.num_followups, user_message=user_message)
+    messages = _build_followup_messages(
+        run_response.content, agent.num_followups, user_message=user_message, response_format=response_format
+    )
 
     try:
         model_response: ModelResponse = model.response(
@@ -1882,6 +1930,8 @@ def generate_followups_stream(
         )
         run_response.followups = _parse_followups_response(model_response)
         _accumulate_followups_metrics(model_response, model, run_response)
+    except RunCancelledException:
+        raise
     except Exception as e:
         log_warning(f"Error generating followups: {str(e)}")
 
@@ -1917,7 +1967,9 @@ async def agenerate_followups_stream(
 
     response_format = _get_followups_response_format(model)
     user_message = run_response.input.input_content_string() if run_response.input else None
-    messages = _build_followup_messages(run_response.content, agent.num_followups, user_message=user_message)
+    messages = _build_followup_messages(
+        run_response.content, agent.num_followups, user_message=user_message, response_format=response_format
+    )
 
     try:
         model_response: ModelResponse = await model.aresponse(
@@ -1926,6 +1978,8 @@ async def agenerate_followups_stream(
         )
         run_response.followups = _parse_followups_response(model_response)
         _accumulate_followups_metrics(model_response, model, run_response)
+    except RunCancelledException:
+        raise
     except Exception as e:
         log_warning(f"Error generating followups: {str(e)}")
 
