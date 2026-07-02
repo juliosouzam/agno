@@ -12,6 +12,7 @@ from agno.db.postgres import PostgresDb
 from agno.knowledge.knowledge import Knowledge
 from agno.models.openai import OpenAIChat
 from agno.os import AgentOS
+from agno.os.config import AgentOSConfig, Manifest
 from agno.team import Team
 from agno.tools.mcp import MCPTools
 from agno.tools.websearch import WebSearchTools
@@ -70,6 +71,20 @@ research_agent = Agent(
     update_memory_on_run=True,
 )
 
+# A new agent with a model-facing description (sent to the LLM) and, via the
+# manifest below, UI labels for the frontend.
+weather_agent = Agent(
+    name="Weather Agent",
+    role="Weather agent",
+    id="weather_agent",
+    description="An agent that reports current weather and forecasts.",
+    model=OpenAIChat(id="gpt-5.2"),
+    instructions=["You are a weather agent"],
+    tools=[WebSearchTools()],
+    db=db,
+    update_memory_on_run=True,
+)
+
 # Create a team
 research_team = Team(
     name="Research Team",
@@ -89,8 +104,24 @@ research_team = Team(
 # Create the AgentOS
 agent_os = AgentOS(
     id="agentos-demo",
-    agents=[agno_agent],
+    agents=[agno_agent, weather_agent],
     teams=[research_team],
+    # Per-entity UI metadata for the frontend, keyed by agent/team id. Served at
+    # GET /config -> config.manifest. This is UI-only text (home/landing card,
+    # labels, quick prompts) and is NOT sent to the model - that's the description
+    # passed to the entity itself.
+    config=AgentOSConfig(
+        manifest={
+            "weather_agent": Manifest(
+                description="Get current conditions and forecasts for any city.",
+                labels=["weather", "utility"],
+            ),
+            "research_team": Manifest(
+                description="A team that researches the web and summarizes findings.",
+                labels=["research"],
+            ),
+        }
+    ),
 )
 app = agent_os.get_app()
 
