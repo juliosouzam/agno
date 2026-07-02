@@ -186,6 +186,66 @@ def create_infra_from_template(
     return None
 
 
+def install_setup_packages() -> None:
+    """Install the packages required to create and run an AgentOS, if missing.
+
+    Installs into the environment running this CLI (sys.executable) so the
+    packages land in the same virtual environment as agno-infra.
+    """
+    import importlib
+    import subprocess
+    import sys
+    from importlib.util import find_spec
+
+    packages_to_install: List[str] = []
+    if find_spec("agno.agent") is None:
+        packages_to_install.append("agno")
+    if find_spec("docker") is None:
+        packages_to_install.append("agno-infra[docker]")
+
+    if not packages_to_install:
+        logger.debug("All required packages are installed")
+        return
+
+    print_info("Installing required packages: {}".format(", ".join(packages_to_install)))
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", *packages_to_install], check=True)
+    except subprocess.CalledProcessError:
+        log_warning("Could not install packages automatically. Please install them manually:")
+        log_warning("  pip install -U agno 'agno-infra[docker]'")
+        return
+    importlib.invalidate_caches()
+
+
+def setup_agentos(
+    name: Optional[str] = None,
+    template: Optional[str] = None,
+    url: Optional[str] = None,
+    auto_confirm: bool = False,
+) -> None:
+    """Set up a new AgentOS in a single command. This is called from `ag setup`.
+
+    Steps:
+    1. Install missing packages (agno, docker support) in the current environment
+    2. Create a new AgentOS codebase from a starter template (same as `ag infra create`)
+    3. Start the AgentOS infrastructure (same as `ag infra up`)
+    """
+    print_heading("Setting up your AgentOS\n")
+
+    install_setup_packages()
+
+    infra_config: Optional[InfraConfig] = create_infra_from_template(name=name, template=template, url=url)
+    if infra_config is None:
+        logger.error("AgentOS codebase creation failed, please check the logs above and try again")
+        return
+
+    start_infra(infra_config=infra_config, auto_confirm=auto_confirm)
+
+    print_info("\n--------------------------------")
+    print_info("Setup complete. Connect to your AgentOS on https://os.agno.com")
+    print_info("--------------------------------")
+
+
 def setup_infra_config_from_dir(infra_root_path: Path) -> Optional[InfraConfig]:
     from agno.cli.operator import initialize_agno_cli
     from agno.infra.helpers import get_infra_dir_path
