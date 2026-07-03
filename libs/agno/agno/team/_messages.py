@@ -52,33 +52,14 @@ from agno.utils.team import (
 from agno.utils.timer import Timer
 
 
-def _get_tool_names(
-    member: Any, async_mode: bool = False, parent_run_context: Optional["RunContext"] = None
-) -> List[str]:
+def _get_tool_names(member: Any, async_mode: bool = False) -> List[str]:
     """Extract tool names from a member's tools list."""
-    from agno.utils.callables import is_callable_factory
-
     tool_names: List[str] = []
-    tools_list: Optional[List[Any]] = None
-    if isinstance(member.tools, list):
-        tools_list = member.tools
-    # Resolve callable-factory tools so the leader's system prompt reflects the member's real tool set.
-    # Side effect: populates member._callable_tools_cache; the subsequent run path reuses it.
-    elif member.tools is not None and parent_run_context is not None and is_callable_factory(member.tools):
-        from dataclasses import replace
-
-        from agno.utils.callables import resolve_callable_tools
-
-        member_rc = replace(parent_run_context, tools=None, knowledge=None, members=None)
-        try:
-            resolve_callable_tools(member, member_rc)
-            tools_list = member_rc.tools
-        except Exception as e:
-            log_warning(f"Could not resolve member tools for system message: {e}")
-
-    if not tools_list:
+    # Only static tool lists are introspected here; callable-factory tools are left
+    # unresolved to avoid invoking the factory while building the leader's prompt.
+    if member.tools is None or not isinstance(member.tools, list):
         return tool_names
-    for _tool in tools_list:
+    for _tool in member.tools:
         if isinstance(_tool, Toolkit):
             toolkit_functions = _tool.get_async_functions() if async_mode else _tool.get_functions()
             for _func in toolkit_functions.values():
@@ -116,7 +97,7 @@ def get_members_system_message_content(
                 content += f"{pad}  Description: {member.description}\n"
             if member.members is not None:
                 # Recurse in a sub-team-scoped run_context so the sub-team resolves its own members.
-                subteam_run_context = _build_subteam_run_context(member, run_context)
+                subteam_run_context = _build_subteam_run_context(member, run_context, async_mode=async_mode)
                 content += member.get_members_system_message_content(
                     indent=indent + 2, run_context=subteam_run_context, async_mode=async_mode
                 )
@@ -128,7 +109,7 @@ def get_members_system_message_content(
             if member.description is not None:
                 content += f"{pad}  Description: {member.description}\n"
             if team.add_member_tools_to_context:
-                tool_names = _get_tool_names(member, async_mode=async_mode, parent_run_context=run_context)
+                tool_names = _get_tool_names(member, async_mode=async_mode)
                 if tool_names:
                     content += f"{pad}  Tools: {', '.join(tool_names)}\n"
             content += f"{pad}</member>\n"

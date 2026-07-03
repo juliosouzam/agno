@@ -53,6 +53,15 @@ from agno.utils.team import (
 )
 
 
+def _resolve_callable_resources(team: "Team", run_context: "RunContext") -> None:
+    """Resolve callable factories (tools, knowledge, members)."""
+    from agno.utils.callables import resolve_callable_knowledge, resolve_callable_members, resolve_callable_tools
+
+    resolve_callable_tools(team, run_context)
+    resolve_callable_knowledge(team, run_context)
+    resolve_callable_members(team, run_context)
+
+
 async def _aresolve_callable_resources(team: "Team", run_context: "RunContext") -> None:
     """Resolve callable factories (tools, knowledge, members)."""
     from agno.utils.callables import aresolve_callable_knowledge, aresolve_callable_members, aresolve_callable_tools
@@ -517,7 +526,9 @@ def _determine_team_member_interactions(
     return team_member_interactions_str
 
 
-def _build_subteam_run_context(subteam: "Team", parent_run_context: Optional["RunContext"]) -> Optional["RunContext"]:
+def _build_subteam_run_context(
+    subteam: "Team", parent_run_context: Optional["RunContext"], async_mode: bool = False
+) -> Optional["RunContext"]:
     """Return a sub-team-scoped RunContext with the sub-team's own members factory resolved."""
     if parent_run_context is None:
         return None
@@ -526,7 +537,9 @@ def _build_subteam_run_context(subteam: "Team", parent_run_context: Optional["Ru
     from agno.utils.callables import resolve_callable_members
 
     subteam_run_context = replace(parent_run_context, members=None, tools=None, knowledge=None)
-    resolve_callable_members(subteam, subteam_run_context)
+    # In sync mode, resolve the sub-team's members factory now
+    if not async_mode:
+        resolve_callable_members(subteam, subteam_run_context)
     return subteam_run_context
 
 

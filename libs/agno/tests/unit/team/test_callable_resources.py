@@ -982,3 +982,33 @@ class TestNestedFactoryMembers:
         assert result is not None
         _idx, member = result
         assert member is static_child
+
+
+class TestNestedAsyncFactoryMembersInSyncContext:
+    """A sub-team with an async members factory must not crash async system-message building.
+    In async mode the sub-team's members are left unresolved (skipped like the sync resolver
+    in _determine_tools_for_model); the sub-team resolves them when it runs.
+    """
+
+    def _build(self):
+        from agno.team.team import Team
+
+        child = Agent(name="async-nested-child")
+
+        async def subteam_members_factory(team):
+            return [child]
+
+        subteam = Team(name="async-subteam", members=subteam_members_factory)
+        parent = Team(name="async-parent", members=[subteam])
+        return parent, subteam, child
+
+    def test_system_message_does_not_crash_for_async_subteam_factory(self):
+        from agno.team._messages import get_members_system_message_content
+
+        parent, _subteam, _child = self._build()
+
+        rc = _make_run_context(user_id="u1")
+
+        # async_mode=True mirrors aget_system_message; must not raise despite the async factory.
+        content = get_members_system_message_content(parent, run_context=rc, async_mode=True)
+        assert "async-subteam" in content.lower()
