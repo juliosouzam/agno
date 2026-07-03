@@ -50,5 +50,5 @@ agent_all = Agent(
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     agent.print_response(
-        "What are the latest developments in AI agents?", markdown=True
+        "What are the latest developments in AI agents?", markdown=True, stream=True
     )
