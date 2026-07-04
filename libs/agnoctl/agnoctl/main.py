@@ -16,7 +16,7 @@ PLUGIN_GROUP = "agnoctl.plugins"
 
 app = typer.Typer(
     name="agno",
-    help="The Agno CLI: connect and operate AgentOS, built for humans and coding agents.",
+    help="Agno CLI: create and manage AgentOS's, built for humans and coding agents.",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_show_locals=False,
