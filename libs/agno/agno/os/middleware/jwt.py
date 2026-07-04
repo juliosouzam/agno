@@ -15,14 +15,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from agno.os.auth import INTERNAL_SERVICE_SCOPES, build_insufficient_permissions_detail
 from agno.os.scopes import (
     AgentOSScope,
-    get_accessible_resource_ids,
+    check_route_scopes,
     get_default_scope_mappings,
-    has_required_scopes,
+    get_required_scopes_for_route,
 )
+from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
+from agno.os.service_accounts import VerificationStatus
 from agno.utils.log import log_debug, log_warning
 
 if TYPE_CHECKING:
     from jwt import PyJWK
+
+    from agno.os.service_accounts import ServiceAccountVerifier
 
 
 class TokenSource(str, Enum):
@@ -415,6 +419,7 @@ class JWTMiddleware(BaseHTTPMiddleware):
         excluded_route_paths: Optional[List[str]] = None,
         admin_scope: Optional[str] = None,
         user_isolation: bool = False,
+        service_account_verifier: Optional["ServiceAccountVerifier"] = None,
     ):
         """
         Initialize the JWT middleware.
@@ -456,6 +461,15 @@ class JWTMiddleware(BaseHTTPMiddleware):
                            Format: {"POST /agents/*/runs": ["agents:run"], "GET /public": []}
             excluded_route_paths: List of route paths to exclude from JWT/RBAC checks
             admin_scope: The scope that grants admin access (default: "agent_os:admin")
+            service_account_verifier: Verifier for service account tokens (agno_pat_...).
+                When set (or available on app.state.service_account_verifier), bearer
+                tokens with the agno_pat_ prefix authenticate as service accounts
+                instead of JWTs: user_id is the account principal (sa:<name>) and
+                scopes are the account's stored scopes. Service account scopes are
+                first-party ACL data, so they are enforced against the scope mappings
+                even when authorization is disabled. Service account requests carry no
+                request.state.claims/token - factory trusted-claims consumers must
+                treat those as optional.
             user_isolation: Opt in to per-user data isolation (default False).
                 When True, route handlers wrap the DB in a per-request scoped
                 adapter and enforce session/run ownership on non-admin callers.
@@ -526,6 +540,15 @@ class JWTMiddleware(BaseHTTPMiddleware):
         else:
             self.scope_mappings = scope_mappings or {}
 
+        # Service account scopes are enforced even when authorization is disabled
+        # (they are this instance's own ACL data, not third-party claims), so keep
+        # a fully merged scope map regardless of the authorization flag.
+        self.service_account_scope_mappings = get_default_scope_mappings()
+        if scope_mappings is not None:
+            self.service_account_scope_mappings.update(scope_mappings)
+
+        self.service_account_verifier = service_account_verifier
+
         self.excluded_route_paths = (
             excluded_route_paths if excluded_route_paths is not None else self._get_default_excluded_routes()
         )
@@ -593,31 +616,56 @@ class JWTMiddleware(BaseHTTPMiddleware):
             List of required scopes. Empty list [] means no scopes required (allow access).
             Routes not in scope_mappings also return [], allowing access.
         """
-        route_key = f"{method} {path}"
+        return get_required_scopes_for_route(self.scope_mappings, method, path)
 
-        # First, try exact match
-        if route_key in self.scope_mappings:
-            return self.scope_mappings[route_key]
+    def _check_scopes(
+        self,
+        request: Request,
+        method: str,
+        path: str,
+        scopes: List[str],
+        origin: Optional[str],
+        cors_allowed_origins: Optional[List[str]],
+        scope_mappings: Optional[Dict[str, List[str]]] = None,
+    ) -> Optional[JSONResponse]:
+        """
+        Shared RBAC check used by every credential type (JWTs, the internal service
+        token, and service account tokens).
 
-        # Then try pattern matching
-        for pattern, scopes in self.scope_mappings.items():
-            pattern_method, pattern_path = pattern.split(" ", 1)
+        Sets request.state.required_scopes and, for listing endpoints where the caller
+        only holds per-resource scopes, request.state.accessible_resource_ids.
 
-            # Check if method matches
-            if pattern_method != method:
-                continue
+        Returns:
+            An error response when access is denied, None when access is allowed.
+        """
+        mappings = scope_mappings if scope_mappings is not None else self.scope_mappings
+        result = check_route_scopes(scopes, mappings, method, path, admin_scope=self.admin_scope)
 
-            # Convert pattern to fnmatch pattern (replace {param} with *)
-            # This handles both /agents/* and /agents/{agent_id} style patterns
-            normalized_pattern = pattern_path
-            if "{" in normalized_pattern:
-                # Replace {param} with * for pattern matching
-                normalized_pattern = re.sub(r"\{[^}]+\}", "*", normalized_pattern)
+        request.state.required_scopes = result.required_scopes
+        if result.accessible_resource_ids is not None:
+            request.state.accessible_resource_ids = result.accessible_resource_ids
+            if result.accessible_resource_ids:
+                log_debug(f"Caller has specific resource scopes. Accessible IDs: {result.accessible_resource_ids}")
+            else:
+                log_debug("Caller has no matching resource scopes. Will return empty list.")
 
-            if fnmatch.fnmatch(path, normalized_pattern):
-                return scopes
+        if not result.allowed:
+            log_warning(
+                f"Insufficient scopes for {method} {path}. Required: {result.required_scopes}, User has: {scopes}"
+            )
+            return self._create_error_response(
+                403,
+                "Insufficient permissions",
+                origin,
+                cors_allowed_origins,
+                required_scopes=result.required_scopes,
+            )
 
-        return []
+        if result.required_scopes:
+            log_debug(f"Scope check passed for {method} {path}. User scopes: {scopes}")
+        else:
+            log_debug(f"No scopes required for {method} {path}")
+        return None
 
     def _extract_token_from_header(self, request: Request) -> Optional[str]:
         """Extract JWT token from Authorization header."""
@@ -726,6 +774,13 @@ class JWTMiddleware(BaseHTTPMiddleware):
             error_msg = self._get_missing_token_error_message()
             return self._create_error_response(401, error_msg, origin, cors_allowed_origins)
 
+        # Service account tokens (agno_pat_...) are first-party opaque credentials
+        # verified against the AgentOS database rather than decoded as JWTs.
+        if token.startswith(SERVICE_ACCOUNT_TOKEN_PREFIX):
+            return await self._dispatch_service_account(
+                request, token, method, path, origin, cors_allowed_origins, call_next
+            )
+
         # Check for internal service token (used by scheduler executor)
         internal_token = getattr(request.app.state, "internal_service_token", None)
         if internal_token and hmac.compare_digest(token, internal_token):
@@ -740,24 +795,11 @@ class JWTMiddleware(BaseHTTPMiddleware):
 
             # Enforce RBAC for internal token (do not skip scope checks)
             if self.authorization:
-                required_scopes = self._get_required_scopes(method, path)
-                if required_scopes:
-                    if not has_required_scopes(
-                        internal_scopes,
-                        required_scopes,
-                        admin_scope=self.admin_scope,
-                    ):
-                        log_warning(
-                            f"Internal service token denied for {method} {path}. "
-                            f"Required: {required_scopes}, Token has: {internal_scopes}"
-                        )
-                        return self._create_error_response(
-                            403,
-                            "Insufficient permissions",
-                            origin,
-                            cors_allowed_origins,
-                            required_scopes=required_scopes,
-                        )
+                error_response = self._check_scopes(
+                    request, method, path, internal_scopes, origin, cors_allowed_origins
+                )
+                if error_response is not None:
+                    return error_response
 
             return await call_next(request)
 
@@ -820,71 +862,9 @@ class JWTMiddleware(BaseHTTPMiddleware):
 
             # RBAC scope checking (only if enabled)
             if self.authorization:
-                # Extract resource type and ID from path
-                resource_type = None
-                resource_id = None
-
-                if "/agents" in path:
-                    resource_type = "agents"
-                elif "/teams" in path:
-                    resource_type = "teams"
-                elif "/workflows" in path:
-                    resource_type = "workflows"
-
-                if resource_type:
-                    resource_id = self._extract_resource_id_from_path(path, resource_type)
-
-                required_scopes = self._get_required_scopes(method, path)
-                request.state.required_scopes = required_scopes
-
-                # Empty list [] means no scopes required (allow access)
-                if required_scopes:
-                    # Use the scope validation system
-                    has_access = has_required_scopes(
-                        scopes,
-                        required_scopes,
-                        resource_type=resource_type,
-                        resource_id=resource_id,
-                        admin_scope=self.admin_scope,
-                    )
-
-                    # Special handling for listing endpoints (no resource_id)
-                    if not has_access and not resource_id and resource_type:
-                        # For listing endpoints, always allow access but store accessible IDs for filtering
-                        # This allows endpoints to return filtered results (including empty list) instead of 403.
-                        # Pass the action from required_scopes (e.g. "read" for "agents:read") so the cached
-                        # IDs only include resources the user is authorised for under that action — otherwise
-                        # a user with only `agents:run` would leak through `GET /agents`.
-                        required_action: Optional[str] = None
-                        first_required = required_scopes[0]
-                        if ":" in first_required:
-                            required_action = first_required.rsplit(":", 1)[1]
-                        accessible_ids = get_accessible_resource_ids(
-                            scopes, resource_type, admin_scope=self.admin_scope, action=required_action
-                        )
-                        has_access = True  # Always allow listing endpoints
-                        request.state.accessible_resource_ids = accessible_ids
-
-                        if accessible_ids:
-                            log_debug(f"User has specific {resource_type} scopes. Accessible IDs: {accessible_ids}")
-                        else:
-                            log_debug(f"User has no {resource_type} scopes. Will return empty list.")
-
-                    if not has_access:
-                        log_warning(
-                            f"Insufficient scopes for {method} {path}. Required: {required_scopes}, User has: {scopes}"
-                        )
-                        return self._create_error_response(
-                            403,
-                            "Insufficient permissions",
-                            origin,
-                            cors_allowed_origins,
-                            required_scopes=required_scopes,
-                        )
-
-                    log_debug(f"Scope check passed for {method} {path}. User scopes: {scopes}")
-                else:
-                    log_debug(f"No scopes required for {method} {path}")
+                error_response = self._check_scopes(request, method, path, scopes, origin, cors_allowed_origins)
+                if error_response is not None:
+                    return error_response
 
             log_debug(f"JWT decoded successfully for user: {user_id}")
 
@@ -916,6 +896,73 @@ class JWTMiddleware(BaseHTTPMiddleware):
             request.state.authenticated = False
             request.state.token = token
 
+        return await call_next(request)
+
+    async def _dispatch_service_account(
+        self,
+        request: Request,
+        token: str,
+        method: str,
+        path: str,
+        origin: Optional[str],
+        cors_allowed_origins: Optional[List[str]],
+        call_next,
+    ) -> Response:
+        """
+        Authenticate a service account token (agno_pat_...) and enforce its scopes.
+
+        Verification failures all return the same 401 detail - the precise reason
+        (unknown, revoked, expired) is only logged server-side. Scope enforcement
+        always runs, regardless of the authorization flag: unlike JWT claims, service
+        account scopes are ACL data owned by this AgentOS instance.
+        """
+        verifier = self.service_account_verifier or getattr(request.app.state, "service_account_verifier", None)
+        if verifier is None:
+            return self._create_error_response(
+                401, "Service accounts are not enabled on this AgentOS instance", origin, cors_allowed_origins
+            )
+
+        client_key = request.client.host if request.client else None
+        result = await verifier.verify(token, client_key=client_key)
+
+        if result.status == VerificationStatus.THROTTLED:
+            return self._create_error_response(
+                429, "Too many failed authentication attempts", origin, cors_allowed_origins
+            )
+        if result.status == VerificationStatus.UNAVAILABLE:
+            return self._create_error_response(
+                503, "Authentication is temporarily unavailable", origin, cors_allowed_origins
+            )
+        account = result.account
+        if not result.ok or account is None:
+            return self._create_error_response(
+                401, "Invalid or expired service account token", origin, cors_allowed_origins
+            )
+
+        request.state.authenticated = True
+        request.state.user_id = account.principal
+        request.state.session_id = None
+        request.state.scopes = list(account.scopes)
+        # Scope enforcement is always active for service accounts, so route-level
+        # authorization gates (require_resource_access etc.) must be active too.
+        request.state.authorization_enabled = True
+        request.state.admin_scope = self.admin_scope
+        request.state.user_isolation_enabled = self.user_isolation
+        request.state.service_account_name = account.name
+
+        error_response = self._check_scopes(
+            request,
+            method,
+            path,
+            list(account.scopes),
+            origin,
+            cors_allowed_origins,
+            scope_mappings=self.service_account_scope_mappings,
+        )
+        if error_response is not None:
+            return error_response
+
+        log_debug(f"Service account authenticated: {account.principal}")
         return await call_next(request)
 
     def _extract_token(self, request: Request) -> Optional[str]:

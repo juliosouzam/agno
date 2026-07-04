@@ -1,0 +1,83 @@
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from agno.utils.dttm import now_epoch_s, to_epoch_s
+
+# Namespace prepended to the account name to build the principal identifier
+# (the value used as user_id on requests, sessions and traces). Keeping service
+# account principals in a reserved namespace guarantees they can never collide
+# with a human JWT sub.
+SERVICE_ACCOUNT_PRINCIPAL_PREFIX = "sa:"
+
+
+@dataclass
+class ServiceAccount:
+    """Model for a service account: a machine identity authenticated by an opaque token."""
+
+    id: str
+    name: str
+    token_hash: str
+    token_prefix: str
+    scopes: List[str] = field(default_factory=list)
+    created_at: Optional[int] = None
+    expires_at: Optional[int] = None
+    last_used_at: Optional[int] = None
+    revoked_at: Optional[int] = None
+    created_by: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.created_at = now_epoch_s() if self.created_at is None else to_epoch_s(self.created_at)
+        if self.expires_at is not None:
+            self.expires_at = int(self.expires_at)
+        if self.last_used_at is not None:
+            self.last_used_at = int(self.last_used_at)
+        if self.revoked_at is not None:
+            self.revoked_at = int(self.revoked_at)
+
+    @property
+    def principal(self) -> str:
+        """The identifier attached to requests, sessions and traces as user_id."""
+        return f"{SERVICE_ACCOUNT_PRINCIPAL_PREFIX}{self.name}"
+
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    def is_expired(self, now: Optional[int] = None) -> bool:
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= (now if now is not None else now_epoch_s())
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dict. Preserves None values (important for DB updates)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "token_hash": self.token_hash,
+            "token_prefix": self.token_prefix,
+            "scopes": self.scopes,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "last_used_at": self.last_used_at,
+            "revoked_at": self.revoked_at,
+            "created_by": self.created_by,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ServiceAccount":
+        data = dict(data)
+        valid_keys = {
+            "id",
+            "name",
+            "token_hash",
+            "token_prefix",
+            "scopes",
+            "created_at",
+            "expires_at",
+            "last_used_at",
+            "revoked_at",
+            "created_by",
+        }
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        if filtered.get("scopes") is None:
+            filtered["scopes"] = []
+        return cls(**filtered)

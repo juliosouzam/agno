@@ -2,11 +2,37 @@
 
 from agno.os.scopes import (
     LEGACY_RESOURCE_ALIASES,
+    check_route_scopes,
     get_accessible_resource_ids,
     get_default_scope_mappings,
     has_required_scopes,
     parse_scope,
 )
+
+
+class TestCheckRouteScopes:
+    def test_get_listing_allows_through_with_accessible_ids(self):
+        # A caller lacking the global scope but holding per-resource scopes gets a
+        # filtered listing, not a 403.
+        result = check_route_scopes(["agents:a1:read"], get_default_scope_mappings(), "GET", "/agents")
+        assert result.allowed is True
+        assert result.accessible_resource_ids == {"a1"}
+
+    def test_non_get_idless_route_is_not_allowed_through(self):
+        # Regression: the listing allow-through must be GET-only. A create endpoint
+        # (POST /agents requires agents:write) must 403, never silently allow through.
+        result = check_route_scopes(["agents:a1:read"], get_default_scope_mappings(), "POST", "/agents")
+        assert result.allowed is False
+        assert result.accessible_resource_ids is None
+
+    def test_caller_with_required_scope_is_allowed(self):
+        result = check_route_scopes(["agents:write"], get_default_scope_mappings(), "POST", "/agents")
+        assert result.allowed is True
+
+    def test_unmapped_route_allowed(self):
+        result = check_route_scopes([], get_default_scope_mappings(), "GET", "/totally/unmapped")
+        assert result.allowed is True
+        assert result.required_scopes == []
 
 
 class TestParseScope:
