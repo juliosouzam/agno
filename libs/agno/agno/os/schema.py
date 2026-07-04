@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Generic, List, Optional, TypeVar, Union
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -225,6 +225,13 @@ class WorkflowSummaryResponse(BaseModel):
         )
 
 
+class McpInfo(BaseModel):
+    """MCP server availability for the /info endpoint."""
+
+    enabled: bool = Field(False, description="Whether the MCP server is enabled on this OS instance")
+    path: Optional[str] = Field(None, description="Path where the MCP server is mounted, null when disabled")
+
+
 class InfoResponse(BaseModel):
     """Response schema for the /info endpoint returning lightweight OS metadata."""
 
@@ -232,6 +239,10 @@ class InfoResponse(BaseModel):
     agent_count: int = Field(0, description="Number of agents registered in the OS")
     team_count: int = Field(0, description="Number of teams registered in the OS")
     workflow_count: int = Field(0, description="Number of workflows registered in the OS")
+    mcp: McpInfo = Field(default_factory=McpInfo, description="MCP server availability for this OS instance")
+    auth_mode: Literal["none", "security_key", "jwt"] = Field(
+        "none", description="Authentication mode effectively enforced by this OS instance"
+    )
 
 
 class ConfigResponse(BaseModel):

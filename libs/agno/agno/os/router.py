@@ -12,7 +12,7 @@ from agno import __version__ as agno_version
 from agno.agent.factory import AgentFactory
 from agno.agent.protocol import AgentProtocol
 from agno.exceptions import RemoteServerUnavailableError
-from agno.os.auth import get_authentication_dependency, validate_websocket_token
+from agno.os.auth import get_authentication_dependency, get_effective_auth_mode, validate_websocket_token
 from agno.os.managers import websocket_manager
 from agno.os.middleware.jwt import JWTValidator
 from agno.os.middleware.user_scope import (
@@ -32,6 +32,7 @@ from agno.os.schema import (
     InfoResponse,
     InterfaceResponse,
     InternalServerErrorResponse,
+    McpInfo,
     Model,
     NotFoundResponse,
     TeamSummaryResponse,
@@ -265,11 +266,14 @@ def get_info_router(os: "AgentOS") -> APIRouter:
         response_model=InfoResponse,
     )
     async def get_info() -> InfoResponse:
+        mcp_enabled = bool(os.enable_mcp_server)
         return InfoResponse(
             agno_version=agno_version,
             agent_count=len(os.agents or []),
             team_count=len(os.teams or []),
             workflow_count=len(os.workflows or []),
+            mcp=McpInfo(enabled=mcp_enabled, path="/mcp" if mcp_enabled else None),
+            auth_mode=get_effective_auth_mode(settings=os.settings, authorization=os.authorization),
         )
 
     return router

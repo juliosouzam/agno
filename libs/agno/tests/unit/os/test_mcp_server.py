@@ -13,8 +13,10 @@ import pytest
 
 pytest.importorskip("fastmcp")
 
+import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 from typing import Optional  # noqa: E402
+from uuid import uuid4  # noqa: E402
 
 import httpx  # noqa: E402
 from fastmcp import Client, Context  # noqa: E402
@@ -23,9 +25,12 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 
 import agno.os.mcp as mcp_mod  # noqa: E402
 from agno.agent import Agent  # noqa: E402
+from agno.db.schemas.service_accounts import ServiceAccount  # noqa: E402
 from agno.os import AgentOS, MCPServerConfig  # noqa: E402
 from agno.os.config import AuthorizationConfig  # noqa: E402
 from agno.os.mcp import _resolve_user_id, build_mcp_server, get_mcp_server  # noqa: E402
+from agno.os.service_accounts import ServiceAccountVerification, VerificationStatus, generate_token  # noqa: E402
+from agno.os.settings import AgnoAPISettings  # noqa: E402
 from agno.run.agent import RunOutput  # noqa: E402
 from agno.run.team import TeamRunOutput  # noqa: E402
 from agno.run.workflow import WorkflowRunOutput  # noqa: E402
@@ -563,3 +568,200 @@ async def test_no_transport_security_when_unset():
     async with _mcp_http_client(_security_os()) as client:
         response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_headers(host="anything.example.com"))
     assert response.status_code == 200
+
+
+# ==================== Security key + service account auth (non-JWT modes) ====================
+
+# Router dependencies never run for mounted sub-apps, so in non-JWT modes /mcp gets its own
+# middleware mirroring the REST rules (agno.os.auth.get_authentication_dependency).
+
+
+def _sqlite_db(tmp_path):
+    from agno.db.sqlite import SqliteDb
+
+    return SqliteDb(db_file=str(tmp_path / "mcp_auth_test.db"))
+
+
+def _mint_pat(db, name="mcp-bot", revoked=False):
+    """Create a service account directly in the db and return its plaintext token."""
+    plaintext, token_hash, token_prefix = generate_token()
+    now = int(time.time())
+    account = ServiceAccount(
+        id=str(uuid4()),
+        name=name,
+        token_hash=token_hash,
+        token_prefix=token_prefix,
+        scopes=["agents:run"],
+        created_at=now,
+        revoked_at=now if revoked else None,
+    )
+    db.create_service_account(account.to_dict())
+    return plaintext
+
+
+def _auth_os(security_key=None, db=None, **config_kwargs) -> AgentOS:
+    return AgentOS(
+        agents=[_agent()],
+        db=db,
+        enable_mcp_server=True,
+        settings=AgnoAPISettings(os_security_key=security_key),
+        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False, **config_kwargs),
+    )
+
+
+def _bearer(token: str) -> dict:
+    return {**_MCP_HEADERS, "Authorization": f"Bearer {token}"}
+
+
+async def test_security_key_mode_rejects_missing_token():
+    async with _mcp_http_client(_auth_os(security_key="test-key")) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_MCP_HEADERS)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authorization header required"
+
+
+async def test_security_key_mode_rejects_invalid_token():
+    async with _mcp_http_client(_auth_os(security_key="test-key")) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer("wrong-key"))
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid authentication token"
+
+
+async def test_security_key_mode_accepts_the_key():
+    async with _mcp_http_client(_auth_os(security_key="test-key")) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer("test-key"))
+    assert response.status_code == 200
+
+
+async def test_security_key_mode_accepts_raw_token():
+    """A raw (non-Bearer) Authorization header is accepted, like the JWT middleware."""
+    headers = {**_MCP_HEADERS, "Authorization": "test-key"}
+    async with _mcp_http_client(_auth_os(security_key="test-key")) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=headers)
+    assert response.status_code == 200
+
+
+async def test_security_key_mode_accepts_valid_pat_and_attributes(tmp_path):
+    """A valid agno_pat token authenticates, and the account principal + scopes land on
+    request.state so _resolve_user_id attributes tool calls to sa:<name>."""
+    db = _sqlite_db(tmp_path)
+    pat = _mint_pat(db)
+    captured: dict = {}
+
+    class _CaptureState(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            response = await call_next(request)
+            captured["user_id"] = getattr(request.state, "user_id", None)
+            captured["scopes"] = getattr(request.state, "scopes", None)
+            return response
+
+    os = _auth_os(security_key="test-key", db=db, middleware=[Middleware(_CaptureState)])
+    async with _mcp_http_client(os) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(pat))
+
+    assert response.status_code == 200
+    assert captured["user_id"] == "sa:mcp-bot"
+    assert captured["scopes"] == ["agents:run"]
+
+
+async def test_security_key_mode_rejects_revoked_pat(tmp_path):
+    db = _sqlite_db(tmp_path)
+    pat = _mint_pat(db, revoked=True)
+    async with _mcp_http_client(_auth_os(security_key="test-key", db=db)) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(pat))
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or expired service account token"
+
+
+async def test_pat_without_db_gets_service_accounts_disabled_401():
+    """Without a db there is no verifier: a PAT gets REST's 'not enabled' 401, not a key check."""
+    async with _mcp_http_client(_auth_os(security_key="test-key")) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer("agno_pat_notenabled0000000"))
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Service accounts are not enabled on this AgentOS instance"
+
+
+async def test_open_mode_with_db_stays_open_but_verifies_pats(tmp_path):
+    """No security key: requests without a PAT pass through (open, matching REST), but a
+    presented PAT is still verified and rejected when invalid."""
+    db = _sqlite_db(tmp_path)
+    async with _mcp_http_client(_auth_os(security_key=None, db=db)) as client:
+        open_response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_MCP_HEADERS)
+        bad_pat_response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers=_bearer("agno_pat_invalid00000000000")
+        )
+    assert open_response.status_code == 200
+    assert bad_pat_response.status_code == 401
+    assert bad_pat_response.json()["detail"] == "Invalid or expired service account token"
+
+
+def test_no_auth_mode_adds_no_key_auth_middleware():
+    """No security key and no db (no verifier): nothing is added and /mcp stays open."""
+    mcp_app = get_mcp_server(_auth_os(security_key=None))
+    assert not any(m.cls.__name__ == "_MCPKeyAuthMiddleware" for m in mcp_app.user_middleware)
+
+
+async def test_no_auth_mode_stays_open():
+    async with _mcp_http_client(_auth_os(security_key=None)) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_MCP_HEADERS)
+    assert response.status_code == 200
+
+
+def test_jwt_mode_does_not_add_key_auth_middleware():
+    """JWT mode is unchanged: the JWT middleware handles /mcp auth, key auth is not added."""
+    os = AgentOS(
+        agents=[_agent()],
+        enable_mcp_server=True,
+        authorization=True,
+        authorization_config=AuthorizationConfig(verification_keys=["dummy"]),
+        settings=AgnoAPISettings(os_security_key="test-key"),
+    )
+    names = [m.cls.__name__ for m in get_mcp_server(os).user_middleware]
+    assert "JWTMiddleware" in names
+    assert "_MCPKeyAuthMiddleware" not in names
+
+
+class _FakeVerifier:
+    def __init__(self, status):
+        self.status = status
+
+    async def verify(self, token, client_key=None):
+        return ServiceAccountVerification(status=self.status)
+
+
+@pytest.mark.parametrize(
+    "status,expected_status_code",
+    [(VerificationStatus.THROTTLED, 429), (VerificationStatus.UNAVAILABLE, 503)],
+)
+async def test_pat_verifier_statuses_map_like_rest(tmp_path, status, expected_status_code):
+    """THROTTLED -> 429 and UNAVAILABLE -> 503, matching the REST path in agno.os.auth."""
+    os = _auth_os(security_key="test-key", db=_sqlite_db(tmp_path))
+    os._service_account_verifier = _FakeVerifier(status)
+    async with _mcp_http_client(os) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer("agno_pat_whatever0000000000"))
+    assert response.status_code == expected_status_code
+
+
+def test_key_auth_middleware_layer_position():
+    """Key auth sits where JWT would: inside transport security and app-provided middleware,
+    outside the authorize gate (add_middleware wraps outside-in)."""
+
+    class _Passthrough(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            return await call_next(request)
+
+    os = _auth_os(
+        security_key="test-key",
+        allowed_hosts=[],
+        middleware=[Middleware(_Passthrough)],
+        authorize=lambda user_id: True,
+    )
+    names = [m.cls.__name__ for m in get_mcp_server(os).user_middleware]
+    expected_order = [
+        "_MCPTransportSecurityMiddleware",
+        "_Passthrough",
+        "_MCPKeyAuthMiddleware",
+        "_MCPAuthorizeMiddleware",
+    ]
+    positions = [names.index(name) for name in expected_order]
+    assert positions == sorted(positions), f"unexpected middleware order: {names}"

@@ -2,6 +2,7 @@
 
 import time
 from datetime import UTC, datetime, timedelta
+from importlib.util import find_spec
 from unittest.mock import AsyncMock, patch
 
 import jwt
@@ -320,3 +321,90 @@ class TestServiceAccountsOnOpenInstance:
     def test_invalid_pat_rejected_even_on_open_instance(self, open_client):
         response = open_client.get("/sessions", headers={"Authorization": "Bearer agno_pat_invalid000000000000000000"})
         assert response.status_code == 401
+
+
+# A minimal MCP initialize request - enough to reach (or be blocked before) the MCP machinery.
+MCP_INIT_BODY = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "test", "version": "1"},
+    },
+}
+MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+
+@pytest.mark.skipif(find_spec("fastmcp") is None, reason="fastmcp is not installed")
+class TestServiceAccountsOverMCP:
+    """The mounted /mcp app enforces the same auth rules as REST in non-JWT modes.
+
+    Router dependencies never run for mounted sub-apps, so /mcp carries its own auth
+    middleware. These tests drive the full AgentOS app end to end: mint over REST,
+    then call the MCP endpoint.
+    """
+
+    @pytest.fixture
+    def mcp_security_key_client(self, test_agent, sqlite_db):
+        agent_os = AgentOS(
+            agents=[test_agent],
+            db=sqlite_db,
+            enable_mcp_server=True,
+            settings=AgnoAPISettings(os_security_key="root-security-key"),
+        )
+        # Context manager so the MCP session manager lifespan runs.
+        with TestClient(agent_os.get_app()) as client:
+            yield client
+
+    @pytest.fixture
+    def mcp_open_client(self, test_agent, sqlite_db):
+        agent_os = AgentOS(agents=[test_agent], db=sqlite_db, enable_mcp_server=True)
+        with TestClient(agent_os.get_app()) as client:
+            yield client
+
+    def _mcp_post(self, client, token=None):
+        headers = dict(MCP_HEADERS)
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        return client.post("/mcp", json=MCP_INIT_BODY, headers=headers)
+
+    def test_mcp_rejects_request_without_token(self, mcp_security_key_client):
+        response = self._mcp_post(mcp_security_key_client)
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Authorization header required"
+
+    def test_mcp_rejects_bad_token(self, mcp_security_key_client):
+        response = self._mcp_post(mcp_security_key_client, token="not-the-key")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid authentication token"
+
+    def test_mcp_accepts_security_key(self, mcp_security_key_client):
+        response = self._mcp_post(mcp_security_key_client, token="root-security-key")
+        assert response.status_code == 200
+
+    def test_mcp_accepts_valid_pat(self, mcp_security_key_client):
+        pat = _mint(mcp_security_key_client, "root-security-key").json()["token"]
+        response = self._mcp_post(mcp_security_key_client, token=pat)
+        assert response.status_code == 200
+
+    def test_mcp_rejects_revoked_pat(self, mcp_security_key_client):
+        minted = _mint(mcp_security_key_client, "root-security-key").json()
+        revoke = mcp_security_key_client.delete(
+            f"/service-accounts/{minted['id']}",
+            headers={"Authorization": "Bearer root-security-key"},
+        )
+        assert revoke.status_code == 204
+
+        response = self._mcp_post(mcp_security_key_client, token=minted["token"])
+        assert response.status_code == 401
+        assert response.json()["detail"] == UNIFORM_401_DETAIL
+
+    def test_mcp_stays_open_without_security_key(self, mcp_open_client):
+        assert self._mcp_post(mcp_open_client).status_code == 200
+
+    def test_mcp_rejects_invalid_pat_even_on_open_instance(self, mcp_open_client):
+        response = self._mcp_post(mcp_open_client, token="agno_pat_invalid000000000000000000")
+        assert response.status_code == 401
+        assert response.json()["detail"] == UNIFORM_401_DETAIL
