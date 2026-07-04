@@ -260,14 +260,16 @@ class AsyncSqliteDb(AsyncBaseDb):
                 idx_name = f"idx_{table_name}_{'_'.join(idx_config['columns'])}"
                 table.append_constraint(Index(idx_name, *idx_config["columns"]))
 
-            # Partial unique indexes (unique only for rows matching the where clause)
+            # Partial unique indexes (unique only for rows matching the where clause).
+            # Fail loudly on missing columns like every other backend: silently
+            # skipping would drop a uniqueness guarantee (e.g. unique active
+            # service-account names) on this backend only.
             for idx_config in schema_partial_unique_indexes:
                 missing_columns = [col for col in idx_config["columns"] if col not in table.c]
                 if missing_columns:
-                    log_warning(
-                        f"Partial unique index {idx_config['name']} references missing columns {missing_columns}, skipping"
+                    raise ValueError(
+                        f"Partial unique index references missing columns in {table_name}: {missing_columns}"
                     )
-                    continue
                 idx_name = f"{table_name}_{idx_config['name']}"
                 Index(
                     idx_name,
