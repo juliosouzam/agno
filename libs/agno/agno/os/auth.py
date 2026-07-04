@@ -511,47 +511,62 @@ def require_approval_resolved(db: Any) -> Any:
     """
 
     async def dependency(request: Request) -> None:
-        # Mirror require_resource_access: skip entirely when authorization is disabled.
-        if not getattr(request.state, "authorization_enabled", False):
-            return
-
-        if db is None:
-            return
-
-        # Callers with approvals:write (admins) bypass this gate — they can
-        # force-continue a run for operational or debugging purposes.
-        user_scopes: List[str] = getattr(request.state, "scopes", [])
-        if has_required_scopes(user_scopes, ["approvals:write"]):
-            return
-
-        run_id: Optional[str] = request.path_params.get("run_id")
-        if not run_id:
-            return
-
-        fn = getattr(db, "get_approvals", None)
-        if fn is None:
-            return
-
-        try:
-            if asyncio.iscoroutinefunction(fn):
-                result = await fn(run_id=run_id, status="pending", approval_type="required")
-            else:
-                result = fn(run_id=run_id, status="pending", approval_type="required")
-
-            approvals = result[0] if isinstance(result, tuple) else result
-            if approvals:
-                raise HTTPException(
-                    status_code=403,
-                    detail="This run requires admin approval before it can be continued",
-                )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            # DB doesn't support approvals or another transient error — let the
-            # run continue so non-approval setups are unaffected.
-            from agno.utils.log import log_warning
-
-            log_warning(f"Approval resolution check skipped due to error: {exc}: {exc}")
-            return
+        reason = await run_continuation_blocked_reason(
+            db,
+            request.path_params.get("run_id"),
+            authorization_enabled=getattr(request.state, "authorization_enabled", False),
+            user_scopes=getattr(request.state, "scopes", []),
+        )
+        if reason:
+            raise HTTPException(status_code=403, detail=reason)
 
     return dependency
+
+
+async def run_continuation_blocked_reason(
+    db: Any,
+    run_id: Optional[str],
+    *,
+    authorization_enabled: bool,
+    user_scopes: List[str],
+) -> Optional[str]:
+    """Whether a paused run may NOT be continued yet, as a 403 detail string (else None).
+
+    A run paused on an admin-required approval must not be continued by its own initiator;
+    only a separate admin (holding ``approvals:write``) may resolve it. This is the single
+    decision shared by the REST ``/continue`` routes (via ``require_approval_resolved``) and
+    the MCP ``continue_run`` tool, so the gate cannot drift between transports.
+
+    Fails open only for the approval feature itself: if the db has no approvals support the
+    check is skipped, so non-approval deployments are unaffected. It never fails open on the
+    authorization decision — that is the caller's ``authorization_enabled`` gate.
+    """
+    # Mirror require_resource_access: skip entirely when authorization is disabled.
+    if not authorization_enabled or db is None or not run_id:
+        return None
+
+    # Callers with approvals:write (admins) bypass this gate — they can force-continue a
+    # run for operational or debugging purposes.
+    if has_required_scopes(user_scopes, ["approvals:write"]):
+        return None
+
+    fn = getattr(db, "get_approvals", None)
+    if fn is None:
+        return None
+
+    try:
+        if asyncio.iscoroutinefunction(fn):
+            result = await fn(run_id=run_id, status="pending", approval_type="required")
+        else:
+            result = fn(run_id=run_id, status="pending", approval_type="required")
+        approvals = result[0] if isinstance(result, tuple) else result
+        if approvals:
+            return "This run requires admin approval before it can be continued"
+    except Exception as exc:
+        # DB doesn't support approvals or another transient error — let the run continue
+        # so non-approval setups are unaffected.
+        from agno.utils.log import log_warning
+
+        log_warning(f"Approval resolution check skipped due to error: {exc}")
+
+    return None

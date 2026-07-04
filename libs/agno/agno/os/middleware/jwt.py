@@ -20,14 +20,37 @@ from agno.os.scopes import (
     get_required_scopes_for_route,
     has_required_scopes,
 )
+from agno.os.service_accounts import SERVICE_ACCOUNT_PRINCIPAL_PREFIX, authenticate_service_account_request
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
-from agno.os.service_accounts import authenticate_service_account_request
 from agno.utils.log import log_debug, log_warning
 
 if TYPE_CHECKING:
     from jwt import PyJWK
 
     from agno.os.service_accounts import ServiceAccountVerifier
+
+# The user_id the internal scheduler token authenticates as. Reserved: a JWT must never
+# be allowed to claim it (see is_reserved_principal).
+INTERNAL_SCHEDULER_USER_ID = "__scheduler__"
+
+# Private request.state marker set only by this middleware once it has decided a request's
+# auth. The mount short-circuit reads THIS, not the public request.state.authenticated
+# flag, so no other middleware can trip it.
+_AUTH_COMPLETE_ATTR = "_agno_auth_complete"
+
+
+def is_reserved_principal(user_id: Any) -> bool:
+    """Whether a JWT subject is trying to claim a system-reserved identity.
+
+    Service-account principals live in the ``sa:`` namespace and the scheduler runs as
+    ``__scheduler__``; both are first-party identities the server assigns, never something
+    a human JWT should present. Copying such a ``sub`` into ``request.state.user_id`` would
+    let any JWT holder impersonate a service account (or the scheduler) in run attribution,
+    session-ownership checks, and audit trails. Callers reject the token instead.
+    """
+    return isinstance(user_id, str) and (
+        user_id.startswith(SERVICE_ACCOUNT_PRINCIPAL_PREFIX) or user_id == INTERNAL_SCHEDULER_USER_ID
+    )
 
 
 class TokenSource(str, Enum):
@@ -658,6 +681,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 "validate=False, a security_key, or a service_account_verifier."
             )
 
+        # authorization=True means "enforce RBAC on JWTs", which is impossible without a way
+        # to verify a JWT. Switched on with no JWT source, every JWT and every anonymous
+        # request falls through unauthenticated (dispatch has no key to check), silently
+        # serving an OPEN instance under a config that explicitly asked for enforcement. A
+        # service_account_verifier does NOT satisfy this: PAT scopes are enforced
+        # independently of this flag. Fail closed. (For service-account-only enforcement,
+        # use a db without authorization=True.)
+        if self.authorization and not self._jwt_configured:
+            raise ValueError(
+                "authorization=True requires a JWT verification source (verification_keys, jwks_file, "
+                "JWT_VERIFICATION_KEY, or JWT_JWKS_FILE; or validate=False for unverified dev mode). "
+                "Without one, JWT and anonymous requests are not authenticated and RBAC is not enforced."
+            )
+
         self.excluded_route_paths = (
             excluded_route_paths if excluded_route_paths is not None else self._get_default_excluded_routes()
         )
@@ -870,11 +907,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if self._is_route_excluded(path):
             return await call_next(request)
 
-        # Already authenticated by an outer instance of this middleware (the mounted
-        # /mcp app carries its own JWTMiddleware built from the same config as the
-        # parent app's) -- request.state is shared through the mount, so re-verifying
-        # would only repeat the identical checks (and DB lookups for service accounts).
-        if getattr(request.state, "authenticated", False):
+        # Already authenticated by an OUTER instance of THIS middleware in a manually
+        # composed app (e.g. AuthMiddleware installed on both a parent app and a mounted
+        # sub-app): request.state is shared through the mount, so re-verifying would only
+        # repeat the identical checks (and the DB lookup for a service account). We key off
+        # a private marker this middleware sets itself -- never the public
+        # request.state.authenticated flag, which any other middleware could set -- so an
+        # unrelated middleware cannot short-circuit our checks by flipping that flag.
+        if getattr(request.state, _AUTH_COMPLETE_ATTR, False):
             return await call_next(request)
 
         # Get origin and CORS allowed origins for error responses
@@ -908,7 +948,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         internal_token = getattr(request.app.state, "internal_service_token", None)
         if internal_token and hmac.compare_digest(token, internal_token):
             request.state.authenticated = True
-            request.state.user_id = "__scheduler__"
+            setattr(request.state, _AUTH_COMPLETE_ATTR, True)
+            request.state.user_id = INTERNAL_SCHEDULER_USER_ID
             request.state.session_id = None
             internal_scopes = list(INTERNAL_SERVICE_SCOPES)
             request.state.scopes = internal_scopes
@@ -948,6 +989,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
             if hmac.compare_digest(token, self.security_key):
                 request.state.authenticated = True
+                setattr(request.state, _AUTH_COMPLETE_ATTR, True)
                 return await call_next(request)
             return self._create_error_response(401, "Invalid authentication token", origin, cors_allowed_origins)
 
@@ -963,6 +1005,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             session_id = payload.get(self.session_id_claim)
             scopes = payload.get(self.scopes_claim, [])
             audience = payload.get(self.audience_claim)
+
+            # A JWT must not be able to claim a service-account (sa:...) or scheduler
+            # (__scheduler__) identity as its subject: nothing downstream re-checks this,
+            # so an accepted reserved sub would let the holder impersonate that principal
+            # in attribution, session ownership, and audit. Reject, don't silently rewrite.
+            if is_reserved_principal(user_id):
+                log_warning(f"Rejected JWT claiming a reserved principal via {self.user_id_claim}: {user_id!r}")
+                return self._create_error_response(401, "Invalid token subject", origin, cors_allowed_origins)
 
             # Ensure scopes is a list
             if isinstance(scopes, str):
@@ -1018,6 +1068,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             request.state.token = token
             request.state.authenticated = True
+            setattr(request.state, _AUTH_COMPLETE_ATTR, True)
 
         except jwt.InvalidAudienceError as e:
             log_warning(f"Invalid token audience - expected: {expected_audience}: {str(e)}")
@@ -1090,6 +1141,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
             return self._create_error_response(status_code, detail, origin, cors_allowed_origins)
 
+        setattr(request.state, _AUTH_COMPLETE_ATTR, True)
         return await call_next(request)
 
     def _extract_token(self, request: Request) -> Optional[str]:

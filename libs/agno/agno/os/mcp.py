@@ -255,6 +255,36 @@ def _require_tool_scopes(method: str, path: str) -> None:
         raise Exception(build_insufficient_permissions_detail(scope_check.required_scopes))
 
 
+async def _enforce_run_continuation_allowed(db: Any, run_id: str) -> None:
+    """Block continuing a run that is awaiting admin approval.
+
+    The REST ``/continue`` routes gate this with ``require_approval_resolved``; the MCP
+    ``continue_run`` tool must apply the same gate or a run's initiator could self-approve
+    an admin-required pause by continuing over MCP instead of REST. Both share
+    ``run_continuation_blocked_reason`` so the policy cannot drift.
+    """
+    from fastmcp.server.dependencies import get_http_request
+
+    from agno.os.auth import run_continuation_blocked_reason
+
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        # No HTTP request in scope (e.g. stdio transport): request.state auth context is
+        # unavailable, so there is nothing to enforce here.
+        return
+
+    state = request.state
+    reason = await run_continuation_blocked_reason(
+        db,
+        run_id,
+        authorization_enabled=bool(getattr(state, "authorization_enabled", False)),
+        user_scopes=list(getattr(state, "scopes", None) or []),
+    )
+    if reason:
+        raise Exception(reason)
+
+
 # Events forwarded to the client as progress notifications during agent/team runs.
 # Content deltas are deliberately excluded: MCP progress is a status channel, and
 # per-token notifications would flood clients that request a progress token.
@@ -642,6 +672,9 @@ def build_mcp_server(
         _require_tool_scopes("POST", f"/{component_type}/{component_id}/runs/{run_id}/continue")
         user_id = _resolve_user_id(user_id)
         await _verify_run_ownership(component, component_type, component_id, session_id, run_id)
+        # A run paused on an admin-required approval must be resolved by an admin, not
+        # self-continued by its initiator; same gate the REST /continue route enforces.
+        await _enforce_run_continuation_allowed(os.db, run_id)
         await _report_progress(ctx, 0.0, f"Continuing run {run_id}")
         try:
             run_output = await run_service.continue_paused_run(
@@ -746,8 +779,10 @@ def build_mcp_server(
         description=(
             "Read a session's conversation history: each run's input and response content with its "
             "run_id, status, and timestamp, oldest first. Returns the answer content only, not the full "
-            "message transcript. Pass run_id to get one run in FULL detail instead (complete transcript, "
-            "events, metrics) -- the escape hatch for debugging. session_type is auto-detected when "
+            "message transcript. Pass run_id to get that one run in FULL, untrimmed detail -- the complete "
+            "message transcript INCLUDING the system prompt/instructions, plus every event and metric. "
+            "This is the debugging escape hatch and can be large (a long run returns a lot of tokens), so "
+            "request a specific run_id deliberately, not by default. session_type is auto-detected when "
             "omitted; db_id is only needed when get_agentos_config lists multiple databases."
         ),
         tags={"session"},

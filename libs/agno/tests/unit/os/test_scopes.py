@@ -5,6 +5,7 @@ from agno.os.scopes import (
     check_route_scopes,
     get_accessible_resource_ids,
     get_default_scope_mappings,
+    get_resource_context_from_path,
     has_required_scopes,
     parse_scope,
 )
@@ -176,3 +177,40 @@ class TestLearningsRouteScopeResolution:
         assert self._required("DELETE", "/learnings/lrn-1") == ["learnings:delete"]
         # Nested bulk-delete-by-user must also be gated (not left unmapped).
         assert self._required("DELETE", "/learnings/users/priti@agno.com") == ["learnings:delete"]
+
+
+class TestResourceContextAnchoring:
+    """F2: get_resource_context_from_path must anchor to the first path segment, so a
+    foreign-family path that merely contains 'agents'/'teams'/'workflows' as a substring
+    is never mis-typed and slipped through the GET-listing escape hatch."""
+
+    def test_foreign_family_path_is_not_classified(self):
+        assert get_resource_context_from_path("/knowledge/content/agents-onboarding") == (None, None)
+        assert get_resource_context_from_path("/traces/agents-run-1") == (None, None)
+        assert get_resource_context_from_path("/eval-runs/teams-eval") == (None, None)
+        assert get_resource_context_from_path("/agentsfoo") == (None, None)
+
+    def test_real_family_paths_still_classify(self):
+        assert get_resource_context_from_path("/agents") == ("agents", None)
+        assert get_resource_context_from_path("/agents/a1/runs") == ("agents", "a1")
+        assert get_resource_context_from_path("/teams/t1") == ("teams", "t1")
+        assert get_resource_context_from_path("/workflows") == ("workflows", None)
+
+    def test_underscoped_get_of_foreign_family_is_denied(self):
+        # A caller without knowledge:read requesting a knowledge item whose id contains
+        # "agents" must be denied — not waved through the agents listing escape hatch.
+        result = check_route_scopes(
+            ["sessions:read"], get_default_scope_mappings(), "GET", "/knowledge/content/agents-onboarding"
+        )
+        assert result.allowed is False
+        assert result.accessible_resource_ids is None
+
+    def test_underscoped_get_of_traces_with_agents_substring_is_denied(self):
+        result = check_route_scopes(["agents:read"], get_default_scope_mappings(), "GET", "/traces/agents-run-1")
+        assert result.allowed is False
+
+    def test_genuine_agents_listing_still_gets_filtered_access(self):
+        # The legitimate escape hatch still works for a real /agents listing.
+        result = check_route_scopes(["agents:a1:read"], get_default_scope_mappings(), "GET", "/agents")
+        assert result.allowed is True
+        assert result.accessible_resource_ids == {"a1"}

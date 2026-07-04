@@ -575,17 +575,19 @@ def get_resource_context_from_path(path: str) -> Tuple[Optional[str], Optional[s
         >>> get_resource_context_from_path("/sessions")
         (None, None)
     """
+    # Anchor to the FIRST path segment. A substring test ("/agents" in path) would
+    # mis-classify any path that merely contains the word -- e.g. GET
+    # /knowledge/content/agents-onboarding would be typed as an "agents" resource and
+    # then slip through the GET-listing escape hatch below into a foreign family. Only
+    # /agents, /teams, /workflows (and their sub-paths) own the resource type.
     resource_type = None
-    if "/agents" in path:
-        resource_type = "agents"
-    elif "/teams" in path:
-        resource_type = "teams"
-    elif "/workflows" in path:
-        resource_type = "workflows"
+    type_match = re.match(r"^/(agents|teams|workflows)(?:/|$)", path)
+    if type_match:
+        resource_type = type_match.group(1)
 
     resource_id = None
     if resource_type:
-        match = re.search(f"^/{resource_type}/([^/]+)", path)
+        match = re.match(f"^/{resource_type}/([^/]+)", path)
         if match:
             resource_id = match.group(1)
 
@@ -635,7 +637,19 @@ def check_route_scopes(
     )
 
     accessible_resource_ids: Optional[Set[str]] = None
-    if not allowed and method == "GET" and not resource_id and resource_type:
+    first_required = required_scopes[0]
+    required_family = first_required.split(":", 1)[0] if ":" in first_required else None
+    if (
+        not allowed
+        and method == "GET"
+        and not resource_id
+        and resource_type
+        # Only a genuine listing of THIS resource family gets the filtered-access
+        # treatment. Requiring the required-scope family to equal resource_type stops a
+        # route that requires a foreign scope (e.g. knowledge:read) from being waved
+        # through just because its path was classified as agents/teams/workflows.
+        and required_family == resource_type
+    ):
         # GET listing endpoints always allow access but expose the accessible IDs for
         # filtering, so callers with only per-resource scopes get a filtered list
         # (including an empty one) instead of a 403. Restricted to GET so a non-GET
@@ -643,7 +657,6 @@ def check_route_scopes(
         # the action from the required scope (e.g. "read" for "agents:read") so the
         # cached IDs only include resources the caller is authorised for under it.
         required_action: Optional[str] = None
-        first_required = required_scopes[0]
         if ":" in first_required:
             required_action = first_required.rsplit(":", 1)[1]
         accessible_resource_ids = get_accessible_resource_ids(

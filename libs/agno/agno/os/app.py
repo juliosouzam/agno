@@ -1215,6 +1215,17 @@ class AgentOS:
         jwt_configured = bool(
             verification_keys or jwks_file or getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE")
         )
+        # Fail fast at app construction (not on the first request) if RBAC was asked for
+        # with no way to verify a JWT: otherwise every JWT and anonymous request would fall
+        # through unauthenticated, silently serving an OPEN instance. AuthMiddleware enforces
+        # the same invariant as a backstop for the manual add_middleware path.
+        if self.authorization and not jwt_configured:
+            raise ValueError(
+                "AgentOS(authorization=True) requires a JWT verification key: set JWT_VERIFICATION_KEY or "
+                "JWT_JWKS_FILE (or pass verification_keys / jwks_file via authorization_config). Without one, "
+                "JWT and anonymous requests are not authenticated and RBAC is not enforced. For "
+                "service-account-only enforcement, use a db without authorization=True."
+            )
         log_info("Adding AgentOS auth middleware" + (f" (JWT algorithm: {algorithm})" if jwt_configured else ""))
 
         # A JWT validator on app.state is only meaningful (and only constructible --

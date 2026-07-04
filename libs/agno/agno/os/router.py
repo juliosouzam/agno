@@ -20,7 +20,7 @@ from agno.os.auth import (
     verify_websocket_service_account,
 )
 from agno.os.managers import websocket_manager
-from agno.os.middleware.jwt import JWTValidator
+from agno.os.middleware.jwt import JWTValidator, is_reserved_principal
 from agno.os.middleware.user_scope import (
     INSUFFICIENT_PERMISSIONS_WS_RECONNECT,
     WORKFLOW_ID_REQUIRED_RECONNECT,
@@ -410,6 +410,22 @@ def get_websocket_router(
                                 expected_audience = ws_audience or getattr(websocket.app.state, "agent_os_id", None)
                             payload = jwt_validator.validate_token(token, expected_audience)
                             claims = jwt_validator.extract_claims(payload)
+
+                            # A JWT must not claim a reserved principal (a service account's
+                            # sa:... or the scheduler) as its subject; mirrors the HTTP
+                            # middleware so WS run attribution/ownership cannot be spoofed.
+                            if is_reserved_principal(claims.get("user_id")):
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {
+                                            "event": "auth_error",
+                                            "error": "Invalid token subject",
+                                            "error_type": "invalid_token",
+                                        }
+                                    )
+                                )
+                                continue
+
                             await websocket_manager.authenticate_websocket(websocket)
 
                             # Store user context from JWT

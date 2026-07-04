@@ -79,6 +79,13 @@ class TestInfoEndpointAuthMode:
         assert resp.status_code == 200
         assert resp.json()["auth_mode"] == "jwt"
 
+    def test_authorization_true_without_jwt_source_fails_fast(self):
+        """F1: authorization=True with no JWT key would silently serve an OPEN instance
+        (JWT and anonymous requests fall through). It must fail at construction, not boot."""
+        agent = Agent(name="Info Agent", id="info-agent", telemetry=False)
+        with pytest.raises(ValueError, match="requires a JWT verification key"):
+            AgentOS(agents=[agent], telemetry=False, authorization=True).get_app()
+
     def test_auth_mode_jwt_via_env_takes_precedence_over_security_key(self, monkeypatch):
         monkeypatch.setenv("JWT_VERIFICATION_KEY", JWT_SECRET)
         client = _build_client(settings=AgnoAPISettings(os_security_key="test-key"))
