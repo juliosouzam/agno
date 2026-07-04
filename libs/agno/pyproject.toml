@@ -2,7 +2,7 @@
 name = "agno"
 version = "2.7.0a1"
 description = "The programming language for agentic software."
-requires-python = ">=3.7,<4"
+requires-python = ">=3.9,<4"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
@@ -15,22 +15,19 @@ classifiers = [
     "Intended Audience :: Developers",
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
-  # The CLI needs >=3.9 (httpx/typer/rich floors); the marker keeps agno itself
-  # installable on the older interpreters its requires-python still admits.
   # The explicit pre-release pin is required for pip/uv to resolve the alpha.
-  "agnoctl>=0.1.0a1; python_version >= '3.9'",
+  "agnoctl>=0.1.0a1",
   "docstring-parser",
   "gitpython",
   "h11>=0.16.0",
