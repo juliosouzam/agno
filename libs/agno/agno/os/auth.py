@@ -6,7 +6,14 @@ from typing import Any, List, Optional, Set
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from agno.os.scopes import get_accessible_resource_ids, has_required_scopes
+from agno.os.scopes import (
+    check_route_scopes,
+    get_accessible_resource_ids,
+    get_default_scope_mappings,
+    has_required_scopes,
+)
+from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
+from agno.os.service_accounts import VerificationStatus
 from agno.os.settings import AgnoAPISettings
 
 # Create a global HTTPBearer instance
@@ -51,6 +58,60 @@ def get_auth_token_from_request(request: Request) -> Optional[str]:
     return None
 
 
+async def _authenticate_service_account(request: Request, token: str) -> bool:
+    """
+    Authenticate a service account token (agno_pat_...) outside the JWT middleware,
+    i.e. in os_security_key or open deployments.
+
+    Attaches the account identity to request.state exactly like the JWT middleware
+    does (user_id = the sa:<name> principal, scopes = the account's scopes) and
+    enforces the account's scopes against the default scope mappings. Service account
+    scopes are ACL data owned by this AgentOS instance, so - unlike JWT scopes - they
+    are enforced in every deployment mode.
+    """
+    verifier = getattr(request.app.state, "service_account_verifier", None)
+    if verifier is None:
+        raise HTTPException(status_code=401, detail="Service accounts are not enabled on this AgentOS instance")
+
+    client_key = request.client.host if request.client else None
+    result = await verifier.verify(token, client_key=client_key)
+
+    if result.status == VerificationStatus.THROTTLED:
+        raise HTTPException(status_code=429, detail="Too many failed authentication attempts")
+    if result.status == VerificationStatus.UNAVAILABLE:
+        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable")
+    account = result.account
+    if not result.ok or account is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired service account token")
+
+    admin_scope_raw = getattr(request.app.state, "admin_scope", None)
+    admin_scope = admin_scope_raw if isinstance(admin_scope_raw, str) else None
+
+    request.state.authenticated = True
+    request.state.user_id = account.principal
+    request.state.session_id = None
+    request.state.scopes = list(account.scopes)
+    request.state.authorization_enabled = True
+    request.state.service_account_name = account.name
+    if admin_scope:
+        request.state.admin_scope = admin_scope
+
+    scope_check = check_route_scopes(
+        list(account.scopes),
+        get_default_scope_mappings(),
+        request.method,
+        request.url.path,
+        admin_scope=admin_scope,
+    )
+    request.state.required_scopes = scope_check.required_scopes
+    if scope_check.accessible_resource_ids is not None:
+        request.state.accessible_resource_ids = scope_check.accessible_resource_ids
+    if not scope_check.allowed:
+        raise HTTPException(status_code=403, detail=build_insufficient_permissions_detail(scope_check.required_scopes))
+
+    return True
+
+
 def _is_jwt_configured() -> bool:
     """Check if JWT authentication is configured via environment variables.
 
@@ -83,6 +144,13 @@ def get_authentication_dependency(settings: AgnoAPISettings):
         # Check if JWT middleware has already handled authentication
         if getattr(request.state, "authenticated", False):
             return True
+
+        # Service account tokens (agno_pat_...) are verified and scope-checked in
+        # every deployment mode - including os_security_key mode and open dev
+        # instances, where they also provide run attribution.
+        token = credentials.credentials if credentials else None
+        if token and token.startswith(SERVICE_ACCOUNT_TOKEN_PREFIX):
+            return await _authenticate_service_account(request, token)
 
         # Also skip if JWT is configured via environment variables
         if _is_jwt_configured():

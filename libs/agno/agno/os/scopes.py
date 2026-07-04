@@ -22,9 +22,11 @@ Backwards compatibility:
   issued before the rename continue to work. Prefer ``config:*`` in new tokens.
 """
 
+import fnmatch
+import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 # Legacy resource name aliases — keep tokens issued before a rename working.
 # Keys are the legacy resource names, values are the current names.
@@ -67,6 +69,9 @@ class AgentOSScope(str, Enum):
     - evals:write - Create and update evaluation runs
     - evals:delete - Delete evaluation runs
     - traces:read - View traces and trace statistics
+    - service_accounts:read - List service accounts
+    - service_accounts:write - Mint service account tokens
+    - service_accounts:delete - Revoke service account tokens
 
     Per-Resource Scopes (with resource ID):
     - agents:<agent-id>:read - Read specific agent
@@ -470,6 +475,10 @@ def get_default_scope_mappings() -> Dict[str, List[str]]:
         "GET /traces": ["traces:read"],
         "GET /traces/*": ["traces:read"],
         "GET /trace_session_stats": ["traces:read"],
+        # Service account endpoints
+        "POST /service-accounts": ["service_accounts:write"],
+        "GET /service-accounts": ["service_accounts:read"],
+        "DELETE /service-accounts/*": ["service_accounts:delete"],
         # Schedule endpoints
         "GET /schedules": ["schedules:read"],
         "GET /schedules/*": ["schedules:read"],
@@ -513,6 +522,139 @@ def get_default_scope_mappings() -> Dict[str, List[str]]:
         "DELETE /components/*/configs/*": ["components:delete"],
         "POST /components/*/configs/*/set-current": ["components:write"],
     }
+
+
+def get_required_scopes_for_route(scope_mappings: Dict[str, List[str]], method: str, path: str) -> List[str]:
+    """
+    Look up the required scopes for a method and path in a scope-mappings dict.
+
+    Args:
+        scope_mappings: Mapping of "METHOD /path/pattern" to required scope lists
+        method: HTTP method (GET, POST, etc.)
+        path: Request path
+
+    Returns:
+        List of required scopes. Empty list [] means no scopes required (allow access).
+        Routes not present in scope_mappings also return [], allowing access.
+    """
+    route_key = f"{method} {path}"
+
+    # First, try exact match
+    if route_key in scope_mappings:
+        return scope_mappings[route_key]
+
+    # Then try pattern matching
+    for pattern, scopes in scope_mappings.items():
+        pattern_method, pattern_path = pattern.split(" ", 1)
+
+        if pattern_method != method:
+            continue
+
+        # Convert pattern to fnmatch pattern (replace {param} with *)
+        # This handles both /agents/* and /agents/{agent_id} style patterns
+        normalized_pattern = pattern_path
+        if "{" in normalized_pattern:
+            normalized_pattern = re.sub(r"\{[^}]+\}", "*", normalized_pattern)
+
+        if fnmatch.fnmatch(path, normalized_pattern):
+            return scopes
+
+    return []
+
+
+def get_resource_context_from_path(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract the resource type and resource ID from a request path.
+
+    Returns:
+        Tuple of (resource_type, resource_id). Either may be None.
+
+    Examples:
+        >>> get_resource_context_from_path("/agents/my-agent/runs")
+        ('agents', 'my-agent')
+        >>> get_resource_context_from_path("/sessions")
+        (None, None)
+    """
+    resource_type = None
+    if "/agents" in path:
+        resource_type = "agents"
+    elif "/teams" in path:
+        resource_type = "teams"
+    elif "/workflows" in path:
+        resource_type = "workflows"
+
+    resource_id = None
+    if resource_type:
+        match = re.search(f"^/{resource_type}/([^/]+)", path)
+        if match:
+            resource_id = match.group(1)
+
+    return resource_type, resource_id
+
+
+@dataclass
+class RouteScopeCheck:
+    """Result of checking a caller's scopes against a route's requirements."""
+
+    allowed: bool
+    required_scopes: List[str]
+    # Set only for listing endpoints where the caller lacks the global scope but may
+    # hold per-resource scopes: the endpoint should filter results to these IDs
+    # (possibly an empty set) instead of rejecting with 403.
+    accessible_resource_ids: Optional[Set[str]] = None
+
+
+def check_route_scopes(
+    user_scopes: List[str],
+    scope_mappings: Dict[str, List[str]],
+    method: str,
+    path: str,
+    admin_scope: Optional[str] = None,
+) -> RouteScopeCheck:
+    """
+    Check a caller's scopes against the scopes required for a route.
+
+    This is the single RBAC decision used for every credential type (JWTs, the internal
+    service token, and service account tokens). Listing endpoints get special handling:
+    a caller without the global scope is still allowed through, with
+    accessible_resource_ids populated so the endpoint returns a filtered (possibly
+    empty) list instead of a 403.
+    """
+    required_scopes = get_required_scopes_for_route(scope_mappings, method, path)
+    if not required_scopes:
+        return RouteScopeCheck(allowed=True, required_scopes=required_scopes)
+
+    resource_type, resource_id = get_resource_context_from_path(path)
+
+    allowed = has_required_scopes(
+        user_scopes,
+        required_scopes,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        admin_scope=admin_scope,
+    )
+
+    accessible_resource_ids: Optional[Set[str]] = None
+    if not allowed and not resource_id and resource_type:
+        # Listing endpoints always allow access but expose the accessible IDs for
+        # filtering, so callers with only per-resource scopes get a filtered list
+        # (including an empty one) instead of a 403. Pass the action from the
+        # required scope (e.g. "read" for "agents:read") so the cached IDs only
+        # include resources the caller is authorised for under that action.
+        required_action: Optional[str] = None
+        first_required = required_scopes[0]
+        if ":" in first_required:
+            required_action = first_required.rsplit(":", 1)[1]
+        accessible_resource_ids = get_accessible_resource_ids(
+            user_scopes, resource_type, admin_scope=admin_scope, action=required_action
+        )
+        allowed = True
+
+    return RouteScopeCheck(
+        allowed=allowed,
+        required_scopes=required_scopes,
+        accessible_resource_ids=accessible_resource_ids,
+    )
 
 
 def get_scope_value(scope: AgentOSScope) -> str:
