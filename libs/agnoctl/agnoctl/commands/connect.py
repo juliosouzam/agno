@@ -191,10 +191,28 @@ def _connect(
 
     api = AgentOSAPI(os_info.base_url, admin_token=admin_token) if minting else None
 
-    shared_account: Optional[ServiceAccount] = None
     results: List[Dict[str, Any]] = []
 
     try:
+        # Shared-account mode: resolve the token once, before any config is touched --
+        # clients then only write configs, and none of them can hit a name conflict
+        # that would re-mint (and revoke) the shared token mid-run.
+        shared_token: Optional[str] = None
+        if name is not None and minting and api is not None:
+            shared_token = _resolve_shared_token(
+                api=api,
+                adapters=selected,
+                os_info=os_info,
+                server_name=server_name,
+                name=name,
+                scopes=scopes,
+                expires_in_days=expires_in_days,
+                never_expires=never_expires,
+                privileged=privileged,
+                rotate=rotate,
+                skip_existing=skip_existing,
+                json_mode=json_mode,
+            )
         for adapter in selected:
             result: Dict[str, Any] = {"client": adapter.key, "status": "failed", "error": None}
             try:
@@ -213,23 +231,61 @@ def _connect(
                     skip_existing=skip_existing,
                     json_mode=json_mode,
                     minting=minting,
-                    shared_account=shared_account,
+                    shared_token=shared_token,
                 )
-                account = result.pop("_account", None)
-                if name is not None and account is not None:
-                    shared_account = account
             except CLIError as e:
                 result["error"] = e.message + ((" " + e.hint) if e.hint else "")
             except Exception as e:  # one client's failure must never abort the run
                 result["error"] = "Unexpected error (" + type(e).__name__ + "): " + str(e)
-            finally:
-                result.pop("_account", None)
             results.append(result)
     finally:
         if api is not None:
             api.close()
 
     _report(os_info, results, server_name, open_mcp_warning, json_mode)
+
+
+def _resolve_shared_token(
+    api: AgentOSAPI,
+    adapters: List[ClientAdapter],
+    os_info: OSInfo,
+    server_name: str,
+    name: str,
+    scopes: Optional[List[str]],
+    expires_in_days: Optional[int],
+    never_expires: bool,
+    privileged: bool,
+    rotate: bool,
+    skip_existing: bool,
+    json_mode: bool,
+) -> Optional[str]:
+    """The one token every client shares in --name mode, resolved before any config write.
+
+    Reuse first: the CLI stores no tokens, so a token already configured for this OS in
+    any selected client (and verified against /mcp) IS the shared account's token.
+    Minting happens only when no client holds a working one; name conflicts resolve per
+    the idempotency policy in _mint. Returns None when the account exists and the
+    policy says keep it untouched (clients that need a token then report skipped).
+    """
+    if not rotate:
+        for adapter in adapters:
+            existing = adapter.read_existing(server_name)
+            if existing is None or existing.url != os_info.mcp_url or existing.token is None:
+                continue
+            if verify_mcp(os_info.mcp_url, token=existing.token).ok:
+                return existing.token
+    account = _mint(
+        api,
+        name,
+        scopes,
+        expires_in_days,
+        never_expires,
+        privileged=privileged,
+        rotate=rotate,
+        skip_existing=skip_existing,
+        json_mode=json_mode,
+    )
+    return account.token if account is not None else None
 
 
 def _connect_one(
@@ -247,7 +303,7 @@ def _connect_one(
     skip_existing: bool,
     json_mode: bool,
     minting: bool,
-    shared_account: Optional[ServiceAccount],
+    shared_token: Optional[str],
 ) -> None:
     account_name = name or adapter.key
     existing = adapter.read_existing(server_name)
@@ -258,18 +314,6 @@ def _connect_one(
             check = verify_mcp(os_info.mcp_url, token=existing.token)
             if check.ok and (existing.token is not None or not minting):
                 result.update(status="already-connected", location=existing.location, verify=check.public_dict())
-                if name is not None and existing.token is not None:
-                    # Shared-account mode: hand the verified token from this client's
-                    # config to the remaining clients so they reuse the shared account.
-                    # Without this the next client hits the name conflict and re-mints,
-                    # revoking the token just reported OK for this client.
-                    result["_account"] = ServiceAccount(
-                        id="",
-                        name=name,
-                        principal="sa:" + name,
-                        token_prefix="",
-                        token=existing.token,
-                    )
                 return
             if skip_existing:
                 result.update(
@@ -291,8 +335,11 @@ def _connect_one(
     token: Optional[str] = None
     account: Optional[ServiceAccount] = None
     if minting and api is not None:
-        if name is not None and shared_account is not None:
-            account = shared_account
+        if name is not None:
+            if shared_token is None:
+                result.update(status="skipped", error="Service account exists; kept untouched.")
+                return
+            token = shared_token
         else:
             account = _mint(
                 api,
@@ -308,7 +355,7 @@ def _connect_one(
             if account is None:
                 result.update(status="skipped", error="Service account exists; kept untouched.")
                 return
-        token = account.token
+            token = account.token
 
     write_result = adapter.write(server_name, os_info.mcp_url, token)
     result["location"] = write_result.location
@@ -316,7 +363,6 @@ def _connect_one(
         result["note"] = write_result.note
     if account is not None:
         result["account"] = account.public_dict()
-        result["_account"] = account
 
     # Verify what the client will actually use, not what we intended to write: the
     # read-back catches shadowing entries and writes that silently did not take effect.
