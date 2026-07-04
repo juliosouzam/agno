@@ -18,7 +18,7 @@ from agnoctl.http import AgentOSAPI, build_client
 # AgentOS.serve() defaults to port 7777; 8000 covers bare-uvicorn setups.
 DEFAULT_URLS = ["http://localhost:7777", "http://localhost:8000"]
 
-URL_ENV_VAR = "AGNO_OS_URL"
+URL_ENV_VAR = "AGENTOS_URL"
 
 
 @dataclass
@@ -33,6 +33,10 @@ class OSInfo:
     @property
     def mcp_url(self) -> str:
         path = self.mcp_path or "/mcp"
+        # A server may advertise its MCP path without a leading slash ("mcp",
+        # "custom/mcp"); normalize so we never build "http://hostmcp".
+        if not path.startswith("/"):
+            path = "/" + path
         return self.base_url.rstrip("/") + path
 
     def public_dict(self) -> Dict[str, Any]:

@@ -55,13 +55,13 @@ def test_discover_unreachable_raises(monkeypatch):
     import agnoctl.http as http_module
 
     monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(refuse))
-    monkeypatch.delenv("AGNO_OS_URL", raising=False)
+    monkeypatch.delenv("AGENTOS_URL", raising=False)
     with pytest.raises(CLIError) as exc_info:
         discover(None)
     assert "No running AgentOS" in exc_info.value.message
 
 
 def test_discover_env_var_url(monkeypatch, fake_os):
-    monkeypatch.setenv("AGNO_OS_URL", "http://envhost:9000")
+    monkeypatch.setenv("AGENTOS_URL", "http://envhost:9000")
     info = discover(None)
     assert info.base_url == "http://envhost:9000"

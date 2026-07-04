@@ -196,5 +196,5 @@ def install_fake(monkeypatch: pytest.MonkeyPatch, fake: FakeAgentOS) -> None:
 
     monkeypatch.setattr(http_module, "_transport_override", fake.transport())
     # Keep host-machine credentials and URL overrides out of tests.
-    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGNO_OS_URL"):
+    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGENTOS_URL"):
         monkeypatch.delenv(var, raising=False)
