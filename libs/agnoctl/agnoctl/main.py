@@ -1,5 +1,3 @@
-"""The `agno` command: root Typer app, branded home screen, and version flag."""
-
 from typing import List, Optional, Tuple
 
 import typer
@@ -45,14 +43,14 @@ _GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
     (
         "Get started",
         [
-            ("agno connect", "Connect your coding agents to a running AgentOS"),
-            ("agno create <name>", "Scaffold a new AgentOS project from a template"),
+            ("agno create <name>", "Create a new AgentOS"),
+            ("agno connect", "Connect your coding agents to your AgentOS"),
         ],
     ),
     (
         "Operate",
         [
-            ("agno up / down / restart", "Run the project's Docker Compose stack"),
+            ("agno up / down / restart", "Run your AgentOS"),
             ("agno status", "Show the AgentOS and which agents are connected"),
         ],
     ),
