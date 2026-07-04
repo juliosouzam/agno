@@ -15,8 +15,16 @@ import httpx
 from agnoctl.errors import CLIError
 from agnoctl.http import AgentOSAPI, build_client
 
-# AgentOS.serve() defaults to port 7777; 8000 covers bare-uvicorn setups.
-DEFAULT_URLS = ["http://localhost:7777", "http://localhost:8000"]
+# AgentOS.serve() defaults to port 7777; when that is taken, users commonly bump to
+# 7778/7779, and 8000 covers a bare-uvicorn setup. All are probed on localhost when no
+# --url / AGENTOS_URL is given. A server on any other port needs --url or AGENTOS_URL
+# (the "no running AgentOS found" error names both).
+DEFAULT_URLS = [
+    "http://localhost:7777",
+    "http://localhost:7778",
+    "http://localhost:7779",
+    "http://localhost:8000",
+]
 
 URL_ENV_VAR = "AGENTOS_URL"
 

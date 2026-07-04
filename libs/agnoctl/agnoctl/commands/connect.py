@@ -450,6 +450,11 @@ def _connect_one(
     result["verify"] = verify_result.public_dict()
     if verify_result.ok:
         result["status"] = "connected"
+        # A client that was already configured with a *different* token still holds the
+        # old one in its live, in-process MCP connection: it keeps using the now-revoked
+        # token until it is restarted. Flag it so the report can say so.
+        if existing is not None and existing.token is not None and token is not None and existing.token != token:
+            result["rotated"] = True
     else:
         result["error"] = verify_result.error
 
@@ -506,6 +511,13 @@ def _report(
             print_warning("                 note: " + str(r["note"]))
         if r.get("replaced_url"):
             print_warning("                 replaced an entry that pointed at " + str(r["replaced_url"]))
+
+    if any(r.get("rotated") for r in results):
+        print_info("")
+        print_warning(
+            "A token was rotated. Restart the affected coding agent(s) so they reconnect with the "
+            "new token — a running client keeps using the previous (now revoked) token until it does."
+        )
 
     accounts = sorted({r["account"]["name"] for r in results if r.get("account")})
     if accounts:

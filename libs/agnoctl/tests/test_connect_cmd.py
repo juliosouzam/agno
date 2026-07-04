@@ -106,6 +106,33 @@ def test_connect_rotate_replaces_accounts(monkeypatch, fake_os, fake_clients):
     assert cursor_config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer " + new_token
 
 
+def test_connect_rotate_flags_rotated_in_json(monkeypatch, fake_os, fake_clients):
+    """A rotated token is flagged so callers know the running client must reconnect."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    assert _connect(["--clients", "cursor"]).exit_code == 0
+    result = _connect(["--clients", "cursor", "--rotate"])
+    assert result.exit_code == 0, result.output
+    cursor = next(r for r in json.loads(result.output)["results"] if r["client"] == "cursor")
+    assert cursor["status"] == "connected"
+    assert cursor.get("rotated") is True
+
+
+def test_connect_first_time_is_not_flagged_rotated(monkeypatch, fake_os, fake_clients):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    cursor = next(r for r in json.loads(result.output)["results"] if r["client"] == "cursor")
+    assert "rotated" not in cursor
+
+
+def test_connect_rotate_prints_restart_reminder(monkeypatch, fake_os, fake_clients):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor"])
+    result = runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor", "--rotate"])
+    assert result.exit_code == 0, result.output
+    assert "Restart" in result.output and "rotated" in result.output.lower()
+
+
 def test_connect_rotates_stale_entry(monkeypatch, fake_os, fake_clients):
     """A config entry whose token was revoked server-side gets rotated on re-run."""
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
