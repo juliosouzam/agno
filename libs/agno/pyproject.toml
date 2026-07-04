@@ -8,9 +8,7 @@ license = { file = "LICENSE" }
 authors = [
   {name = "Ashpreet Bedi", email = "ashpreet@agno.com"}
 ]
-keywords = [
-  "agent"
-]
+keywords = ["agno", "agentos", "agents"]
 classifiers = [
     "Intended Audience :: Developers",
     "Development Status :: 5 - Production/Stable",
@@ -22,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "License :: OSI Approved :: Apache Software License",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Artificial Intelligence",
 ]
 
 dependencies = [
