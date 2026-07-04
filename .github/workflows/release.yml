@@ -1,14 +1,9 @@
 name: Release Agno
 
-# Publishes every distribution in this repo whose pyproject version is not yet on
-# PyPI, in dependency order. Publishing uses OIDC trusted publishing (no long-lived
-# API tokens): each project on PyPI must be configured with this repo + workflow
-# (release.yml) + environment (pypi) as a trusted publisher.
-#
-# Semantics:
-# - version unchanged on PyPI  -> job succeeds without publishing (no-op release)
-# - build or publish failure   -> job fails loudly; dependents do not publish
-# - agno depends on agnoctl    -> agnoctl publishes first (needs-ordering)
+# Publishes projects whose pyproject version is not yet on PyPI, in dependency order.
+# - version unchanged on PyPI  -> job succeeds without publishing
+# - build or publish failure   -> job fails with error; dependents do not publish
+# - agno depends on agnoctl    -> agnoctl publishes first
 
 on:
   release:
@@ -17,11 +12,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-agnoctl:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +37,7 @@ jobs:
           python -m pip install --quiet --upgrade pip build
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('libs/agnoctl/pyproject.toml','rb'))['project']['version'])")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           if curl -fsS "https://pypi.org/pypi/agnoctl/$VERSION/json" > /dev/null 2>&1; then
             echo "agnoctl $VERSION already on PyPI; skipping publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -50,19 +51,18 @@ jobs:
           cd libs/agnoctl
           python -m build
 
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI
         if: steps.version.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: libs/agnoctl/dist
 
   release-agno:
-    # agno declares a dependency on agnoctl; publish agnoctl first so a fresh agno
-    # release never points at a dist that has not landed.
     needs: [release-agnoctl]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +78,7 @@ jobs:
           python -m pip install --quiet --upgrade pip build
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('libs/agno/pyproject.toml','rb'))['project']['version'])")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           if curl -fsS "https://pypi.org/pypi/agno/$VERSION/json" > /dev/null 2>&1; then
             echo "agno $VERSION already on PyPI; skipping publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -92,16 +93,18 @@ jobs:
           cd libs/agno
           python -m build
 
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI
         if: steps.version.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: libs/agno/dist
 
   release-agno-infra:
+    needs: [release-agno]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -117,6 +120,7 @@ jobs:
           python -m pip install --quiet --upgrade pip build
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('libs/agno_infra/pyproject.toml','rb'))['project']['version'])")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           if curl -fsS "https://pypi.org/pypi/agno-infra/$VERSION/json" > /dev/null 2>&1; then
             echo "agno-infra $VERSION already on PyPI; skipping publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -130,7 +134,7 @@ jobs:
           cd libs/agno_infra
           python -m build
 
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI
         if: steps.version.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
