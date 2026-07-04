@@ -27,9 +27,10 @@ classifiers = [
 ]
 
 dependencies = [
-  # The CLI needs >=3.9; the marker keeps agno itself installable on the older
-  # interpreters its requires-python still admits.
-  "agnoctl>=0.1.0rc1; python_version >= '3.9'",
+  # The CLI needs >=3.9 (httpx/typer/rich floors); the marker keeps agno itself
+  # installable on the older interpreters its requires-python still admits.
+  # The explicit pre-release pin is required for pip/uv to resolve the alpha.
+  "agnoctl>=0.1.0a1; python_version >= '3.9'",
   "docstring-parser",
   "gitpython",
   "h11>=0.16.0",
