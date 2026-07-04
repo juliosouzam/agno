@@ -462,7 +462,13 @@ class AgentOS:
         # a fresh app here would mount one whose StreamableHTTP lifespan never runs --
         # every subsequent /mcp request would 500 until restart.
         if self.enable_mcp_server and self._mcp_app is None:
-            from agno.os.mcp import get_mcp_server
+            try:
+                from agno.os.mcp import get_mcp_server
+            except ImportError as e:
+                raise ImportError(
+                    "`fastmcp` not installed. It is required for `enable_mcp_server=True`. "
+                    "Please install it using `pip install fastmcp`."
+                ) from e
 
             self._mcp_app = get_mcp_server(self)
 
@@ -931,7 +937,13 @@ class AgentOS:
 
             # Initialize MCP server if enabled
             if self.enable_mcp_server and self._mcp_app is None:
-                from agno.os.mcp import get_mcp_server
+                try:
+                    from agno.os.mcp import get_mcp_server
+                except ImportError as e:
+                    raise ImportError(
+                        "`fastmcp` not installed. It is required for `enable_mcp_server=True`. "
+                        "Please install it using `pip install fastmcp`."
+                    ) from e
 
                 self._mcp_app = get_mcp_server(self)
 
@@ -985,7 +997,13 @@ class AgentOS:
             # rebuilt one would orphan the started StreamableHTTP session manager)
             if self.enable_mcp_server:
                 if self._mcp_app is None:
-                    from agno.os.mcp import get_mcp_server
+                    try:
+                        from agno.os.mcp import get_mcp_server
+                    except ImportError as e:
+                        raise ImportError(
+                            "`fastmcp` not installed. It is required for `enable_mcp_server=True`. "
+                            "Please install it using `pip install fastmcp`."
+                        ) from e
 
                     self._mcp_app = get_mcp_server(self)
                 lifespans.append(self._mcp_app.lifespan)

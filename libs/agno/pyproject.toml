@@ -24,52 +24,50 @@ classifiers = [
 ]
 
 dependencies = [
-  # The explicit pre-release pin is required for pip/uv to resolve the alpha.
   "agnoctl>=0.1.0a1",
   "docstring-parser",
-  "gitpython",
+  # Never imported directly: a security floor for the request-smuggling CVE in
+  # h11 < 0.16, which httpx -> httpcore pulls in transitively.
   "h11>=0.16.0",
   "httpx[http2]",
   "packaging",
   "pydantic-settings",
   "pydantic",
-  "python-dotenv",
-  "python-multipart",
   "pyyaml",
   "rich",
-  "typer",
   "typing-extensions",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "mypy==1.18.2",
-  "ruff==0.14.3",
-  "pytest",
-  "pytest-asyncio",
-  "pytest-cov",
-  "pytest-mock",
+  "mypy==2.1.0",
+  "ruff==0.15.20",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "pytest-mock==3.15.1",
   "timeout-decorator",
   "types-pyyaml",
   "types-aiofiles",
   "fastapi",
+  "python-multipart>=0.0.18",
   "uvicorn",
+  "websockets",
   "PyJWT",
   "mcp",
   "openai",
   "fakeredis",
   "xlwt",
   "types-greenlet",
-  # Required for tests that exercise AgentOS routers — opentelemetry-sdk is
-  # pulled in at module import by agno.tracing.schemas, and aiosqlite /
-  # greenlet are used by AsyncSqliteDb regression coverage (greenlet is a
-  # transitive runtime requirement of SQLAlchemy's async dispatch).
   "opentelemetry-sdk",
   "aiosqlite",
   "greenlet",
 ]
 
-os = ["fastapi[standard]", "uvicorn", "sqlalchemy", "PyJWT", "opentelemetry-sdk", "openinference-instrumentation-agno", "croniter>=1.3", "pytz>=2023.3"]
+# Unbundled from fastapi[standard]: AgentOS needs form parsing (python-multipart)
+# and a WebSocket backend for uvicorn (websockets) — not the rest of the bundle
+# (fastapi-cloud-cli/sentry-sdk, fastapi-cli, jinja2, email-validator).
+os = ["fastapi", "python-multipart>=0.0.18", "uvicorn", "websockets", "sqlalchemy", "PyJWT", "opentelemetry-sdk", "openinference-instrumentation-agno", "croniter>=1.3", "pytz>=2023.3"]
 whatsapp-crypto = ["cryptography>=41.0"]
 scheduler = ["croniter>=1.3", "pytz>=2023.3"]
 
@@ -247,7 +245,6 @@ models = [
 tools = [
   "agno[apify]",
   "agno[arxiv]",
-  # "agno[brave]",  # It clashes with other dependencies
   "agno[exa]",
   "agno[seltz]",
   "agno[cartesia]",
@@ -258,7 +255,7 @@ tools = [
   "agno[firecrawl]",
   "agno[tavily]",
   "agno[scavio]",
-  # "agno[crawl4ai]",  # Temporarily disabled - depends on litellm which is compromised on PyPI (March 24, 2026)
+  # "agno[crawl4ai]",  # Excluded: depends on litellm, which was compromised on PyPI (March 24, 2026)
   "agno[github]",
   "agno[gitlab]",
   "agno[gmail]",
@@ -386,7 +383,10 @@ demo = [
     "ddgs",
     "duckdb",
     "exa-py>=2.0.0",
-    "fastapi[standard]",
+    "fastapi",
+    "python-multipart>=0.0.18",
+    "uvicorn",
+    "websockets",
     "google-genai",
     "matplotlib",
     "mcp",
