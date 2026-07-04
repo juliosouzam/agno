@@ -259,8 +259,9 @@ async def test_run_agent(mcp_client: MCPTestClient):
 
     # Check the result has expected fields
     assert result is not None
-    # The result should be a RunOutput with content
-    assert "content" in result or isinstance(result, str)
+    # Trimmed result: the text block is the answer itself (a plain string unless the
+    # answer happens to be JSON); structured ids live in structuredContent.
+    assert isinstance(result, str) or (isinstance(result, dict) and ("content" in result or "run_id" in result))
 
 
 @pytest.mark.asyncio
@@ -276,8 +277,9 @@ async def test_run_remote_agent(mcp_client: MCPTestClient):
 
     # Check the result has expected fields
     assert result is not None
-    # The result should be a RunOutput with content
-    assert "content" in result or isinstance(result, str)
+    # Trimmed result: the text block is the answer itself (a plain string unless the
+    # answer happens to be JSON); structured ids live in structuredContent.
+    assert isinstance(result, str) or (isinstance(result, dict) and ("content" in result or "run_id" in result))
 
 
 @pytest.mark.asyncio
@@ -293,8 +295,9 @@ async def test_run_remote_team(mcp_client: MCPTestClient):
 
     # Check the result has expected fields
     assert result is not None
-    # The result should be a TeamRunOutput with content
-    assert "content" in result or isinstance(result, str)
+    # Trimmed result: the text block is the answer itself (a plain string unless the
+    # answer happens to be JSON); structured ids live in structuredContent.
+    assert isinstance(result, str) or (isinstance(result, dict) and ("content" in result or "run_id" in result))
 
 
 @pytest.mark.asyncio
@@ -310,8 +313,9 @@ async def test_run_local_workflow(mcp_client: MCPTestClient):
 
     # Check the result has expected fields
     assert result is not None
-    # The result should be a WorkflowRunOutput with content
-    assert "content" in result or isinstance(result, str)
+    # Trimmed result: the text block is the answer itself (a plain string unless the
+    # answer happens to be JSON); structured ids live in structuredContent.
+    assert isinstance(result, str) or (isinstance(result, dict) and ("content" in result or "run_id" in result))
 
 
 @pytest.mark.asyncio
@@ -327,8 +331,9 @@ async def test_run_remote_workflow(mcp_client: MCPTestClient):
 
     # Check the result has expected fields
     assert result is not None
-    # The result should be a WorkflowRunOutput with content
-    assert "content" in result or isinstance(result, str)
+    # Trimmed result: the text block is the answer itself (a plain string unless the
+    # answer happens to be JSON); structured ids live in structuredContent.
+    assert isinstance(result, str) or (isinstance(result, dict) and ("content" in result or "run_id" in result))
 
 
 # =============================================================================

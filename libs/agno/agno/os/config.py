@@ -54,6 +54,16 @@ class MCPServerConfig(BaseModel):
     include_tags: Optional[Set[MCPBuiltinTag]] = None
     exclude_tags: Optional[Set[MCPBuiltinTag]] = None
 
+    # How run_agent / run_team / run_workflow serialize their results.
+    #   "trimmed" (default) -> answer text + generated media as MCP content blocks;
+    #     structuredContent carries only run_id / session_id / status (+ unresolved
+    #     requirements when paused). MCP tool results land directly in the consuming
+    #     model's context window, so the transcript, system prompt, and metrics are
+    #     deliberately not included.
+    #   "full" -> structuredContent is the run's complete ``to_dict()`` (media base64-
+    #     encoded), for programmatic MCP clients that want the whole run.
+    result_mode: Literal["trimmed", "full"] = "trimmed"
+
     # Per-call gate for the MCP server. Given the authenticated caller's user_id, return True
     # to allow the request and False to reject it with 401 -- before any tool or model runs.
     # Runs after JWT verification.

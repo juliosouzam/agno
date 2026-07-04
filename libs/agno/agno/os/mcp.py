@@ -6,13 +6,15 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
 from uuid import uuid4
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.server.http import (
     StarletteWithLifespan,
 )
+from fastmcp.tools.tool import ToolResult
 
 from agno.db.base import AsyncBaseDb, BaseDb, SessionType
 from agno.db.schemas import UserMemory
+from agno.os.mcp_results import build_run_tool_result
 from agno.os.routers.memory.schemas import (
     UserMemorySchema,
 )
@@ -37,9 +39,9 @@ from agno.os.utils import (
     get_workflow_by_id,
 )
 from agno.remote.base import RemoteDb
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.run.workflow import WorkflowRunOutput
+from agno.run.agent import RunEvent, RunOutput
+from agno.run.team import TeamRunEvent, TeamRunOutput
+from agno.run.workflow import WorkflowRunEvent, WorkflowRunOutput
 from agno.session import AgentSession, TeamSession, WorkflowSession
 
 if TYPE_CHECKING:
@@ -174,6 +176,168 @@ def _resolve_user_id(caller_user_id: Optional[str]) -> Optional[str]:
     return caller_user_id
 
 
+# Events forwarded to the client as progress notifications during agent/team runs.
+# Content deltas are deliberately excluded: MCP progress is a status channel, and
+# per-token notifications would flood clients that request a progress token.
+_TOOL_CALL_PROGRESS_EVENTS = frozenset(
+    {
+        RunEvent.tool_call_started.value,
+        RunEvent.tool_call_completed.value,
+        TeamRunEvent.tool_call_started.value,
+        TeamRunEvent.tool_call_completed.value,
+    }
+)
+
+# Error events captured so a failed run surfaces its real error message. The streaming
+# error paths yield only these events -- the final run output is never yielded on failure.
+_RUN_ERROR_EVENTS = frozenset({RunEvent.run_error.value, TeamRunEvent.run_error.value})
+
+
+async def _report_progress(ctx: Context, progress: float, message: str, total: Optional[float] = None) -> None:
+    """Send a progress notification; a failure here must never break the run.
+
+    FastMCP no-ops when the client did not send a progressToken, so this is safe to
+    call unconditionally.
+    """
+    try:
+        await ctx.report_progress(progress=progress, total=total, message=message)
+    except Exception:
+        logger.debug("Failed to send MCP progress notification", exc_info=True)
+
+
+def _describe_tool_call_event(event: Any) -> str:
+    tool = getattr(event, "tool", None)
+    tool_name = getattr(tool, "tool_name", None) or "tool"
+    verb = "started" if str(getattr(event, "event", "")).endswith("Started") else "completed"
+    return f"Tool call {verb}: {tool_name}"
+
+
+async def _consume_agentic_stream(ctx: Context, stream: Any, label: str) -> Union[RunOutput, TeamRunOutput]:
+    """Drive a streaming agent/team run and return its final output.
+
+    The stream must be created with ``stream=True, stream_events=True,
+    yield_run_output=True`` so tool-call events can be forwarded as progress
+    notifications and the final ``RunOutput`` / ``TeamRunOutput`` arrives as the
+    last yielded item. On failure the stream yields only a run-error event -- its
+    message is captured so the client sees the real error, not a generic one.
+    """
+    final: Optional[Union[RunOutput, TeamRunOutput]] = None
+    error_message: Optional[str] = None
+    ticks = 0
+    await _report_progress(ctx, 0.0, f"{label} started")
+    async for item in stream:
+        if isinstance(item, (RunOutput, TeamRunOutput)):
+            final = item
+            continue
+        event = getattr(item, "event", None)
+        if event in _TOOL_CALL_PROGRESS_EVENTS:
+            ticks += 1
+            await _report_progress(ctx, float(ticks), _describe_tool_call_event(item))
+        elif event in _RUN_ERROR_EVENTS:
+            error_message = getattr(item, "content", None) or "Run failed"
+    if final is None:
+        raise Exception(
+            str(error_message) if error_message else f"{label} finished without producing a final run output"
+        )
+    return final
+
+
+async def _run_agentic_component(
+    ctx: Context, component: Any, message: str, user_id: Optional[str], session_id: Optional[str], label: str
+) -> Union[RunOutput, TeamRunOutput]:
+    """Shared run path for agents and teams: stream with progress, or plain await for remotes.
+
+    Remote components proxy to another AgentOS over HTTP and their streaming ``arun``
+    never yields the final output object, so they take the non-streaming path (no
+    intermediate progress, same result contract).
+    """
+    from agno.agent.remote import RemoteAgent
+    from agno.team.remote import RemoteTeam
+
+    if isinstance(component, (RemoteAgent, RemoteTeam)):
+        return await component.arun(message, user_id=user_id, session_id=session_id)
+
+    stream = component.arun(
+        message,
+        user_id=user_id,
+        session_id=session_id,
+        stream=True,
+        stream_events=True,
+        yield_run_output=True,
+    )
+    return await _consume_agentic_stream(ctx, stream, label=label)
+
+
+def _describe_step_event(event: Any, total_steps: Optional[float]) -> str:
+    verb = "started" if str(getattr(event, "event", "")).endswith("Started") else "completed"
+    step_name = getattr(event, "step_name", None) or "step"
+    step_index = getattr(event, "step_index", None)
+    if isinstance(step_index, tuple) and step_index and isinstance(step_index[0], int):
+        step_index = step_index[0]
+    if isinstance(step_index, int) and total_steps:
+        return f"Step {verb}: {step_name} ({step_index + 1}/{int(total_steps)})"
+    return f"Step {verb}: {step_name}"
+
+
+async def _consume_workflow_stream(
+    ctx: Context,
+    workflow: Any,
+    stream: Any,
+    total_steps: Optional[float],
+    user_id: Optional[str],
+) -> WorkflowRunOutput:
+    """Drive a streaming workflow run and return its final output.
+
+    Workflow streams do not support ``yield_run_output``. Completed runs carry the
+    full ``WorkflowRunOutput`` on the terminal event; paused / cancelled / step-error
+    runs end the stream with NO workflow-level terminal event, so the persisted run
+    is fetched back via ``workflow.aget_run_output`` -- the same source of truth the
+    REST router uses. Events from nested workflows (``nested_depth > 0``) are skipped:
+    terminal handling and progress apply to the outer run only, and a nested failure
+    the outer workflow recovers from must not abort it.
+
+    Progress values are a plain monotonic counter (the MCP spec requires each
+    notification's progress to increase); the step k/n detail lives in the message.
+    """
+    from agno.run.workflow import BaseWorkflowRunOutputEvent
+
+    final: Optional[WorkflowRunOutput] = None
+    error_message: Optional[str] = None
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
+    ticks = 0.0
+    await _report_progress(ctx, 0.0, "Workflow started")
+    async for item in stream:
+        if isinstance(item, WorkflowRunOutput):
+            final = item
+            continue
+        if getattr(item, "nested_depth", 0):
+            continue
+        if isinstance(item, BaseWorkflowRunOutputEvent):
+            run_id = getattr(item, "run_id", None) or run_id
+            session_id = getattr(item, "session_id", None) or session_id
+        event = getattr(item, "event", None)
+        if event in (WorkflowRunEvent.step_started.value, WorkflowRunEvent.step_completed.value):
+            ticks += 1.0
+            await _report_progress(ctx, ticks, _describe_step_event(item, total_steps))
+        elif event == WorkflowRunEvent.workflow_completed.value:
+            final = getattr(item, "run_output", None) or final
+        elif event == WorkflowRunEvent.workflow_error.value:
+            # Do not raise mid-stream: closing the generator here would skip the
+            # workflow's own error-status persistence. Capture and settle after.
+            error_message = getattr(item, "error", None) or "Workflow run failed"
+    if final is None and run_id is not None:
+        try:
+            final = await workflow.aget_run_output(run_id=run_id, session_id=session_id, user_id=user_id)
+        except Exception:
+            logger.debug("Could not fetch persisted workflow run %s after stream end", run_id, exc_info=True)
+    if final is None:
+        raise Exception(
+            str(error_message) if error_message else "Workflow run finished without producing a final run output"
+        )
+    return final
+
+
 def build_mcp_server(
     os: "AgentOS",
 ) -> FastMCP:
@@ -191,6 +355,10 @@ def build_mcp_server(
     # Decorator used to register the built-in tools. Honors ``mcp_config`` scoping;
     # behaves exactly like ``mcp.tool`` when no config (or default config) is provided.
     register_builtin_tool = _builtin_tool_registrar(mcp, mcp_config)
+
+    # How the run tools serialize their results ("trimmed" keeps the frontend model's
+    # context clean; "full" is the escape hatch for programmatic clients).
+    result_mode = mcp_config.result_mode if mcp_config is not None else "trimmed"
 
     @register_builtin_tool(
         name="get_agentos_config",
@@ -228,40 +396,64 @@ def build_mcp_server(
     async def run_agent(
         agent_id: str,
         message: str,
+        ctx: Context,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> RunOutput:
+    ) -> ToolResult:
         agent = get_agent_by_id(agent_id, os.agents)
         if agent is None:
             raise Exception(f"Agent {agent_id} not found")
         user_id = _resolve_user_id(user_id)
-        return await agent.arun(message, user_id=user_id, session_id=session_id)  # type: ignore[misc]
+        run_output = await _run_agentic_component(
+            ctx, agent, message, user_id, session_id, label=f"Agent {agent.name or agent_id}"
+        )
+        return build_run_tool_result(run_output, result_mode)
 
     @register_builtin_tool(name="run_team", description="Run a team with a message", tags={"core"})  # type: ignore
     async def run_team(
         team_id: str,
         message: str,
+        ctx: Context,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> TeamRunOutput:
+    ) -> ToolResult:
         team = get_team_by_id(team_id, os.teams)
         if team is None:
             raise Exception(f"Team {team_id} not found")
         user_id = _resolve_user_id(user_id)
-        return await team.arun(message, user_id=user_id, session_id=session_id)  # type: ignore[misc]
+        run_output = await _run_agentic_component(
+            ctx, team, message, user_id, session_id, label=f"Team {team.name or team_id}"
+        )
+        return build_run_tool_result(run_output, result_mode)
 
     @register_builtin_tool(name="run_workflow", description="Run a workflow with a message", tags={"core"})  # type: ignore
     async def run_workflow(
         workflow_id: str,
         message: str,
+        ctx: Context,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> WorkflowRunOutput:
+    ) -> ToolResult:
+        from agno.workflow.remote import RemoteWorkflow
+
         workflow = get_workflow_by_id(workflow_id, os.workflows)
         if workflow is None:
             raise Exception(f"Workflow {workflow_id} not found")
         user_id = _resolve_user_id(user_id)
-        return await workflow.arun(message, user_id=user_id, session_id=session_id)
+        if isinstance(workflow, RemoteWorkflow):
+            run_output = await workflow.arun(message, user_id=user_id, session_id=session_id)
+            return build_run_tool_result(run_output, result_mode)
+        steps = getattr(workflow, "steps", None)
+        total_steps = float(len(steps)) if isinstance(steps, (list, tuple)) and steps else None
+        stream = workflow.arun(
+            message,
+            user_id=user_id,
+            session_id=session_id,
+            stream=True,
+            stream_events=True,
+        )
+        run_output = await _consume_workflow_stream(ctx, workflow, stream, total_steps, user_id)
+        return build_run_tool_result(run_output, result_mode)
 
     # ==================== Session Management Tools ====================
 

@@ -66,14 +66,22 @@ async def _call_tool(os: AgentOS, name: str, args: dict):
 
 
 def _stub_arun(component, run_output):
-    """Replace ``component.arun`` with a stub that records the identity kwargs it was called with."""
+    """Replace ``component.arun`` with a streaming stub that records the identity kwargs.
+
+    The run tools consume ``arun`` as a stream (``stream=True, yield_run_output=True``),
+    so the stub is an async generator whose last item is the final run output.
+    """
     captured: dict = {}
 
     async def fake_arun(message, **kwargs):
         captured["message"] = message
         captured["user_id"] = kwargs.get("user_id")
         captured["session_id"] = kwargs.get("session_id")
-        return run_output
+        # Agent/team tools must request the final output explicitly; workflows have no
+        # yield_run_output kwarg (the consumer accepts a bare WorkflowRunOutput instead).
+        # Gating on this catches a regression where the tools stop passing it.
+        if kwargs.get("yield_run_output") or isinstance(run_output, WorkflowRunOutput):
+            yield run_output
 
     component.arun = fake_arun  # type: ignore[method-assign]
     return captured
