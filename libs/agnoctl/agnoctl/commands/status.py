@@ -4,11 +4,11 @@ from typing import Optional
 
 import typer
 
-from agno_cli.clients import build_adapters
-from agno_cli.commands._common import handle_cli_error
-from agno_cli.console import emit_json, print_info, print_success
-from agno_cli.discovery import discover
-from agno_cli.errors import CLIError
+from agnoctl.clients import build_adapters
+from agnoctl.commands._common import handle_cli_error
+from agnoctl.console import emit_json, print_info, print_success
+from agnoctl.discovery import discover
+from agnoctl.errors import CLIError
 
 
 def status(

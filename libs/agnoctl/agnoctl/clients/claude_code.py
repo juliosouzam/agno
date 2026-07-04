@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from agno_cli.clients.base import (
+from agnoctl.clients.base import (
     ClientAdapter,
     ExistingEntry,
     WriteResult,
@@ -29,7 +29,7 @@ from agno_cli.clients.base import (
     servers_table,
     token_from_authorization,
 )
-from agno_cli.errors import CLIError
+from agnoctl.errors import CLIError
 
 SUBPROCESS_TIMEOUT = 60.0
 

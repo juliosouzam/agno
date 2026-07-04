@@ -4,7 +4,7 @@ import json
 
 from typer.testing import CliRunner
 
-from agno_cli.main import app
+from agnoctl.main import app
 
 runner = CliRunner()
 

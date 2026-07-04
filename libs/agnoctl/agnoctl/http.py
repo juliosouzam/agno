@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from agno_cli import __version__
-from agno_cli.errors import APIError, ConflictError
+from agnoctl import __version__
+from agnoctl.errors import APIError, ConflictError
 
 # Test hook: tests set this to an httpx.MockTransport so every client in the CLI
 # (API, discovery, MCP verification) talks to an in-memory fake AgentOS.

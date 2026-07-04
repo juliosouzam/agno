@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-import agno_cli.commands.connect as connect_module
-from agno_cli.clients.claude_code import ClaudeCodeAdapter
-from agno_cli.clients.codex import CodexAdapter
-from agno_cli.clients.cursor import CursorAdapter
-from agno_cli.main import app
+import agnoctl.commands.connect as connect_module
+from agnoctl.clients.claude_code import ClaudeCodeAdapter
+from agnoctl.clients.codex import CodexAdapter
+from agnoctl.clients.cursor import CursorAdapter
+from agnoctl.main import app
 from tests.conftest import FakeAgentOS, install_fake
 
 runner = CliRunner()

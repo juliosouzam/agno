@@ -4,15 +4,15 @@ from typing import Optional
 
 import typer
 
-from agno_cli import __version__
-from agno_cli.commands.connect import connect
-from agno_cli.commands.create import create
-from agno_cli.commands.lifecycle import down, restart, up
-from agno_cli.commands.status import status
-from agno_cli.commands.tokens import tokens_app
-from agno_cli.console import print_info, print_warning
+from agnoctl import __version__
+from agnoctl.commands.connect import connect
+from agnoctl.commands.create import create
+from agnoctl.commands.lifecycle import down, restart, up
+from agnoctl.commands.status import status
+from agnoctl.commands.tokens import tokens_app
+from agnoctl.console import print_info, print_warning
 
-PLUGIN_GROUP = "agno_cli.plugins"
+PLUGIN_GROUP = "agnoctl.plugins"
 
 app = typer.Typer(
     name="agno",
@@ -34,7 +34,7 @@ app.command(name="restart")(restart)
 def _load_plugins() -> None:
     """Mount subcommand groups exposed by other installed distributions.
 
-    A plugin is an entry point in the `agno_cli.plugins` group resolving to a
+    A plugin is an entry point in the `agnoctl.plugins` group resolving to a
     typer.Typer; the entry-point name becomes the subcommand name. A broken plugin
     must never take the core CLI down, so failures are reported and skipped.
     """

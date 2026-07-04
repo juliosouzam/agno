@@ -4,7 +4,7 @@ This ports the path of the legacy `ag infra` CLI that real projects use: templat
 a compose file, and up/down/restart shell out to `docker compose`. The legacy Python
 resource engine (per-resource Docker/AWS orchestration) is intentionally not ported —
 its production path is under redesign (see the agno-infra 2.0 spec); when that lands it
-plugs into this CLI via the agno_cli.plugins entry-point group.
+plugs into this CLI via the agnoctl.plugins entry-point group.
 """
 
 import shutil
@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
-from agno_cli.commands._common import handle_cli_error
-from agno_cli.console import emit_json, print_info, print_success
-from agno_cli.errors import CLIError
+from agnoctl.commands._common import handle_cli_error
+from agnoctl.console import emit_json, print_info, print_success
+from agnoctl.errors import CLIError
 
 # Same names and order the legacy CLI recognized.
 COMPOSE_FILE_NAMES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]

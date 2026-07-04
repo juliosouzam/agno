@@ -3,8 +3,8 @@
 import httpx
 import pytest
 
-from agno_cli.discovery import discover
-from agno_cli.errors import CLIError
+from agnoctl.discovery import discover
+from agnoctl.errors import CLIError
 from tests.conftest import FakeAgentOS, install_fake
 
 
@@ -52,7 +52,7 @@ def test_discover_unreachable_raises(monkeypatch):
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
-    import agno_cli.http as http_module
+    import agnoctl.http as http_module
 
     monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(refuse))
     monkeypatch.delenv("AGNO_OS_URL", raising=False)

@@ -13,10 +13,10 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-from agno_cli.clients.claude_code import ClaudeCodeAdapter
-from agno_cli.clients.codex import CodexAdapter
-from agno_cli.clients.cursor import CursorAdapter
-from agno_cli.errors import CLIError
+from agnoctl.clients.claude_code import ClaudeCodeAdapter
+from agnoctl.clients.codex import CodexAdapter
+from agnoctl.clients.cursor import CursorAdapter
+from agnoctl.errors import CLIError
 
 URL = "http://localhost:7777/mcp"
 TOKEN = "agno_pat_test123"

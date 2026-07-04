@@ -12,9 +12,9 @@ from typing import Any, Dict, Optional
 
 import typer
 
-from agno_cli.commands._common import handle_cli_error
-from agno_cli.console import emit_json, print_info, print_success
-from agno_cli.errors import CLIError
+from agnoctl.commands._common import handle_cli_error
+from agnoctl.console import emit_json, print_info, print_success
+from agnoctl.errors import CLIError
 
 TEMPLATES: Dict[str, str] = {
     "agentos-docker": "https://github.com/agno-agi/agentos-docker-template",

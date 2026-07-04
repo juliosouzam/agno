@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agno_cli.clients.base import ClientAdapter, ExistingEntry, WriteResult, bearer_header, token_from_authorization
-from agno_cli.errors import CLIError
+from agnoctl.clients.base import ClientAdapter, ExistingEntry, WriteResult, bearer_header, token_from_authorization
+from agnoctl.errors import CLIError
 
 if sys.version_info >= (3, 11):
     import tomllib

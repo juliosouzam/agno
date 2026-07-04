@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import typer
 
-from agno_cli.errors import CLIError
+from agnoctl.errors import CLIError
 
 ADMIN_TOKEN_ENV = "AGNO_ADMIN_TOKEN"
 SECURITY_KEY_ENV = "OS_SECURITY_KEY"
@@ -64,7 +64,7 @@ def parse_expires(value: str) -> Tuple[Optional[int], bool]:
 
 def handle_cli_error(error: CLIError, json_mode: bool) -> "typer.Exit":
     """Print a CLIError appropriately for the output mode and return the Exit to raise."""
-    from agno_cli.console import emit_json, print_error, print_warning
+    from agnoctl.console import emit_json, print_error, print_warning
 
     if json_mode:
         payload = {"error": error.message}

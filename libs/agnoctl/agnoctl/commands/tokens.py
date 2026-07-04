@@ -5,11 +5,11 @@ from typing import List, Optional
 
 import typer
 
-from agno_cli.commands._common import handle_cli_error, parse_expires, resolve_admin_token
-from agno_cli.console import console, emit_json, print_info, print_success, print_warning
-from agno_cli.discovery import discover
-from agno_cli.errors import CLIError, ConflictError
-from agno_cli.http import AgentOSAPI
+from agnoctl.commands._common import handle_cli_error, parse_expires, resolve_admin_token
+from agnoctl.console import console, emit_json, print_info, print_success, print_warning
+from agnoctl.discovery import discover
+from agnoctl.errors import CLIError, ConflictError
+from agnoctl.http import AgentOSAPI
 
 tokens_app = typer.Typer(name="tokens", help="Mint, list, and revoke AgentOS service-account tokens.")
 

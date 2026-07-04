@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from agno_cli.errors import CLIError
-from agno_cli.http import AgentOSAPI, build_client
+from agnoctl.errors import CLIError
+from agnoctl.http import AgentOSAPI, build_client
 
 # AgentOS.serve() defaults to port 7777; 8000 covers bare-uvicorn setups.
 DEFAULT_URLS = ["http://localhost:7777", "http://localhost:8000"]

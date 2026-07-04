@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from agno_cli import __version__
-from agno_cli.http import build_client
+from agnoctl import __version__
+from agnoctl.http import build_client
 
 PROTOCOL_VERSION = "2025-03-26"
 

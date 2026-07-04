@@ -1,6 +1,6 @@
 """MCP verification client: JSON and SSE payloads, auth failures."""
 
-from agno_cli.mcp_client import verify_mcp
+from agnoctl.mcp_client import verify_mcp
 from tests.conftest import FakeAgentOS, install_fake
 
 MCP_URL = "http://localhost:7777/mcp"
@@ -61,7 +61,7 @@ def test_verify_never_raises_on_malformed_result(monkeypatch):
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": "not-a-dict"})
         return httpx.Response(202)
 
-    import agno_cli.http as http_module
+    import agnoctl.http as http_module
 
     monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
     result = verify_mcp(MCP_URL, token="anything")

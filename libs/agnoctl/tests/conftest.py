@@ -192,7 +192,7 @@ def fake_os(monkeypatch: pytest.MonkeyPatch) -> FakeAgentOS:
 
 
 def install_fake(monkeypatch: pytest.MonkeyPatch, fake: FakeAgentOS) -> None:
-    import agno_cli.http as http_module
+    import agnoctl.http as http_module
 
     monkeypatch.setattr(http_module, "_transport_override", fake.transport())
     # Keep host-machine credentials and URL overrides out of tests.

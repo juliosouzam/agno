@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-import agno_cli.commands.create as create_module
-import agno_cli.commands.lifecycle as lifecycle_module
-from agno_cli.commands.lifecycle import find_compose_file
-from agno_cli.errors import CLIError
-from agno_cli.main import app
+import agnoctl.commands.create as create_module
+import agnoctl.commands.lifecycle as lifecycle_module
+from agnoctl.commands.lifecycle import find_compose_file
+from agnoctl.errors import CLIError
+from agnoctl.main import app
 
 runner = CliRunner()
 

@@ -33,7 +33,7 @@ agno status [--url URL] [--json]
 `create` scaffolds an AgentOS project from a starter template (git clone, history stripped,
 example secrets copied into place). `up`/`down`/`restart` run the project's compose file — the legacy
 `ag infra` resource engine (per-resource Docker/AWS orchestration) is not ported; it is
-under redesign and will plug in via the `agno_cli.plugins` entry-point group.
+under redesign and will plug in via the `agnoctl.plugins` entry-point group.
 
 Admin credential resolution (for minting): `AGNO_ADMIN_TOKEN` env var, then `OS_SECURITY_KEY` env var, then an interactive prompt. When the target AgentOS has authorization disabled (local dev), minting is skipped and configs are written without credentials.
 
@@ -46,9 +46,9 @@ Admin credential resolution (for minting): `AGNO_ADMIN_TOKEN` env var, then `OS_
 
 ## Plugins
 
-Other distributions can add subcommands by exposing a `typer.Typer` under the `agno_cli.plugins` entry-point group:
+Other distributions can add subcommands by exposing a `typer.Typer` under the `agnoctl.plugins` entry-point group:
 
 ```toml
-[project.entry-points."agno_cli.plugins"]
+[project.entry-points."agnoctl.plugins"]
 infra = "agno_infra.cli:infra_app"
 ```

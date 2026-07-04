@@ -11,14 +11,14 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
-from agno_cli.clients import CLIENT_ALIASES, build_adapters
-from agno_cli.clients.base import ClientAdapter
-from agno_cli.commands._common import handle_cli_error, parse_expires, resolve_admin_token, validate_server_name
-from agno_cli.console import emit_json, print_error, print_info, print_success, print_warning
-from agno_cli.discovery import MCP_ENABLE_INSTRUCTIONS, OSInfo, discover
-from agno_cli.errors import CLIError, ConflictError
-from agno_cli.http import AgentOSAPI, ServiceAccount
-from agno_cli.mcp_client import verify_mcp
+from agnoctl.clients import CLIENT_ALIASES, build_adapters
+from agnoctl.clients.base import ClientAdapter
+from agnoctl.commands._common import handle_cli_error, parse_expires, resolve_admin_token, validate_server_name
+from agnoctl.console import emit_json, print_error, print_info, print_success, print_warning
+from agnoctl.discovery import MCP_ENABLE_INSTRUCTIONS, OSInfo, discover
+from agnoctl.errors import CLIError, ConflictError
+from agnoctl.http import AgentOSAPI, ServiceAccount
+from agnoctl.mcp_client import verify_mcp
 
 # Exit codes: 0 = all connected, 1 = nothing connected, 2 = usage error (click's
 # convention, raised by typer itself), 3 = partial success.

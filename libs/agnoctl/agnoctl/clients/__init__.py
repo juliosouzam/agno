@@ -3,10 +3,10 @@
 from pathlib import Path
 from typing import Dict, Optional
 
-from agno_cli.clients.base import ClientAdapter, ExistingEntry, WriteResult
-from agno_cli.clients.claude_code import ClaudeCodeAdapter
-from agno_cli.clients.codex import CodexAdapter
-from agno_cli.clients.cursor import CursorAdapter
+from agnoctl.clients.base import ClientAdapter, ExistingEntry, WriteResult
+from agnoctl.clients.claude_code import ClaudeCodeAdapter
+from agnoctl.clients.codex import CodexAdapter
+from agnoctl.clients.cursor import CursorAdapter
 
 # Accepted spellings for --clients, mapped to canonical adapter keys.
 CLIENT_ALIASES = {
