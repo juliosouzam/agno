@@ -3,8 +3,7 @@
 This ports the path of the legacy `ag infra` CLI that real projects use: templates ship
 a compose file, and up/down/restart shell out to `docker compose`. The legacy Python
 resource engine (per-resource Docker/AWS orchestration) is intentionally not ported —
-its production path is under redesign (see the agno-infra 2.0 spec); when that lands it
-plugs into this CLI via the agnoctl.plugins entry-point group.
+its production path is under redesign (see the agno-infra 2.0 spec).
 """
 
 import shutil

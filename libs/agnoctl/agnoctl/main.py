@@ -1,8 +1,10 @@
-"""The `agno` command: root Typer app and plugin loader."""
+"""The `agno` command: root Typer app, branded home screen, and version flag."""
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import typer
+from rich.table import Table
+from rich.text import Text
 
 from agnoctl import __version__
 from agnoctl.commands.connect import connect
@@ -10,14 +12,12 @@ from agnoctl.commands.create import create
 from agnoctl.commands.lifecycle import down, restart, up
 from agnoctl.commands.status import status
 from agnoctl.commands.tokens import tokens_app
-from agnoctl.console import print_info, print_warning
-
-PLUGIN_GROUP = "agnoctl.plugins"
+from agnoctl.console import console, print_info
 
 app = typer.Typer(
     name="agno",
-    help="Agno CLI: create and manage AgentOS's, built for humans and coding agents.",
-    no_args_is_help=True,
+    help="The CLI for AgentOS, built for humans and coding agents.",
+    no_args_is_help=False,
     add_completion=False,
     pretty_exceptions_show_locals=False,
 )
@@ -31,33 +31,61 @@ app.command(name="down")(down)
 app.command(name="restart")(restart)
 
 
-def _load_plugins() -> None:
-    """Mount subcommand groups exposed by other installed distributions.
+ORANGE = "color(208)"
 
-    A plugin is an entry point in the `agnoctl.plugins` group resolving to a
-    typer.Typer; the entry-point name becomes the subcommand name. A broken plugin
-    must never take the core CLI down, so failures are reported and skipped.
-    """
-    from importlib.metadata import entry_points
+_BANNER = r""" █████╗  ██████╗ ███╗   ██╗ ██████╗
+██╔══██╗██╔════╝ ████╗  ██║██╔═══██╗
+███████║██║  ███╗██╔██╗ ██║██║   ██║
+██╔══██║██║   ██║██║╚██╗██║██║   ██║
+██║  ██║╚██████╔╝██║ ╚████║╚██████╔╝
+╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝"""
 
-    try:
-        plugin_entry_points = entry_points(group=PLUGIN_GROUP)
-    except TypeError:  # Python 3.9: entry_points() takes no kwargs and returns a dict
-        plugin_entry_points = entry_points().get(PLUGIN_GROUP, [])  # type: ignore[arg-type,attr-defined]
+# The home screen's command catalog. Keep in sync with the commands registered above.
+_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
+    (
+        "Get started",
+        [
+            ("agno connect", "Connect your coding agents to a running AgentOS"),
+            ("agno create <name>", "Scaffold a new AgentOS project from a template"),
+        ],
+    ),
+    (
+        "Operate",
+        [
+            ("agno up / down / restart", "Run the project's Docker Compose stack"),
+            ("agno status", "Show the AgentOS and which agents are connected"),
+        ],
+    ),
+    (
+        "Tokens",
+        [
+            ("agno tokens", "Mint, list, and revoke service-account tokens"),
+        ],
+    ),
+]
 
-    for entry_point in plugin_entry_points:
-        try:
-            plugin = entry_point.load()
-        except Exception as e:
-            print_warning("Skipping CLI plugin '" + entry_point.name + "': " + str(e))
-            continue
-        if isinstance(plugin, typer.Typer):
-            app.add_typer(plugin, name=entry_point.name)
-        else:
-            print_warning("Skipping CLI plugin '" + entry_point.name + "': not a typer.Typer")
 
+def render_home() -> None:
+    """Print the branded home screen shown for a bare `agno` invocation."""
+    console.print()
+    console.print(Text(_BANNER, style=f"bold {ORANGE}"))
+    console.print()
+    console.print(Text("The CLI for AgentOS, built for humans and agents", style="dim"))
+    console.print()
 
-_load_plugins()
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column(style=ORANGE, no_wrap=True)
+    grid.add_column(style="grey74")
+    for i, (heading, rows) in enumerate(_GROUPS):
+        if i:
+            grid.add_row("", "")
+        grid.add_row(Text(heading, style="bold default"), "")
+        for cmd, desc in rows:
+            grid.add_row("  " + cmd, desc)
+    console.print(grid)
+    console.print()
+    console.print(Text(f"Run agno COMMAND --help  for details · v{__version__}", style="dim"))
+    console.print()
 
 
 def _version_callback(value: bool) -> None:
@@ -66,13 +94,15 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(
         None, "--version", callback=_version_callback, is_eager=True, help="Print the CLI version and exit."
     ),
 ) -> None:
-    pass
+    if ctx.invoked_subcommand is None:
+        render_home()
 
 
 if __name__ == "__main__":
