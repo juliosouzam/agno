@@ -635,12 +635,13 @@ def check_route_scopes(
     )
 
     accessible_resource_ids: Optional[Set[str]] = None
-    if not allowed and not resource_id and resource_type:
-        # Listing endpoints always allow access but expose the accessible IDs for
+    if not allowed and method == "GET" and not resource_id and resource_type:
+        # GET listing endpoints always allow access but expose the accessible IDs for
         # filtering, so callers with only per-resource scopes get a filtered list
-        # (including an empty one) instead of a 403. Pass the action from the
-        # required scope (e.g. "read" for "agents:read") so the cached IDs only
-        # include resources the caller is authorised for under that action.
+        # (including an empty one) instead of a 403. Restricted to GET so a non-GET
+        # id-less route (e.g. POST /agents) is never silently allowed through. Pass
+        # the action from the required scope (e.g. "read" for "agents:read") so the
+        # cached IDs only include resources the caller is authorised for under it.
         required_action: Optional[str] = None
         first_required = required_scopes[0]
         if ":" in first_required:

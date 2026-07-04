@@ -14,7 +14,7 @@ from agno.os.routers.service_accounts.schema import (
     ServiceAccountResponse,
 )
 from agno.os.schema import PaginatedResponse, PaginationInfo
-from agno.os.scopes import AgentOSScope, has_required_scopes
+from agno.os.scopes import AgentOSScope, has_required_scopes, parse_scope
 from agno.os.service_accounts import (
     DEFAULT_EXPIRY_DAYS,
     DEFAULT_SERVICE_ACCOUNT_SCOPES,
@@ -41,6 +41,25 @@ def _is_integrity_error(exc: Exception) -> bool:
         return isinstance(exc, IntegrityError)
     except ImportError:
         return False
+
+
+def _caller_holds_scope(caller_scopes: List[str], scope: str, admin_scope: Optional[str]) -> bool:
+    """Whether the caller's scopes cover a single requested scope.
+
+    Per-resource scopes (e.g. agents:my-agent:run) must be checked with their
+    resource context, so a caller holding exactly that scope - or a wildcard/global
+    scope over the resource - is recognised as holding it.
+    """
+    parsed = parse_scope(scope, admin_scope=admin_scope)
+    if parsed.is_per_resource_scope and parsed.resource and parsed.action:
+        return has_required_scopes(
+            caller_scopes,
+            [f"{parsed.resource}:{parsed.action}"],
+            resource_type=parsed.resource,
+            resource_id=parsed.resource_id,
+            admin_scope=admin_scope,
+        )
+    return has_required_scopes(caller_scopes, [scope], admin_scope=admin_scope)
 
 
 def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
@@ -102,9 +121,7 @@ def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
         effective_admin_scope = admin_scope or AgentOSScope.ADMIN.value
         if effective_admin_scope in caller_scopes:
             return
-        scopes_not_held = [
-            scope for scope in scopes if not has_required_scopes(caller_scopes, [scope], admin_scope=admin_scope)
-        ]
+        scopes_not_held = [scope for scope in scopes if not _caller_holds_scope(caller_scopes, scope, admin_scope)]
         if scopes_not_held:
             raise HTTPException(
                 status_code=403,

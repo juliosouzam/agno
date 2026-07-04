@@ -48,8 +48,8 @@ DEFAULT_EXPIRY_DAYS = 90
 
 # Lowercase slug: no colons (cannot spoof the sa: principal namespace), no leading
 # underscore (cannot collide with internal identities like __scheduler__), no @ or dots
-# (cannot mimic email-shaped human subs).
-SERVICE_ACCOUNT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+# (cannot mimic email-shaped human subs). \Z (not $) so a trailing newline is rejected.
+SERVICE_ACCOUNT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}\Z")
 
 _BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
@@ -139,11 +139,12 @@ class ServiceAccountVerification:
 class _FailedLookupLimiter:
     """Sliding-window limiter for failed token lookups.
 
+    Only throttles the failure RESPONSE - a valid token is never blocked, so a flood
+    of bad tokens cannot lock out legitimate clients even when they share a bucket.
     In-process and per-worker: with N workers the effective budget is N times larger.
     Keyed by client address, which is only meaningful behind a proxy when the server
     runs with proxy headers enabled (e.g. uvicorn --proxy-headers). Only true
-    verification failures count - database errors do not, so a DB blip cannot lock
-    out legitimate clients.
+    verification failures count - database errors do not.
     """
 
     def __init__(self, max_failures: int = 20, window_seconds: int = 60, max_entries: int = 1024):
@@ -190,10 +191,10 @@ class ServiceAccountVerifier:
     async def verify(self, token: str, client_key: Optional[str] = None) -> ServiceAccountVerification:
         """Verify a plaintext token. Returns a verification result, never raises."""
         key = client_key or "unknown"
-        if self._limiter.is_limited(key):
-            log_warning("Service account verification throttled: too many failed lookups")
-            return ServiceAccountVerification(status=VerificationStatus.THROTTLED)
 
+        # The token is always looked up first: a valid token is never blocked by the
+        # limiter. The limiter only shapes the FAILURE response (INVALID vs 429) so a
+        # flood of bad tokens can't deny service to legitimate holders.
         token_hash = hash_token(token)
         try:
             if isinstance(self.db, AsyncBaseDb):
@@ -204,22 +205,26 @@ class ServiceAccountVerifier:
             log_warning("The configured database does not support service accounts")
             return ServiceAccountVerification(status=VerificationStatus.UNAVAILABLE)
         except Exception as e:
+            # Fail closed on database errors: never counts toward the limiter, so a
+            # DB blip cannot lock out legitimate clients.
             log_error(f"Service account lookup failed: {e}")
             return ServiceAccountVerification(status=VerificationStatus.UNAVAILABLE)
 
-        if row is None:
-            self._limiter.record_failure(key)
+        if row is not None:
+            account = ServiceAccount.from_dict(row)
+            if not (account.is_revoked() or account.is_expired()):
+                await self._maybe_touch_last_used(account)
+                return ServiceAccountVerification(status=VerificationStatus.OK, account=account)
+            log_debug("Service account verification failed: token is revoked or expired")
+        else:
             log_debug("Service account verification failed: unknown token")
-            return ServiceAccountVerification(status=VerificationStatus.INVALID)
 
-        account = ServiceAccount.from_dict(row)
-        if account.is_revoked() or account.is_expired():
-            self._limiter.record_failure(key)
-            log_debug(f"Service account verification failed: token for '{account.name}' is revoked or expired")
-            return ServiceAccountVerification(status=VerificationStatus.INVALID)
-
-        await self._maybe_touch_last_used(account)
-        return ServiceAccountVerification(status=VerificationStatus.OK, account=account)
+        # Verification failed for a reason we count (unknown / revoked / expired).
+        if self._limiter.is_limited(key):
+            log_warning("Service account verification throttled: too many failed lookups")
+            return ServiceAccountVerification(status=VerificationStatus.THROTTLED)
+        self._limiter.record_failure(key)
+        return ServiceAccountVerification(status=VerificationStatus.INVALID)
 
     async def _maybe_touch_last_used(self, account: ServiceAccount) -> None:
         now = time.time()

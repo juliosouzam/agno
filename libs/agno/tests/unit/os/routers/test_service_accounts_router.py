@@ -187,6 +187,18 @@ class TestCreateServiceAccountSubsetRule:
         response = client.post("/service-accounts", json={"name": "ci", "scopes": ["agents:my-agent:run"]})
         assert response.status_code == 201
 
+    def test_caller_can_grant_exact_per_resource_scope_it_holds(self, mock_db, settings):
+        # Least-privilege delegation: holding exactly agents:my-agent:run must be
+        # enough to grant agents:my-agent:run.
+        client = self._client_with_state(mock_db, settings, ["service_accounts:write", "agents:my-agent:run"])
+        response = client.post("/service-accounts", json={"name": "ci", "scopes": ["agents:my-agent:run"]})
+        assert response.status_code == 201
+
+    def test_caller_cannot_grant_per_resource_scope_for_other_resource(self, mock_db, settings):
+        client = self._client_with_state(mock_db, settings, ["service_accounts:write", "agents:my-agent:run"])
+        response = client.post("/service-accounts", json={"name": "ci", "scopes": ["agents:other-agent:run"]})
+        assert response.status_code == 403
+
     def test_unscoped_root_caller_is_exempt(self, mock_db, settings):
         # No request.state.scopes (os_security_key or open dev instance)
         app = FastAPI()

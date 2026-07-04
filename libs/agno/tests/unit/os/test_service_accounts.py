@@ -90,8 +90,10 @@ class TestNameValidation:
             "user@example.com",  # email shape
             "-leading-dash",
             "a" * 64,  # too long
+            "github-actions\n",  # trailing newline must not sneak past the anchor
+            "claude\ncode",  # embedded newline
         ]:
-            assert not is_valid_service_account_name(name), name
+            assert not is_valid_service_account_name(name), repr(name)
 
 
 class TestPrincipal:
@@ -214,6 +216,20 @@ class TestVerifier:
         # A different client is unaffected
         result = await verifier.verify("agno_pat_bad", client_key="5.6.7.8")
         assert result.status == VerificationStatus.INVALID
+
+    @pytest.mark.asyncio
+    async def test_valid_token_never_blocked_by_limiter(self, sync_db):
+        # A flood of bad tokens must not deny service to a valid token from the same key.
+        plaintext, token_hash, _ = generate_token()
+        verifier = ServiceAccountVerifier(db=sync_db)
+        verifier._limiter.max_failures = 3
+        for _ in range(10):
+            result = await verifier.verify("agno_pat_bad", client_key="1.2.3.4")
+            assert result.status in (VerificationStatus.INVALID, VerificationStatus.THROTTLED)
+        # The valid token still authenticates despite the throttled bucket.
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
+        result = await verifier.verify(plaintext, client_key="1.2.3.4")
+        assert result.ok
 
     @pytest.mark.asyncio
     async def test_async_db_lookup_is_awaited(self):

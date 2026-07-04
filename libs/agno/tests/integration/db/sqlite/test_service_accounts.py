@@ -63,6 +63,18 @@ class TestServiceAccountsTable:
         sqlite_db_real.create_service_account(_account("sa-1", "claude-code", "hash-1"))
         assert sqlite_db_real.get_service_account_by_token_hash("no-such-hash") is None
 
+    def test_token_hash_lookup_reraises_on_db_error(self, sqlite_db_real):
+        # A dead connection must raise, not return None - the verifier maps a raise to
+        # UNAVAILABLE (503) rather than misreading it as an unknown token (401).
+        sqlite_db_real.create_service_account(_account("sa-1", "claude-code", "hash-1"))
+        sqlite_db_real.db_engine.dispose()
+        sqlite_db_real.db_url = "sqlite:////nonexistent/path/definitely_missing.db"
+        from sqlalchemy import create_engine
+
+        sqlite_db_real.db_engine = create_engine(sqlite_db_real.db_url)
+        with pytest.raises(Exception):
+            sqlite_db_real.get_service_account_by_token_hash("hash-1")
+
     def test_duplicate_active_name_rejected_but_reusable_after_revocation(self, sqlite_db_real):
         sqlite_db_real.create_service_account(_account("sa-1", "claude-code", "hash-1"))
 

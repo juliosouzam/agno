@@ -3925,6 +3925,12 @@ class AsyncPostgresDb(AsyncBaseDb):
         """
         table = await self._get_table(table_type="service_accounts")
         if table is None:
+            # _get_table swallows connectivity errors and returns None, which is
+            # indistinguishable from "table not created yet". Probe the connection so
+            # a real outage propagates (fail closed) instead of reading as an unknown
+            # token; a genuinely absent table returns None.
+            async with self.async_session_factory() as sess:
+                await sess.execute(text("SELECT 1"))
             return None
         try:
             async with self.async_session_factory() as sess:
