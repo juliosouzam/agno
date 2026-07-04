@@ -1,7 +1,7 @@
 import asyncio
 import hmac
 from os import getenv
-from typing import Any, List, Optional, Set
+from typing import Any, List, Literal, Optional, Set
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -118,6 +118,30 @@ def _is_jwt_configured() -> bool:
     This covers cases where JWT middleware is set up manually (not via authorization=True).
     """
     return bool(getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE"))
+
+
+def get_effective_auth_mode(
+    settings: Optional[AgnoAPISettings], authorization: bool = False
+) -> Literal["none", "security_key", "jwt"]:
+    """Return the authentication mode effectively enforced by the OS.
+
+    Mirrors the precedence used by ``get_authentication_dependency``:
+    JWT (via authorization=True on AgentOS or JWT environment variables) takes
+    precedence over the security key, which takes precedence over no auth.
+
+    Args:
+        settings: The API settings containing the security key and authorization flag
+        authorization: The AgentOS authorization flag (JWT middleware enabled)
+
+    Returns:
+        "jwt" when JWT authorization is effectively active, "security_key" when
+        only the OS security key is enforced, "none" when authentication is disabled.
+    """
+    if authorization or (settings is not None and settings.authorization_enabled) or _is_jwt_configured():
+        return "jwt"
+    if settings is not None and settings.os_security_key:
+        return "security_key"
+    return "none"
 
 
 def get_authentication_dependency(settings: AgnoAPISettings):
