@@ -1,6 +1,6 @@
 [project]
 name = "agno"
-version = "2.6.22"
+version = "2.7.0a1"
 description = "The programming language for agentic software."
 requires-python = ">=3.7,<4"
 readme = "README.md"
@@ -27,6 +27,7 @@ classifiers = [
 ]
 
 dependencies = [
+  "agnoctl>=0.1.0rc1",
   "docstring-parser",
   "gitpython",
   "h11>=0.16.0",
@@ -410,6 +411,9 @@ demo = [
     "langchain-openai",
     "dspy",
 ]
+
+[project.scripts]
+agno = "agnoctl.main:app"
 
 [project.urls]
 Homepage = "https://agno.com"
