@@ -13,7 +13,7 @@ from agno.os.scopes import (
     has_required_scopes,
 )
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
-from agno.os.service_accounts import authenticate_service_account_request
+from agno.os.service_accounts import ServiceAccountVerification, authenticate_service_account_request
 from agno.os.settings import AgnoAPISettings
 
 # Create a global HTTPBearer instance
@@ -117,7 +117,7 @@ def _has_jwt_middleware(app: Any) -> bool:
     if app is None:
         return False
     try:
-        from agno.os.middleware.jwt import JWTMiddleware
+        from agno.os.middleware.jwt import JWTMiddleware, jwt_kwargs_have_key_source
     except ImportError:
         return False
     user_middleware = getattr(app, "user_middleware", None) or []
@@ -129,13 +129,7 @@ def _has_jwt_middleware(app: Any) -> bool:
         # middleware class as the auth layer for security-key / service-account-only
         # modes, constructed without any JWT source. (Env-var-configured JWT is
         # detected separately by _is_jwt_configured.)
-        kwargs = getattr(mw, "kwargs", None) or {}
-        if (
-            kwargs.get("verification_keys")
-            or kwargs.get("jwks_file")
-            or kwargs.get("secret_key")
-            or kwargs.get("validate") is False
-        ):
+        if jwt_kwargs_have_key_source(getattr(mw, "kwargs", None) or {}):
             return True
     return False
 
@@ -267,18 +261,21 @@ def validate_websocket_token(token: str, settings: AgnoAPISettings) -> bool:
     return token == settings.os_security_key
 
 
-async def validate_websocket_service_account(token: str, app: Any) -> bool:
-    """Validate a service-account token (``agno_pat_...``) for WebSocket authentication.
+async def verify_websocket_service_account(
+    token: str, app: Any, client_key: Optional[str] = None
+) -> Optional[ServiceAccountVerification]:
+    """Verify a service-account token (``agno_pat_...``) for WebSocket authentication.
 
     The REST dependency accepts service account tokens in every deployment mode, so the
-    WebSocket path must too -- without this, the same PAT authenticates every REST call
-    but is rejected on WS with a bare security-key comparison.
+    WebSocket path must too. Returns the full verification result (None when no verifier
+    is configured) rather than a bare pass/fail: the caller needs ``result.account`` --
+    its principal and scopes -- to populate the WebSocket auth context so the same RBAC
+    and attribution gates that police JWTs apply to PATs.
     """
     verifier = getattr(app.state, "service_account_verifier", None)
     if verifier is None:
-        return False
-    result = await verifier.verify(token)
-    return bool(result.ok and result.account is not None)
+        return None
+    return await verifier.verify(token, client_key=client_key)
 
 
 def build_insufficient_permissions_detail(required_scopes: Optional[List[str]]) -> str:

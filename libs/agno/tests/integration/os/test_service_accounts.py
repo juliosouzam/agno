@@ -1,5 +1,6 @@
 """Integration tests for service account (agno_pat_) authentication in AgentOS."""
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from importlib.util import find_spec
@@ -408,3 +409,150 @@ class TestServiceAccountsOverMCP:
         response = self._mcp_post(mcp_open_client, token="agno_pat_invalid000000000000000000")
         assert response.status_code == 401
         assert response.json()["detail"] == UNIFORM_401_DETAIL
+
+
+# ---------------------------------------------------------------------------
+# WebSocket (/workflows/ws) coverage: PAT and security-key auth must mirror
+# REST semantics -- prefix dispatch before JWT, scopes enforced in every mode,
+# user_id pinned to the service-account principal.
+# ---------------------------------------------------------------------------
+
+WS_SECURITY_KEY = "ws-test-security-key"
+
+
+@pytest.fixture
+def security_key_client(test_agent, sqlite_db):
+    """AgentOS in security-key mode (no JWT anywhere) with a db."""
+    agent_os = AgentOS(agents=[test_agent], db=sqlite_db, settings=AgnoAPISettings(os_security_key=WS_SECURITY_KEY))
+    return TestClient(agent_os.get_app())
+
+
+@pytest.fixture
+def open_client(test_agent, sqlite_db):
+    """AgentOS with a db but no credential configured (open instance)."""
+    agent_os = AgentOS(agents=[test_agent], db=sqlite_db)
+    return TestClient(agent_os.get_app())
+
+
+def _ws_authenticate(ws, token):
+    """Drain the connected frame, send an authenticate action, return the settling frame."""
+    connected = json.loads(ws.receive_text())
+    assert connected["event"] == "connected"
+    ws.send_text(json.dumps({"action": "authenticate", "token": token}))
+    return json.loads(ws.receive_text())
+
+
+class TestServiceAccountsOverWebSocket:
+    def _mint_with_security_key(self, client, name="ws-sa", **body_overrides):
+        response = client.post(
+            "/service-accounts",
+            headers={"Authorization": f"Bearer {WS_SECURITY_KEY}"},
+            json={"name": name, **body_overrides},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def test_security_key_authenticates_over_ws(self, security_key_client):
+        # Regression: the single-auth-layer install for security-key/db modes must
+        # not read as a JWT deployment to the WS config resolver, which previously
+        # rejected every credential with "JWT authentication is misconfigured".
+        with security_key_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, WS_SECURITY_KEY)
+        assert frame["event"] == "authenticated", frame
+
+    def test_wrong_security_key_rejected_over_ws(self, security_key_client):
+        with security_key_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, "not-the-key")
+        assert frame["event"] == "auth_error"
+
+    def test_open_instance_with_db_needs_no_ws_auth(self, open_client):
+        # A db alone (service-account verifier present) must not gate the WS.
+        with open_client.websocket_connect("/workflows/ws") as ws:
+            connected = json.loads(ws.receive_text())
+            assert connected["requires_auth"] is False
+            ws.send_text(json.dumps({"action": "ping"}))
+            assert json.loads(ws.receive_text())["event"] == "pong"
+
+    def test_bogus_pat_rejected_over_ws_even_on_open_instance(self, open_client):
+        # An explicit PAT either verifies or is rejected -- never falls through.
+        with open_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, "agno_pat_definitely_not_real0000")
+        assert frame["event"] == "auth_error"
+        assert frame["error"] == UNIFORM_401_DETAIL
+
+    def test_pat_authenticates_over_ws_in_security_key_mode(self, security_key_client):
+        minted = self._mint_with_security_key(security_key_client)
+        with security_key_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, minted["token"])
+            assert frame["event"] == "authenticated", frame
+            identity = json.loads(ws.receive_text())
+        assert identity["user_id"] == "sa:ws-sa"
+
+    def test_pat_missing_workflows_run_rejected_on_start_workflow(self, security_key_client):
+        # PAT scopes are first-party ACL data: enforced on the WS even in
+        # security-key mode, exactly like REST and MCP.
+        minted = self._mint_with_security_key(security_key_client, name="ws-limited", scopes=["sessions:read"])
+        with (
+            patch("agno.os.router.handle_workflow_via_websocket", new_callable=AsyncMock) as handler,
+            security_key_client.websocket_connect("/workflows/ws") as ws,
+        ):
+            _ws_authenticate(ws, minted["token"])
+            ws.receive_text()  # identity frame
+            ws.send_text(json.dumps({"action": "start-workflow", "workflow_id": "wf", "message": "go"}))
+            frame = json.loads(ws.receive_text())
+        assert frame == {"event": "error", "error": "Insufficient permissions to run this workflow"}
+        handler.assert_not_awaited()
+
+    def test_pat_user_id_forced_to_principal_on_start_workflow(self, security_key_client):
+        # Default scopes include workflows:run, so the RBAC gate passes and the
+        # dispatcher must overwrite a client-spoofed user_id with sa:<name>.
+        minted = self._mint_with_security_key(security_key_client, name="ws-forced")
+        with (
+            patch("agno.os.router.handle_workflow_via_websocket", new_callable=AsyncMock) as handler,
+            security_key_client.websocket_connect("/workflows/ws") as ws,
+        ):
+            _ws_authenticate(ws, minted["token"])
+            ws.receive_text()  # identity frame
+            ws.send_text(
+                json.dumps({"action": "start-workflow", "workflow_id": "wf", "message": "go", "user_id": "mallory"})
+            )
+            # Actions are handled sequentially, so a pong guarantees the
+            # start-workflow dispatch (and the mocked handler call) completed.
+            ws.send_text(json.dumps({"action": "ping"}))
+            assert json.loads(ws.receive_text())["event"] == "pong"
+        handler.assert_awaited_once()
+        forwarded_message = handler.await_args.args[1]
+        assert forwarded_message["user_id"] == "sa:ws-forced"
+
+    def test_pat_authenticates_over_ws_in_jwt_mode(self, jwt_client):
+        # Regression: the JWT branch used to swallow every token, feeding the
+        # opaque PAT to the JWT validator. Prefix dispatch now mirrors REST.
+        admin_jwt = _make_jwt(["agent_os:admin"])
+        minted = _mint(jwt_client, admin_jwt, name="ws-jwt-sa").json()
+        with jwt_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, minted["token"])
+            assert frame["event"] == "authenticated", frame
+            identity = json.loads(ws.receive_text())
+        assert identity["user_id"] == "sa:ws-jwt-sa"
+
+    def test_pat_missing_scope_rejected_on_start_workflow_in_jwt_mode(self, jwt_client):
+        admin_jwt = _make_jwt(["agent_os:admin"])
+        minted = _mint(jwt_client, admin_jwt, name="ws-jwt-limited", scopes=["sessions:read"]).json()
+        with jwt_client.websocket_connect("/workflows/ws") as ws:
+            _ws_authenticate(ws, minted["token"])
+            ws.receive_text()  # identity frame
+            ws.send_text(json.dumps({"action": "start-workflow", "workflow_id": "wf", "message": "go"}))
+            frame = json.loads(ws.receive_text())
+        assert frame["error"] == "Insufficient permissions to run this workflow"
+
+    def test_revoked_pat_rejected_over_ws(self, jwt_client):
+        admin_jwt = _make_jwt(["agent_os:admin"])
+        minted = _mint(jwt_client, admin_jwt, name="ws-jwt-revoked").json()
+        revoke = jwt_client.delete(
+            f"/service-accounts/{minted['id']}", headers={"Authorization": f"Bearer {admin_jwt}"}
+        )
+        assert revoke.status_code == 204
+        with jwt_client.websocket_connect("/workflows/ws") as ws:
+            frame = _ws_authenticate(ws, minted["token"])
+        assert frame["event"] == "auth_error"
+        assert frame["error"] == UNIFORM_401_DETAIL

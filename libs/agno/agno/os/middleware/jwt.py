@@ -318,6 +318,23 @@ class JWTValidator:
         }
 
 
+def jwt_kwargs_have_key_source(kwargs: Dict[str, Any]) -> bool:
+    """Whether ``add_middleware`` kwargs carry a JWT key source (or disable validation).
+
+    AgentOS installs this same middleware class as the general auth layer for
+    security-key / service-account-only deployments, constructed without any JWT
+    source. Callers that scan ``app.user_middleware`` (``/info`` auth-mode detection,
+    WebSocket config resolution) must use this predicate to tell a JWT-validating
+    instance from the plain auth layer, so the two checks cannot drift.
+    """
+    return bool(
+        kwargs.get("verification_keys")
+        or kwargs.get("jwks_file")
+        or kwargs.get("secret_key")
+        or kwargs.get("validate") is False
+    )
+
+
 def build_jwt_middleware_kwargs(
     authorization_config: Optional[Any],
     *,

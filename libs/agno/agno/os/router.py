@@ -16,8 +16,8 @@ from agno.exceptions import RemoteServerUnavailableError
 from agno.os.auth import (
     get_authentication_dependency,
     get_effective_auth_mode,
-    validate_websocket_service_account,
     validate_websocket_token,
+    verify_websocket_service_account,
 )
 from agno.os.managers import websocket_manager
 from agno.os.middleware.jwt import JWTValidator
@@ -48,6 +48,7 @@ from agno.os.schema import (
 )
 from agno.os.scopes import AgentOSScope, has_required_scopes
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
+from agno.os.service_accounts import VerificationStatus
 from agno.os.settings import AgnoAPISettings
 from agno.os.utils import resolve_ws_jwt_config
 from agno.team.factory import TeamFactory
@@ -328,8 +329,15 @@ def get_websocket_router(
 
         await websocket_manager.connect(websocket, requires_auth=requires_auth)
 
-        # Store user context from JWT auth
+        # Store user context from the authenticated identity (JWT or service account)
         websocket_user_context: Dict[str, Any] = {}
+
+        def scope_enforcement_active() -> bool:
+            # JWT deployments always enforce scopes. Service-account identities do
+            # too -- their scopes are first-party ACL data, enforced in every
+            # deployment mode (same rule as REST and MCP). Security-key auth
+            # attaches no scopes and retains full access.
+            return jwt_auth_enabled or "scopes" in websocket_user_context
 
         try:
             while True:
@@ -342,6 +350,40 @@ def get_websocket_router(
                     token = message.get("token")
                     if not token:
                         await websocket.send_text(json.dumps({"event": "auth_error", "error": "Token is required"}))
+                        continue
+
+                    if token.startswith(SERVICE_ACCOUNT_TOKEN_PREFIX):
+                        # Service-account PATs are opaque first-party credentials --
+                        # never decoded as JWTs (mirroring the REST middleware's
+                        # prefix dispatch) and verified fail-closed in every
+                        # deployment mode.
+                        client_key = websocket.client.host if websocket.client else None
+                        verification = await verify_websocket_service_account(
+                            token, websocket.app, client_key=client_key
+                        )
+                        account = verification.account if verification is not None and verification.ok else None
+                        if account is not None:
+                            # Attach the account identity so the same RBAC and
+                            # attribution gates that police JWTs apply to PATs.
+                            websocket_user_context["user_id"] = account.principal
+                            websocket_user_context["scopes"] = list(account.scopes)
+                            await websocket_manager.authenticate_websocket(websocket)
+                            await websocket.send_text(
+                                json.dumps(
+                                    {
+                                        "event": "authenticated",
+                                        "message": "Service account authentication successful.",
+                                        "user_id": account.principal,
+                                    }
+                                )
+                            )
+                        else:
+                            error_msg = "Invalid or expired service account token"
+                            if verification is not None and verification.status == VerificationStatus.THROTTLED:
+                                error_msg = "Too many failed authentication attempts"
+                            elif verification is not None and verification.status == VerificationStatus.UNAVAILABLE:
+                                error_msg = "Authentication is temporarily unavailable"
+                            await websocket.send_text(json.dumps({"event": "auth_error", "error": error_msg}))
                         continue
 
                     if jwt_auth_required and not jwt_auth_enabled:
@@ -391,14 +433,6 @@ def get_websocket_router(
                                 json.dumps({"event": "auth_error", "error": error_msg, "error_type": error_type})
                             )
                         continue
-                    elif token.startswith(SERVICE_ACCOUNT_TOKEN_PREFIX):
-                        # Service account tokens are verified in every deployment mode,
-                        # mirroring the REST dependency: an explicit PAT either verifies
-                        # or is rejected -- it never falls back to the security key.
-                        if await validate_websocket_service_account(token, websocket.app):
-                            await websocket_manager.authenticate_websocket(websocket)
-                        else:
-                            await websocket.send_text(json.dumps({"event": "auth_error", "error": "Invalid token"}))
                     elif validate_websocket_token(token, settings):
                         # Legacy os_security_key authentication
                         await websocket_manager.authenticate_websocket(websocket)
@@ -424,14 +458,15 @@ def get_websocket_router(
                     await websocket.send_text(json.dumps({"event": "pong"}))
 
                 elif action == "start-workflow":
-                    # Enforce workflow-level RBAC whenever JWT auth is enabled.
+                    # Enforce workflow-level RBAC whenever scope enforcement is
+                    # active (JWT auth, or a service-account identity).
                     # Check RBAC unconditionally — do not skip when workflow_id
                     # is absent, otherwise an unauthenticated-scope caller can
                     # bypass the permission gate by omitting workflow_id and
                     # letting the downstream handler reject it *after* any
                     # side-effects.
                     workflow_id = message.get("workflow_id")
-                    if jwt_auth_enabled:
+                    if scope_enforcement_active():
                         user_scopes = websocket_user_context.get("scopes", [])
                         if not has_required_scopes(
                             user_scopes,
@@ -445,28 +480,31 @@ def get_websocket_router(
                             )
                             continue
 
-                    # Force user_id from JWT for non-admin callers so the client
-                    # cannot attribute a run to another user by spoofing the field.
-                    jwt_user_id = websocket_user_context.get("user_id")
-                    if jwt_user_id:
+                    # Force user_id from the authenticated identity (JWT sub or
+                    # service-account principal) for non-admin callers so the
+                    # client cannot attribute a run to another user by spoofing
+                    # the field.
+                    auth_user_id = websocket_user_context.get("user_id")
+                    if auth_user_id:
                         is_admin = ws_admin_scope in websocket_user_context.get("scopes", [])
                         if is_admin:
-                            message.setdefault("user_id", jwt_user_id)
+                            message.setdefault("user_id", auth_user_id)
                         else:
-                            message["user_id"] = jwt_user_id
+                            message["user_id"] = auth_user_id
                     await handle_workflow_via_websocket(websocket, message, os, ws_user_context=websocket_user_context)
 
                 elif action == "reconnect":
-                    # Force user_id from JWT for non-admins so reconnecting
-                    # cannot read another user's run events by swapping user_id.
-                    jwt_user_id = websocket_user_context.get("user_id")
+                    # Force user_id from the authenticated identity for non-admins
+                    # so reconnecting cannot read another user's run events by
+                    # swapping user_id.
+                    auth_user_id = websocket_user_context.get("user_id")
                     is_admin = False
-                    if jwt_user_id:
+                    if auth_user_id:
                         is_admin = ws_admin_scope in websocket_user_context.get("scopes", [])
                         if is_admin:
-                            message.setdefault("user_id", jwt_user_id)
+                            message.setdefault("user_id", auth_user_id)
                         else:
-                            message["user_id"] = jwt_user_id
+                            message["user_id"] = auth_user_id
 
                     # Enforce workflow-level RBAC at reconnect just like
                     # start-workflow does. RBAC fires whenever JWT auth is on
@@ -477,7 +515,7 @@ def get_websocket_router(
                     # that's when the downstream session/component check
                     # actually uses it.
                     workflow_id_for_reconnect = message.get("workflow_id")
-                    if jwt_auth_enabled and not is_admin:
+                    if scope_enforcement_active() and not is_admin:
                         if ws_user_isolation_enabled and not workflow_id_for_reconnect:
                             await websocket.send_text(
                                 json.dumps(
@@ -510,7 +548,7 @@ def get_websocket_router(
                     # Pass auth context out-of-band so the handler doesn't
                     # have to read internal flags out of the client message.
                     ws_auth = WebSocketAuthContext(
-                        jwt_enabled=jwt_auth_enabled,
+                        jwt_enabled=scope_enforcement_active(),
                         is_admin=is_admin,
                         user_isolation_enabled=ws_user_isolation_enabled,
                     )
@@ -519,7 +557,7 @@ def get_websocket_router(
                 elif action == "continue-workflow":
                     # Enforce workflow-level RBAC, mirroring start-workflow.
                     workflow_id = message.get("workflow_id")
-                    if jwt_auth_enabled:
+                    if scope_enforcement_active():
                         user_scopes = websocket_user_context.get("scopes", [])
                         if not has_required_scopes(
                             user_scopes,
@@ -535,19 +573,20 @@ def get_websocket_router(
                             )
                             continue
 
-                    # Force user_id from JWT for non-admin callers so the client
-                    # cannot continue another user's paused run by spoofing the field.
-                    jwt_user_id = websocket_user_context.get("user_id")
+                    # Force user_id from the authenticated identity for non-admin
+                    # callers so the client cannot continue another user's paused
+                    # run by spoofing the field.
+                    auth_user_id = websocket_user_context.get("user_id")
                     is_admin = False
-                    if jwt_user_id:
+                    if auth_user_id:
                         is_admin = ws_admin_scope in websocket_user_context.get("scopes", [])
                         if is_admin:
-                            message.setdefault("user_id", jwt_user_id)
+                            message.setdefault("user_id", auth_user_id)
                         else:
-                            message["user_id"] = jwt_user_id
+                            message["user_id"] = auth_user_id
 
                     ws_auth = WebSocketAuthContext(
-                        jwt_enabled=jwt_auth_enabled,
+                        jwt_enabled=scope_enforcement_active(),
                         is_admin=is_admin,
                         user_isolation_enabled=ws_user_isolation_enabled,
                     )
