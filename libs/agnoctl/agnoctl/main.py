@@ -44,7 +44,7 @@ _GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
         "Get started",
         [
             ("agno create <name>", "Create a new AgentOS"),
-            ("agno connect", "Connect your coding agents to your AgentOS"),
+            ("agno connect", "Connect your AI apps to your AgentOS using MCP"),
         ],
     ),
     (
