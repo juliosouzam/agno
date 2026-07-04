@@ -249,6 +249,47 @@ def test_connect_detects_shadowing_claude_local_entry(monkeypatch, fake_os, fake
     assert result.exit_code == 1
 
 
+def test_connect_chatgpt_prints_manual_instructions(monkeypatch, fake_os, fake_clients):
+    """chatgpt is opt-in, mints nothing, and reports a 'manual' status (exit 0)."""
+    result = _connect(["--clients", "chatgpt"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert len(payload["results"]) == 1
+    entry = payload["results"][0]
+    assert entry["client"] == "chatgpt"
+    assert entry["status"] == "manual"
+    assert entry["url"] == MCP_URL
+    assert entry["instructions"]
+    # localhost AgentOS is unreachable from ChatGPT's cloud: the note must say so.
+    assert "public HTTPS" in entry["note"]
+    # No account minted, and no admin credential was required.
+    assert fake_os.create_calls == 0
+
+
+def test_connect_chatgpt_public_url_has_no_unreachable_note(monkeypatch, fake_clients):
+    fake = FakeAgentOS()
+    install_fake(monkeypatch, fake)
+    result = runner.invoke(app, ["connect", "--json", "--url", "https://os.example.com", "--clients", "chatgpt"])
+    assert result.exit_code == 0, result.output
+    entry = json.loads(result.output)["results"][0]
+    assert entry["status"] == "manual"
+    assert entry["url"] == "https://os.example.com/mcp"
+    assert entry["note"] is None
+
+
+def test_connect_mixes_chatgpt_with_a_real_client(monkeypatch, fake_os, fake_clients):
+    """cursor connects and verifies; chatgpt is manual; the run still exits 0."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _connect(["--clients", "cursor,chatgpt"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    by_client = {r["client"]: r for r in payload["results"]}
+    assert by_client["cursor"]["status"] == "connected"
+    assert by_client["chatgpt"]["status"] == "manual"
+    # Only the real client minted an account.
+    assert list(fake_os.accounts.keys()) == ["cursor"]
+
+
 def test_connect_shared_account_reuses_token_for_new_client(monkeypatch, fake_os, fake_clients):
     """Regression: in shared-account mode, an already-connected client must hand the
     shared token to clients connecting later, instead of the later client hitting the

@@ -28,6 +28,51 @@ EXIT_PARTIAL = 3
 
 ROTATE_HINT = "Re-run with --rotate to revoke and re-mint it, or --skip-existing to leave it untouched."
 
+# ChatGPT is not a ClientAdapter: it has no local config to write and nothing agnoctl
+# can verify (the connector is added later, by a human, in ChatGPT's cloud UI). It is
+# handled out of band as printed setup instructions, opt-in via --clients only.
+CHATGPT_ALIASES = {"chatgpt", "gpt", "openai"}
+
+
+def _split_chatgpt(clients: Optional[str]) -> "tuple[Optional[str], bool]":
+    """Peel a ChatGPT request out of --clients; returns (remaining clients, want_chatgpt)."""
+    if not clients:
+        return clients, False
+    tokens = [t.strip() for t in clients.split(",") if t.strip()]
+    remaining = [t for t in tokens if t.lower() not in CHATGPT_ALIASES]
+    want_chatgpt = any(t.lower() in CHATGPT_ALIASES for t in tokens)
+    return (",".join(remaining) if remaining else None), want_chatgpt
+
+
+def _chatgpt_instructions(os_info: OSInfo, server_name: str) -> Dict[str, Any]:
+    """A manual-setup result for ChatGPT: honest steps, never a verified connection."""
+    mcp_url = os_info.mcp_url
+    lowered = os_info.base_url.lower()
+    is_public = mcp_url.lower().startswith("https://") and not any(
+        h in lowered for h in ("localhost", "127.0.0.1", "0.0.0.0")
+    )
+    note = None
+    if not is_public:
+        note = (
+            "ChatGPT adds connectors from its own cloud and cannot reach a local AgentOS at "
+            + os_info.base_url
+            + "; deploy it behind a public HTTPS URL (or a tunnel) before adding it."
+        )
+    return {
+        "client": "chatgpt",
+        "status": "manual",
+        "error": None,
+        "url": mcp_url,
+        "instructions": [
+            "ChatGPT reaches MCP servers from its cloud, so the AgentOS must be on a public HTTPS URL.",
+            "ChatGPT's Connectors UI authenticates with OAuth, not bearer tokens, so a token-protected "
+            "AgentOS cannot be added from the UI yet; use a public or OAuth-enabled AgentOS.",
+            "In ChatGPT: Settings -> Connectors -> Add custom connector, paste the MCP URL below, and follow "
+            "the prompts (custom connectors need a paid plan; enable Developer Mode for full tool access).",
+        ],
+        "note": note,
+    }
+
 
 def _resolve_clients(clients: Optional[str], adapters: Dict[str, ClientAdapter]) -> List[ClientAdapter]:
     if clients:
@@ -102,7 +147,10 @@ def connect(
     clients: Optional[str] = typer.Option(
         None,
         "--clients",
-        help="Comma-separated clients to configure (claude-code,claude-desktop,codex,cursor). Default: detected.",
+        help=(
+            "Comma-separated clients (claude-code,claude-desktop,codex,cursor; chatgpt prints manual "
+            "setup steps). Default: detected."
+        ),
     ),
     name: Optional[str] = typer.Option(
         None, "--name", help="Use one shared service account with this name instead of one per client."
@@ -172,11 +220,13 @@ def _connect(
         print_info("AgentOS at " + os_info.base_url + version + ", MCP at " + os_info.mcp_url)
 
     adapters = build_adapters(project=project)
-    selected = _resolve_clients(clients, adapters)
+    clients_remaining, want_chatgpt = _split_chatgpt(clients)
+    # Auto-detect only when no --clients was given; a chatgpt-only request selects no adapters.
+    selected = _resolve_clients(clients_remaining, adapters) if clients is None or clients_remaining else []
 
-    minting = os_info.auth_mode not in ("none",)
+    minting = os_info.auth_mode not in ("none",) and bool(selected)
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
-    if not minting and not json_mode:
+    if not minting and selected and not json_mode:
         print_info("Authorization is disabled on this AgentOS; connecting without credentials.")
 
     # Truthful-outcome check: if the OS enforces auth but /mcp answers without a token,
@@ -243,6 +293,9 @@ def _connect(
     finally:
         if api is not None:
             api.close()
+
+    if want_chatgpt:
+        results.append(_chatgpt_instructions(os_info, server_name))
 
     _report(os_info, results, server_name, open_mcp_warning, json_mode)
 
@@ -392,7 +445,8 @@ def _report(
     open_mcp_warning: Optional[str],
     json_mode: bool,
 ) -> None:
-    ok_statuses = ("connected", "already-connected")
+    # "manual" (ChatGPT instructions) is not a failure: agnoctl did all it can.
+    ok_statuses = ("connected", "already-connected", "manual")
     ok_count = sum(1 for r in results if r["status"] in ok_statuses)
     if ok_count == len(results):
         exit_code = EXIT_OK
@@ -424,6 +478,12 @@ def _report(
             print_success("  already ok     " + label + "  ->  " + str(r.get("location", "")))
         elif r["status"] == "skipped":
             print_warning("  skipped        " + label + "  (" + str(r.get("error") or "") + ")")
+        elif r["status"] == "manual":
+            print_warning("  action needed  " + label + "  (set up in the ChatGPT UI)")
+            for step in r.get("instructions", []):
+                print_info("                 - " + step)
+            if r.get("url"):
+                print_info("                 MCP URL: " + str(r["url"]))
         else:
             print_error("  failed         " + label + "  (" + str(r.get("error") or "unknown error") + ")")
         if r.get("note"):
