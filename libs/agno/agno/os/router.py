@@ -5,6 +5,7 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Request,
     WebSocket,
 )
 
@@ -265,7 +266,7 @@ def get_info_router(os: "AgentOS") -> APIRouter:
         description="Return lightweight, unauthenticated metadata about this AgentOS instance.",
         response_model=InfoResponse,
     )
-    async def get_info() -> InfoResponse:
+    async def get_info(request: Request) -> InfoResponse:
         mcp_enabled = bool(os.enable_mcp_server)
         return InfoResponse(
             agno_version=agno_version,
@@ -273,7 +274,7 @@ def get_info_router(os: "AgentOS") -> APIRouter:
             team_count=len(os.teams or []),
             workflow_count=len(os.workflows or []),
             mcp=McpInfo(enabled=mcp_enabled, path="/mcp" if mcp_enabled else None),
-            auth_mode=get_effective_auth_mode(settings=os.settings, authorization=os.authorization),
+            auth_mode=get_effective_auth_mode(settings=os.settings, authorization=os.authorization, app=request.app),
         )
 
     return router

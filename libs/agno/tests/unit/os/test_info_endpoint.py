@@ -86,6 +86,29 @@ class TestInfoEndpointAuthMode:
         # JWT configured via env vars is effectively enforced, even without authorization=True
         assert body["auth_mode"] == "jwt"
 
+    def test_auth_mode_jwt_via_manually_added_middleware(self):
+        """Regression: JWTMiddleware installed via ``app.add_middleware`` must be detected.
+
+        Some deployments configure JWT auth by calling ``app.add_middleware(JWTMiddleware, ...)``
+        instead of using ``AgentOS(authorization=True)``. Before the fix, ``/info`` reported
+        ``auth_mode: "none"`` for these deployments, and ``agno connect`` skipped the mint
+        step and produced configs without a bearer token.
+        """
+        from agno.os.middleware import JWTMiddleware
+
+        agent = Agent(name="Info Agent", id="info-agent", telemetry=False)
+        os_instance = AgentOS(agents=[agent], telemetry=False)
+        app = os_instance.get_app()
+        app.add_middleware(
+            JWTMiddleware,
+            verification_keys=[JWT_SECRET],
+            algorithm="HS256",
+            authorization=True,
+        )
+        client = TestClient(app)
+        body = client.get("/info").json()
+        assert body["auth_mode"] == "jwt"
+
 
 class TestGetEffectiveAuthMode:
     def test_none_when_settings_missing(self):
