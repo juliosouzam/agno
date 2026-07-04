@@ -56,6 +56,7 @@ from agno.os.routers.memory import get_memory_router
 from agno.os.routers.metrics import get_metrics_router
 from agno.os.routers.registry import get_registry_router
 from agno.os.routers.schedules import get_schedule_router
+from agno.os.routers.service_accounts import get_service_accounts_router
 from agno.os.routers.session import get_session_router
 from agno.os.routers.teams import get_team_router
 from agno.os.routers.traces import get_traces_router
@@ -361,6 +362,11 @@ class AgentOS:
             internal_service_token = secrets.token_urlsafe(32)
         self._internal_service_token = internal_service_token
 
+        # Shared verifier for service account tokens (agno_pat_...), created lazily
+        # when a db is available. One instance per AgentOS so the failed-lookup
+        # limiter and last_used_at throttle are shared across the REST and MCP apps.
+        self._service_account_verifier: Optional[Any] = None
+
         # List of all MCP tools used inside the AgentOS
         self.mcp_tools: List[Any] = []
         self._mcp_app: Optional[Any] = None
@@ -480,11 +486,13 @@ class AgentOS:
                 updated_routers.append(_get_disabled_feature_router("/components", "Components", "sync db (BaseDb)"))
             updated_routers.append(get_schedule_router(os_db=self.db, settings=self.settings))
             updated_routers.append(get_approval_router(os_db=self.db, settings=self.settings))
+            updated_routers.append(get_service_accounts_router(os_db=self.db, settings=self.settings))
         else:
             for prefix, tag in [
                 ("/components", "Components"),
                 ("/schedules", "Schedules"),
                 ("/approvals", "Approvals"),
+                ("/service-accounts", "Service Accounts"),
             ]:
                 updated_routers.append(_get_disabled_feature_router(prefix, tag, "db"))
         # Registry router
@@ -1001,14 +1009,17 @@ class AgentOS:
                 routers.append(_get_disabled_feature_router("/components", "Components", "sync db (BaseDb)"))
             routers.append(get_schedule_router(os_db=self.db, settings=self.settings))
             routers.append(get_approval_router(os_db=self.db, settings=self.settings))
+            routers.append(get_service_accounts_router(os_db=self.db, settings=self.settings))
         else:
             log_debug(
-                "Components, Scheduler, and Approval routers not enabled: requires a db to be provided to AgentOS"
+                "Components, Scheduler, Approval, and Service Account routers not enabled: "
+                "requires a db to be provided to AgentOS"
             )
             for prefix, tag in [
                 ("/components", "Components"),
                 ("/schedules", "Schedules"),
                 ("/approvals", "Approvals"),
+                ("/service-accounts", "Service Accounts"),
             ]:
                 routers.append(_get_disabled_feature_router(prefix, tag, "db"))
 
@@ -1077,6 +1088,12 @@ class AgentOS:
         if self._internal_service_token:
             fastapi_app.state.internal_service_token = self._internal_service_token
 
+        # Expose the service account verifier for the auth dependency and any
+        # manually added JWTMiddleware.
+        service_account_verifier = self._get_service_account_verifier()
+        if service_account_verifier is not None:
+            fastapi_app.state.service_account_verifier = service_account_verifier
+
         # Add JWT middleware if authorization is enabled
         if self.authorization:
             # Set authorization_enabled flag on settings so security key validation is skipped
@@ -1099,6 +1116,20 @@ class AgentOS:
         fastapi_app.add_middleware(TrailingSlashMiddleware)
 
         return fastapi_app
+
+    def _get_service_account_verifier(self) -> Optional[Any]:
+        """Get (lazily creating) the verifier for service account tokens.
+
+        Returns None when the AgentOS has no db - service accounts live in the
+        AgentOS database, so there is nothing to verify against without one.
+        """
+        if self.db is None:
+            return None
+        if self._service_account_verifier is None:
+            from agno.os.service_accounts import ServiceAccountVerifier
+
+            self._service_account_verifier = ServiceAccountVerifier(db=self.db)
+        return self._service_account_verifier
 
     def _add_jwt_middleware(self, fastapi_app: FastAPI) -> None:
         from agno.os.middleware.jwt import JWTMiddleware, JWTValidator
@@ -1180,6 +1211,9 @@ class AgentOS:
         # so manual app.add_middleware(JWTMiddleware) defaults stay backwards-compatible.
         if user_isolation:
             middleware_kwargs["user_isolation"] = True
+        service_account_verifier = self._get_service_account_verifier()
+        if service_account_verifier is not None:
+            middleware_kwargs["service_account_verifier"] = service_account_verifier
         fastapi_app.add_middleware(JWTMiddleware, **middleware_kwargs)
 
     def get_routes(self) -> List[Any]:

@@ -1172,6 +1172,12 @@ def get_mcp_server(
         # REST wiring's pattern so manual JWTMiddleware defaults stay backwards-compatible.
         if os.authorization_config.user_isolation:
             jwt_kwargs["user_isolation"] = True
+        # The MCP app is a separately mounted Starlette app with its own app.state, so the
+        # service account verifier must be passed at construction - the middleware cannot
+        # find it on the main app's state from inside the mount.
+        service_account_verifier = os._get_service_account_verifier()
+        if service_account_verifier is not None:
+            jwt_kwargs["service_account_verifier"] = service_account_verifier
         mcp_app.add_middleware(JWTMiddleware, **jwt_kwargs)
 
     # App-provided middleware, preserving the order they were listed in.
