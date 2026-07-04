@@ -1,4 +1,4 @@
-"""`agno create` and `agno infra` behavior (git and docker are faked)."""
+"""`agno create` and `agno up/down/restart` behavior (git and docker are faked)."""
 
 import json
 import subprocess
@@ -8,8 +8,8 @@ import pytest
 from typer.testing import CliRunner
 
 import agno_cli.commands.create as create_module
-import agno_cli.commands.infra as infra_module
-from agno_cli.commands.infra import find_compose_file
+import agno_cli.commands.lifecycle as lifecycle_module
+from agno_cli.commands.lifecycle import find_compose_file
 from agno_cli.errors import CLIError
 from agno_cli.main import app
 
@@ -111,7 +111,7 @@ def test_find_compose_file_missing(tmp_path):
 def test_infra_up_dry_run_command(monkeypatch, tmp_path):
     (tmp_path / "docker-compose.yml").write_text("services: {}\n")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["infra", "up", "--pull", "--dry-run", "--json"])
+    result = runner.invoke(app, ["up", "--pull", "--dry-run", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"] == [
@@ -131,7 +131,7 @@ def test_infra_up_dry_run_command(monkeypatch, tmp_path):
 def test_infra_down_dry_run_volumes(monkeypatch, tmp_path):
     (tmp_path / "docker-compose.yml").write_text("services: {}\n")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["infra", "down", "-v", "--dry-run", "--json"])
+    result = runner.invoke(app, ["down", "-v", "--dry-run", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["command"][-2:] == ["down", "--volumes"]
 
@@ -145,9 +145,9 @@ def test_infra_up_runs_compose(monkeypatch, tmp_path):
         calls.append((list(args), kwargs.get("cwd")))
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(infra_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(infra_module.shutil, "which", lambda name: "/usr/bin/docker")
-    result = runner.invoke(app, ["infra", "up", "--json"])
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(lifecycle_module.shutil, "which", lambda name: "/usr/bin/docker")
+    result = runner.invoke(app, ["up", "--json"])
     assert result.exit_code == 0, result.output
     args, cwd = calls[0]
     assert args[:4] == ["docker", "compose", "-f", str(tmp_path / "docker-compose.yml")]
@@ -158,11 +158,11 @@ def test_infra_compose_failure_maps_to_exit_1(monkeypatch, tmp_path):
     (tmp_path / "docker-compose.yml").write_text("services: {}\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        infra_module.subprocess,
+        lifecycle_module.subprocess,
         "run",
         lambda args, **kwargs: subprocess.CompletedProcess(args, 17, stdout="", stderr="broken"),
     )
-    monkeypatch.setattr(infra_module.shutil, "which", lambda name: "/usr/bin/docker")
-    result = runner.invoke(app, ["infra", "up", "--json"])
+    monkeypatch.setattr(lifecycle_module.shutil, "which", lambda name: "/usr/bin/docker")
+    result = runner.invoke(app, ["up", "--json"])
     assert result.exit_code == 1
     assert "exited with code 17" in json.loads(result.output)["error"]

@@ -15,9 +15,9 @@ This discovers the AgentOS (default `http://localhost:7777`), mints one service-
 ```bash
 agno create NAME [-t agentos-docker|agentos-aws|agentos-railway] [-u REPO_URL] [--json]
 
-agno infra up [--file FILE] [--pull] [--dry-run] [--json]
-agno infra down [--file FILE] [--volumes] [--dry-run] [--json]
-agno infra restart [--file FILE] [--pull] [--dry-run] [--json]
+agno up [--file FILE] [--pull] [--dry-run] [--json]
+agno down [--file FILE] [--volumes] [--dry-run] [--json]
+agno restart [--file FILE] [--pull] [--dry-run] [--json]
 
 agno connect [--url URL] [--clients claude-code,codex,cursor] [--name NAME]
              [--scopes SCOPE ...] [--expires 90d] [--privileged]
@@ -31,7 +31,7 @@ agno status [--url URL] [--json]
 ```
 
 `create` scaffolds an AgentOS project from a starter template (git clone, history stripped,
-example secrets copied into place). `infra` runs the project's compose file — the legacy
+example secrets copied into place). `up`/`down`/`restart` run the project's compose file — the legacy
 `ag infra` resource engine (per-resource Docker/AWS orchestration) is not ported; it is
 under redesign and will plug in via the `agno_cli.plugins` entry-point group.
 

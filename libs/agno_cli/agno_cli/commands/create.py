@@ -81,7 +81,7 @@ def create(
     print_info("")
     print_info("Next steps:")
     print_info("  cd " + name)
-    print_info("  agno infra up      # start it with docker compose")
+    print_info("  agno up            # start it with docker compose")
     print_info("  agno connect       # make it available in your coding agents")
 
 

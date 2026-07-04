@@ -1,4 +1,4 @@
-"""`agno infra`: run the project's infrastructure with docker compose.
+"""`agno up/down/restart`: run the project with docker compose.
 
 This ports the path of the legacy `ag infra` CLI that real projects use: templates ship
 a compose file, and up/down/restart shell out to `docker compose`. The legacy Python
@@ -18,8 +18,6 @@ import typer
 from agno_cli.commands._common import handle_cli_error
 from agno_cli.console import emit_json, print_info, print_success
 from agno_cli.errors import CLIError
-
-infra_app = typer.Typer(name="infra", help="Start and stop the project's infrastructure (docker compose).")
 
 # Same names and order the legacy CLI recognized.
 COMPOSE_FILE_NAMES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
@@ -76,14 +74,13 @@ def _run_compose(compose_file: Path, args: List[str], dry_run: bool, json_mode: 
     return {"command": command, "compose_file": str(compose_file), "dry_run": False}
 
 
-@infra_app.command("up")
 def up(
     file: Optional[str] = FileOption,
     pull: bool = typer.Option(False, "--pull", "-p", help="Always pull newer images."),
     dry_run: bool = DryRunOption,
     json_output: bool = JsonOption,
 ) -> None:
-    """Start the project's infrastructure: docker compose up -d --build."""
+    """Start the project: docker compose up -d --build."""
     try:
         compose_file = find_compose_file(file)
         args = ["up", "-d", "--build"]
@@ -92,17 +89,16 @@ def up(
         payload = _run_compose(compose_file, args, dry_run, json_output)
     except CLIError as e:
         raise handle_cli_error(e, json_output)
-    _finish(payload, "Infrastructure is up (" + str(payload["compose_file"]) + ").", json_output)
+    _finish(payload, "Project is up (" + str(payload["compose_file"]) + ").", json_output)
 
 
-@infra_app.command("down")
 def down(
     file: Optional[str] = FileOption,
     volumes: bool = typer.Option(False, "--volumes", "-v", help="Also remove named volumes (destroys data)."),
     dry_run: bool = DryRunOption,
     json_output: bool = JsonOption,
 ) -> None:
-    """Stop the project's infrastructure: docker compose down."""
+    """Stop the project: docker compose down."""
     try:
         compose_file = find_compose_file(file)
         args = ["down"]
@@ -111,17 +107,16 @@ def down(
         payload = _run_compose(compose_file, args, dry_run, json_output)
     except CLIError as e:
         raise handle_cli_error(e, json_output)
-    _finish(payload, "Infrastructure is down (" + str(payload["compose_file"]) + ").", json_output)
+    _finish(payload, "Project is down (" + str(payload["compose_file"]) + ").", json_output)
 
 
-@infra_app.command("restart")
 def restart(
     file: Optional[str] = FileOption,
     pull: bool = typer.Option(False, "--pull", "-p", help="Always pull newer images on the way back up."),
     dry_run: bool = DryRunOption,
     json_output: bool = JsonOption,
 ) -> None:
-    """Restart the project's infrastructure: down, then up."""
+    """Restart the project: down, then up."""
     try:
         compose_file = find_compose_file(file)
         down_payload = _run_compose(compose_file, ["down"], dry_run, json_output)
@@ -134,7 +129,7 @@ def restart(
     except CLIError as e:
         raise handle_cli_error(e, json_output)
     payload = {"down": down_payload, "up": up_payload, "compose_file": str(compose_file), "dry_run": dry_run}
-    _finish(payload, "Infrastructure restarted (" + str(compose_file) + ").", json_output)
+    _finish(payload, "Project restarted (" + str(compose_file) + ").", json_output)
 
 
 def _finish(payload: Dict[str, Any], message: str, json_mode: bool) -> None:
