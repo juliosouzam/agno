@@ -19,8 +19,7 @@ runner = CliRunner()
 class FakeGit:
     """Simulates `git clone` by scaffolding a template directory."""
 
-    def __init__(self, with_secrets: bool = True, returncode: int = 0):
-        self.with_secrets = with_secrets
+    def __init__(self, returncode: int = 0):
         self.returncode = returncode
         self.calls = []
 
@@ -30,9 +29,7 @@ class FakeGit:
             target = Path(args[-1])
             (target / ".git").mkdir(parents=True)
             (target / "docker-compose.yml").write_text("services: {}\n")
-            if self.with_secrets:
-                (target / "infra" / "example_secrets").mkdir(parents=True)
-                (target / "infra" / "example_secrets" / "example.env").write_text("KEY=value\n")
+            (target / "example.env").write_text("KEY=value\n")
         return subprocess.CompletedProcess(args, self.returncode, stdout="", stderr="boom" if self.returncode else "")
 
 
@@ -54,9 +51,21 @@ def test_create_scaffolds_project(fake_git, tmp_path):
     project = tmp_path / "my-os"
     assert (project / "docker-compose.yml").exists()
     assert not (project / ".git").exists()
-    assert (project / "infra" / "secrets" / "example.env").exists()
+    # create clones only: it ships example.env but never seeds .env itself.
+    assert (project / "example.env").exists()
+    assert not (project / ".env").exists()
+    assert "secrets" not in payload
     clone_args = fake_git.calls[0]
-    assert "https://github.com/agno-agi/agentos-docker-template" in clone_args
+    assert "https://github.com/agno-agi/agent-platform-docker" in clone_args
+
+
+@pytest.mark.parametrize("name", ["../escape", "a/b", "/tmp/abs", ".."])
+def test_create_rejects_path_traversal_names(fake_git, name):
+    result = runner.invoke(app, ["create", name, "--json"])
+    assert result.exit_code == 1
+    assert "Invalid project name" in json.loads(result.output)["error"]
+    # git clone must never have run for a rejected name.
+    assert fake_git.calls == []
 
 
 def test_create_refuses_existing_directory(fake_git, tmp_path):

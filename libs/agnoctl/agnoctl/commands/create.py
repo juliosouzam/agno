@@ -12,14 +12,14 @@ from typing import Any, Dict, Optional
 
 import typer
 
-from agnoctl.commands._common import handle_cli_error
+from agnoctl.commands._common import handle_cli_error, validate_project_name
 from agnoctl.console import emit_json, print_info, print_success
 from agnoctl.errors import CLIError
 
 TEMPLATES: Dict[str, str] = {
-    "agentos-docker": "https://github.com/agno-agi/agentos-docker-template",
-    "agentos-aws": "https://github.com/agno-agi/agentos-aws-template",
-    "agentos-railway": "https://github.com/agno-agi/agentos-railway-template",
+    "agentos-docker": "https://github.com/agno-agi/agent-platform-docker",
+    "agentos-aws": "https://github.com/agno-agi/agent-platform-aws",
+    "agentos-railway": "https://github.com/agno-agi/agent-platform-railway",
 }
 
 DEFAULT_TEMPLATE = "agentos-docker"
@@ -46,16 +46,6 @@ def _clone(repo_url: str, target: Path) -> None:
     shutil.rmtree(target / ".git", ignore_errors=True)
 
 
-def _copy_example_secrets(project_dir: Path) -> Optional[str]:
-    """Copy infra/example_secrets -> infra/secrets when the template ships one."""
-    example = project_dir / "infra" / "example_secrets"
-    secrets = project_dir / "infra" / "secrets"
-    if example.is_dir() and not secrets.exists():
-        shutil.copytree(example, secrets)
-        return str(secrets)
-    return None
-
-
 def create(
     name: str = typer.Argument(..., help="Directory name for the new AgentOS project."),
     template: str = typer.Option(
@@ -76,16 +66,16 @@ def create(
         emit_json(payload)
         return
     print_success("Created " + str(payload["path"]) + " from " + str(payload["template"]))
-    if payload.get("secrets"):
-        print_info("Example secrets copied to " + str(payload["secrets"]) + " - fill them in before deploying.")
     print_info("")
     print_info("Next steps:")
     print_info("  cd " + name)
-    print_info("  agno up            # start it with docker compose")
-    print_info("  agno connect       # make it available in your coding agents")
+    print_info("  cp example.env .env  # then fill in your secrets")
+    print_info("  agno up              # start it with docker compose")
+    print_info("  agno connect         # make it available in your coding agents")
 
 
 def _create(name: str, template: str, template_url: Optional[str]) -> Dict[str, Any]:
+    validate_project_name(name)
     target = Path.cwd() / name
     if target.exists():
         raise CLIError(
@@ -106,5 +96,4 @@ def _create(name: str, template: str, template_url: Optional[str]) -> Dict[str, 
         template_label = template
 
     _clone(repo_url, target)
-    secrets = _copy_example_secrets(target)
-    return {"path": str(target), "template": template_label, "secrets": secrets}
+    return {"path": str(target), "template": template_label}
