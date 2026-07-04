@@ -1,0 +1,247 @@
+"""Thin HTTP client for the AgentOS REST API.
+
+This module talks plain HTTP to a running AgentOS. It deliberately does not import the
+agno framework: the CLI must stay installable and fast under `uvx` with nothing but
+httpx, rich, and typer.
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from agno_cli import __version__
+from agno_cli.errors import APIError, ConflictError
+
+# Test hook: tests set this to an httpx.MockTransport so every client in the CLI
+# (API, discovery, MCP verification) talks to an in-memory fake AgentOS.
+_transport_override: Optional[httpx.BaseTransport] = None
+
+DEFAULT_TIMEOUT = 10.0
+
+
+def build_client(base_url: str = "", timeout: float = DEFAULT_TIMEOUT) -> httpx.Client:
+    return httpx.Client(
+        base_url=base_url,
+        timeout=timeout,
+        transport=_transport_override,
+        headers={"user-agent": "agnoctl/" + __version__},
+        follow_redirects=True,
+    )
+
+
+@dataclass
+class ServiceAccount:
+    id: str
+    name: str
+    principal: str
+    token_prefix: str
+    scopes: List[str] = field(default_factory=list)
+    created_at: Optional[int] = None
+    expires_at: Optional[int] = None
+    last_used_at: Optional[int] = None
+    revoked_at: Optional[int] = None
+    created_by: Optional[str] = None
+    # Present only on the create response; never persisted by the CLI.
+    token: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ServiceAccount":
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            principal=data.get("principal") or "sa:" + data["name"],
+            token_prefix=data.get("token_prefix") or "",
+            scopes=data.get("scopes") or [],
+            created_at=data.get("created_at"),
+            expires_at=data.get("expires_at"),
+            last_used_at=data.get("last_used_at"),
+            revoked_at=data.get("revoked_at"),
+            created_by=data.get("created_by"),
+            token=data.get("token"),
+        )
+
+    def public_dict(self) -> Dict[str, Any]:
+        """The account as a JSON-safe dict, always excluding the plaintext token."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "principal": self.principal,
+            "token_prefix": self.token_prefix,
+            "scopes": self.scopes,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "last_used_at": self.last_used_at,
+            "revoked_at": self.revoked_at,
+        }
+
+
+def _error_detail(response: httpx.Response) -> str:
+    try:
+        detail = response.json().get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+    except Exception:
+        pass
+    return "HTTP " + str(response.status_code)
+
+
+class AgentOSAPI:
+    """Sync client for the AgentOS endpoints the CLI needs.
+
+    The CLI is a short-lived terminal process making a handful of sequential calls, so a
+    sync client is the right shape; programs embedding Agno should use agno.client instead.
+    """
+
+    def __init__(self, base_url: str, admin_token: Optional[str] = None, timeout: float = DEFAULT_TIMEOUT):
+        self.base_url = base_url.rstrip("/")
+        self.admin_token = admin_token
+        self._client = build_client(base_url=self.base_url, timeout=timeout)
+
+    def _headers(self) -> Dict[str, str]:
+        if self.admin_token:
+            return {"Authorization": "Bearer " + self.admin_token}
+        return {}
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "AgentOSAPI":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+    # -- Probes ------------------------------------------------------------------
+
+    def health(self) -> Optional[Dict[str, Any]]:
+        """GET /health. Returns the payload, or None when unreachable or not an AgentOS."""
+        try:
+            response = self._client.get("/health")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def info(self) -> Optional[Dict[str, Any]]:
+        """GET /info (unauthenticated). Returns the payload, or None when unavailable."""
+        try:
+            response = self._client.get("/info")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def probe_auth_mode(self) -> str:
+        """Detect the auth mode by probing GET /config without credentials.
+
+        Fallback for servers whose /info predates the mcp/auth_mode discovery fields.
+        The 401 detail strings are the only externally observable distinction between
+        security-key mode and JWT mode on older servers.
+        """
+        try:
+            response = self._client.get("/config")
+        except httpx.HTTPError:
+            return "unknown"
+        if response.status_code == 200:
+            return "none"
+        if response.status_code == 401:
+            detail = _error_detail(response)
+            if "required" in detail.lower():
+                return "security_key"
+            return "jwt"
+        return "unknown"
+
+    # -- Service accounts ----------------------------------------------------------
+
+    def create_service_account(
+        self,
+        name: str,
+        scopes: Optional[List[str]] = None,
+        expires_in_days: Optional[int] = None,
+        never_expires: bool = False,
+        allow_privileged_scopes: bool = False,
+    ) -> ServiceAccount:
+        body: Dict[str, Any] = {"name": name}
+        if scopes:
+            body["scopes"] = scopes
+        if never_expires:
+            body["never_expires"] = True
+        elif expires_in_days is not None:
+            body["expires_in_days"] = expires_in_days
+        if allow_privileged_scopes:
+            body["allow_privileged_scopes"] = True
+
+        response = self._request("POST", "/service-accounts", json=body)
+        if response.status_code == 409:
+            raise ConflictError(
+                "A service account named '" + name + "' already exists.",
+                hint="Re-run with --rotate to revoke and re-mint it, or --skip-existing to leave it untouched.",
+            )
+        if response.status_code != 201:
+            raise APIError(
+                "Could not create service account '" + name + "': " + _error_detail(response),
+                status_code=response.status_code,
+            )
+        return ServiceAccount.from_dict(response.json())
+
+    def list_service_accounts(self) -> List[ServiceAccount]:
+        accounts: List[ServiceAccount] = []
+        page = 1
+        while True:
+            response = self._request("GET", "/service-accounts", params={"page": page, "limit": 100})
+            if response.status_code != 200:
+                raise APIError(
+                    "Could not list service accounts: " + _error_detail(response),
+                    status_code=response.status_code,
+                )
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else payload
+            if not isinstance(data, list):
+                break
+            accounts.extend(ServiceAccount.from_dict(item) for item in data)
+            meta = payload.get("meta") if isinstance(payload, dict) else None
+            total_pages = (meta or {}).get("total_pages") if isinstance(meta, dict) else None
+            if not total_pages or page >= int(total_pages):
+                break
+            page += 1
+        return accounts
+
+    def find_service_account(self, name: str) -> Optional[ServiceAccount]:
+        for account in self.list_service_accounts():
+            if account.name == name:
+                return account
+        return None
+
+    def revoke_service_account(self, account_id: str) -> None:
+        response = self._request("DELETE", "/service-accounts/" + account_id)
+        if response.status_code not in (200, 204):
+            raise APIError(
+                "Could not revoke service account: " + _error_detail(response),
+                status_code=response.status_code,
+            )
+
+    # -- Internals -----------------------------------------------------------------
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            response = self._client.request(method, path, headers=self._headers(), **kwargs)
+        except httpx.HTTPError as e:
+            raise APIError("Could not reach the AgentOS at " + self.base_url + ": " + str(e)) from e
+        if response.status_code in (401, 403):
+            raise APIError(
+                "The AgentOS rejected the admin credential (" + _error_detail(response) + ").",
+                status_code=response.status_code,
+                hint="Set AGNO_ADMIN_TOKEN (or OS_SECURITY_KEY) to a credential with admin access.",
+            )
+        return response

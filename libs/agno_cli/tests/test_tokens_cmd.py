@@ -1,0 +1,90 @@
+"""`agno tokens` command behavior."""
+
+import json
+
+from typer.testing import CliRunner
+
+from agno_cli.main import app
+
+runner = CliRunner()
+
+URL_ARGS = ["--url", "http://localhost:7777"]
+
+
+def _run(args, **kwargs):
+    return runner.invoke(app, args, **kwargs)
+
+
+def test_create_json_includes_token_once(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["name"] == "ci-runner"
+    assert payload["token"].startswith("agno_pat_")
+    assert payload["principal"] == "sa:ci-runner"
+
+
+def test_create_human_output_prints_token(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner"] + URL_ARGS)
+    assert result.exit_code == 0, result.output
+    token = fake_os.accounts["ci-runner"]["token"]
+    assert token in result.output
+    assert "shown once" in result.output
+
+
+def test_create_conflict_errors(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "already exists" in payload["error"]
+
+
+def test_list_never_exposes_tokens(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    result = _run(["tokens", "list", "--json"] + URL_ARGS)
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload["service_accounts"]) == 1
+    assert "token" not in payload["service_accounts"][0]
+    assert payload["service_accounts"][0]["token_prefix"]
+
+
+def test_revoke_by_name(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    result = _run(["tokens", "revoke", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 0
+    assert fake_os.accounts["ci-runner"]["revoked_at"] is not None
+
+
+def test_revoke_unknown_name(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "revoke", "ghost", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    assert "No service account named" in json.loads(result.output)["error"]
+
+
+def test_missing_admin_credential_fails_with_hint(monkeypatch, fake_os):
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "AGNO_ADMIN_TOKEN" in payload["hint"]
+
+
+def test_expires_never(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner", "--expires", "never", "--json"] + URL_ARGS)
+    assert result.exit_code == 0
+    assert json.loads(result.output)["expires_at"] is None
+
+
+def test_expires_invalid(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner", "--expires", "soon", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    assert "Invalid --expires" in json.loads(result.output)["error"]
