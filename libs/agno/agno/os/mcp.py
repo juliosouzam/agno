@@ -816,107 +816,6 @@ def _add_authorize_middleware(mcp_app: StarletteWithLifespan, authorize: Callabl
     mcp_app.add_middleware(_MCPAuthorizeMiddleware)
 
 
-def _add_key_auth_middleware(
-    mcp_app: StarletteWithLifespan,
-    security_key: Optional[str],
-    service_account_verifier: Optional[Any],
-) -> None:
-    """Enforce the REST auth rules over ``/mcp`` in non-JWT deployments.
-
-    The REST surface enforces ``OS_SECURITY_KEY`` and service account tokens through a
-    FastAPI router dependency (``agno.os.auth.get_authentication_dependency``), but router
-    dependencies never run for mounted sub-apps -- without this middleware the MCP surface
-    would be completely open in security-key mode. Mirrors the dependency's rules: a bearer
-    (or raw) token is accepted when it matches the security key or is a valid service
-    account token (``agno_pat_...``); with no security key configured, requests without a
-    service account token pass through, matching REST's open mode.
-
-    The verifier is captured at construction because the mounted MCP app has its own
-    ``app.state`` -- the middleware cannot find it on the main app's state from inside
-    the mount.
-    """
-    import hmac
-
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
-
-    from agno.os.auth import _is_jwt_configured
-    from agno.os.service_accounts import TOKEN_PREFIX, VerificationStatus
-
-    class _MCPKeyAuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
-            # Skip CORS preflight, mirroring the JWT middleware.
-            if request.method == "OPTIONS":
-                return await call_next(request)
-
-            # A JWT middleware on the parent app may have already authenticated the
-            # request (request.state is carried through the mount); mirror the REST
-            # dependency and let it through.
-            if getattr(request.state, "authenticated", False):
-                return await call_next(request)
-
-            # Accept both "Bearer <token>" and a raw token, like the JWT middleware.
-            authorization = request.headers.get("Authorization", "")
-            if authorization.lower().startswith("bearer "):
-                token = authorization[7:].strip()
-            else:
-                token = authorization.strip()
-
-            # Service account tokens are verified in every deployment mode (mirrors REST).
-            if token.startswith(TOKEN_PREFIX):
-                return await self._dispatch_service_account(request, token, call_next)
-
-            # JWT configured via environment variables (manual middleware setup): the
-            # REST dependency skips security key validation in this case; do the same.
-            if _is_jwt_configured():
-                return await call_next(request)
-
-            # No security key configured: open instance, matching REST.
-            if not security_key:
-                return await call_next(request)
-
-            if not token:
-                return JSONResponse({"detail": "Authorization header required"}, status_code=401)
-
-            if hmac.compare_digest(token, security_key):
-                return await call_next(request)
-
-            return JSONResponse({"detail": "Invalid authentication token"}, status_code=401)
-
-        async def _dispatch_service_account(self, request, token, call_next):  # type: ignore[no-untyped-def]
-            # Mirrors agno.os.auth._authenticate_service_account: uniform 401 detail for
-            # unknown/revoked/expired tokens, 429 when throttled, 503 when the database
-            # cannot be reached.
-            if service_account_verifier is None:
-                return JSONResponse(
-                    {"detail": "Service accounts are not enabled on this AgentOS instance"}, status_code=401
-                )
-
-            client_key = request.client.host if request.client else None
-            result = await service_account_verifier.verify(token, client_key=client_key)
-
-            if result.status == VerificationStatus.THROTTLED:
-                return JSONResponse({"detail": "Too many failed authentication attempts"}, status_code=429)
-            if result.status == VerificationStatus.UNAVAILABLE:
-                return JSONResponse({"detail": "Authentication is temporarily unavailable"}, status_code=503)
-            account = result.account
-            if not result.ok or account is None:
-                return JSONResponse({"detail": "Invalid or expired service account token"}, status_code=401)
-
-            # Attribution: _resolve_user_id reads request.state.user_id for tool calls,
-            # and the tool scope gate reads scopes/authorization_enabled. Mirrors the
-            # state set by agno.os.auth._authenticate_service_account.
-            request.state.authenticated = True
-            request.state.user_id = account.principal
-            request.state.session_id = None
-            request.state.scopes = list(account.scopes)
-            request.state.authorization_enabled = True
-            request.state.service_account_name = account.name
-            return await call_next(request)
-
-    mcp_app.add_middleware(_MCPKeyAuthMiddleware)
-
-
 # Localhost defaults so a desktop / local MCP server is protected with zero extra config.
 _MCP_LOCALHOST_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
@@ -983,11 +882,15 @@ def get_mcp_server(
 ) -> StarletteWithLifespan:
     """Build the MCP HTTP app served at ``/mcp``.
 
-    Wraps :func:`build_mcp_server` with the Streamable HTTP transport and layers on (from the
-    inside out) the JWT middleware (when authorization is enabled) or the security-key /
-    service-account auth middleware (otherwise), the optional ``authorize`` gate, any
-    app-provided middleware, and the built-in DNS-rebinding protection -- all from
-    ``mcp_config``.
+    Wraps :func:`build_mcp_server` with the Streamable HTTP transport and layers on
+    the optional ``authorize`` gate, any app-provided middleware, and the built-in
+    DNS-rebinding protection from ``mcp_config``.
+
+    Authentication is NOT layered here: the parent app's single ``AuthMiddleware``
+    (agno/os/app.py::_add_auth_middleware) runs before Starlette dispatches to this
+    mount, so it already verified the token and attached the identity to
+    request.state. Per-tool scope enforcement lives in the tools themselves
+    (``_require_tool_scopes``).
     """
     mcp = build_mcp_server(os)
     mcp_config: "Optional[MCPServerConfig]" = getattr(os, "mcp_config", None)
@@ -996,16 +899,15 @@ def get_mcp_server(
     mcp_app = mcp.http_app(path="/mcp")
 
     # Middleware runs in reverse registration order (last added is outermost / runs first).
-    # Target running order: transport security -> app middleware -> JWT -> authorize gate -> tool,
-    # so a bad Host is rejected first and the gate sees the JWT-verified identity.
+    # Target running order: transport security -> app middleware -> authorize gate -> tool.
+    # Auth already ran on the parent app, so the gate sees the verified identity.
 
     # Innermost: per-call authorize gate.
     if mcp_config is not None and mcp_config.authorize is not None:
-        # The gate reads request.state.user_id, which JWTMiddleware populates. Without a JWT
-        # layer in front, that attribute is never set, so the gate sees user_id=None on every
-        # call -- and an ``authorize=lambda u: u in OWNER_IDS``-style gate silently rejects
-        # every request (or, worse, "allows" everyone if the gate is permissive on None). The
-        # user almost always intended JWT to be on; warn loudly so this isn't a silent foot-gun.
+        # The gate reads request.state.user_id, populated by the parent AuthMiddleware.
+        # Without any auth configured that attribute is never set, so the gate sees
+        # user_id=None on every call -- an ``authorize=lambda u: u in OWNER_IDS`` gate
+        # then rejects everyone (or "allows" everyone if permissive on None). Warn loudly.
         if not os.authorization:
             from agno.utils.log import log_warning
 
@@ -1016,35 +918,6 @@ def get_mcp_server(
                 "or write your authorize() to handle user_id=None explicitly (e.g. for a dev shortcut)."
             )
         _add_authorize_middleware(mcp_app, mcp_config.authorize)
-
-    # Add JWT middleware to MCP app if authorization is enabled. The kwargs come from the
-    # same builder the REST surface uses (agno/os/middleware/jwt.py) -- otherwise tokens
-    # that pass the REST audience check (or honour user_isolation / admin_scope) silently
-    # lose those constraints over /mcp.
-    if os.authorization and os.authorization_config:
-        from agno.os.middleware.jwt import JWTMiddleware, build_jwt_middleware_kwargs
-
-        # The MCP app is a separately mounted Starlette app with its own app.state, so the
-        # service account verifier must be passed at construction - the middleware cannot
-        # find it on the main app's state from inside the mount.
-        jwt_kwargs = build_jwt_middleware_kwargs(
-            os.authorization_config,
-            authorization=os.authorization,
-            service_account_verifier=os._get_service_account_verifier(),
-        )
-        mcp_app.add_middleware(JWTMiddleware, **jwt_kwargs)
-    else:
-        # Non-JWT deployments: the REST surface enforces OS_SECURITY_KEY and service
-        # account tokens through a router dependency, which never runs for mounted
-        # sub-apps -- without this, /mcp would be completely open in security-key mode.
-        # Added in the same layer position as the JWT middleware above, so transport
-        # security still runs outermost and the authorize gate sees the verified
-        # identity. Nothing is added when auth is fully disabled (no security key and
-        # no service account verifier), matching REST's open mode.
-        security_key = os.settings.os_security_key if os.settings else None
-        service_account_verifier = os._get_service_account_verifier()
-        if security_key or service_account_verifier is not None:
-            _add_key_auth_middleware(mcp_app, security_key, service_account_verifier)
 
     # App-provided middleware, preserving the order they were listed in.
     if mcp_config is not None and mcp_config.middleware:

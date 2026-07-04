@@ -8,13 +8,12 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from agno.os.scopes import (
-    check_route_scopes,
     get_accessible_resource_ids,
     get_default_scope_mappings,
     has_required_scopes,
 )
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
-from agno.os.service_accounts import VerificationStatus
+from agno.os.service_accounts import authenticate_service_account_request
 from agno.os.settings import AgnoAPISettings
 
 # Create a global HTTPBearer instance
@@ -82,41 +81,21 @@ async def _authenticate_service_account(request: Request, token: str) -> bool:
     if verifier is None:
         raise HTTPException(status_code=401, detail="Service accounts are not enabled on this AgentOS instance")
 
-    client_key = request.client.host if request.client else None
-    result = await verifier.verify(token, client_key=client_key)
-
-    if result.status == VerificationStatus.THROTTLED:
-        raise HTTPException(status_code=429, detail="Too many failed authentication attempts")
-    if result.status == VerificationStatus.UNAVAILABLE:
-        raise HTTPException(status_code=503, detail="Authentication is temporarily unavailable")
-    account = result.account
-    if not result.ok or account is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired service account token")
-
     admin_scope_raw = getattr(request.app.state, "admin_scope", None)
     admin_scope = admin_scope_raw if isinstance(admin_scope_raw, str) else None
 
-    request.state.authenticated = True
-    request.state.user_id = account.principal
-    request.state.session_id = None
-    request.state.scopes = list(account.scopes)
-    request.state.authorization_enabled = True
-    request.state.service_account_name = account.name
-    if admin_scope:
-        request.state.admin_scope = admin_scope
-
-    scope_check = check_route_scopes(
-        list(account.scopes),
-        _default_scope_mappings(),
-        request.method,
-        request.url.path,
+    error = await authenticate_service_account_request(
+        request,
+        token,
+        verifier=verifier,
+        scope_mappings=_default_scope_mappings(),
         admin_scope=admin_scope,
     )
-    request.state.required_scopes = scope_check.required_scopes
-    if scope_check.accessible_resource_ids is not None:
-        request.state.accessible_resource_ids = scope_check.accessible_resource_ids
-    if not scope_check.allowed:
-        raise HTTPException(status_code=403, detail=build_insufficient_permissions_detail(scope_check.required_scopes))
+    if error is not None:
+        status_code, detail, required_scopes = error
+        if status_code == 403:
+            raise HTTPException(status_code=403, detail=build_insufficient_permissions_detail(required_scopes))
+        raise HTTPException(status_code=status_code, detail=detail)
 
     return True
 
@@ -144,7 +123,19 @@ def _has_jwt_middleware(app: Any) -> bool:
     user_middleware = getattr(app, "user_middleware", None) or []
     for mw in user_middleware:
         cls = getattr(mw, "cls", None)
-        if isinstance(cls, type) and issubclass(cls, JWTMiddleware):
+        if not (isinstance(cls, type) and issubclass(cls, JWTMiddleware)):
+            continue
+        # Only count instances that actually validate JWTs: AgentOS installs the same
+        # middleware class as the auth layer for security-key / service-account-only
+        # modes, constructed without any JWT source. (Env-var-configured JWT is
+        # detected separately by _is_jwt_configured.)
+        kwargs = getattr(mw, "kwargs", None) or {}
+        if (
+            kwargs.get("verification_keys")
+            or kwargs.get("jwks_file")
+            or kwargs.get("secret_key")
+            or kwargs.get("validate") is False
+        ):
             return True
     return False
 

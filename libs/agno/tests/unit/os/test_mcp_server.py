@@ -361,8 +361,12 @@ async def _ok_tool(message: str) -> str:
 
 @asynccontextmanager
 async def _mcp_http_client(os: AgentOS):
-    """Drive the full MCP HTTP app (JWT / authorize / middleware layers included)."""
-    app = get_mcp_server(os)
+    """Drive the full AgentOS app and hit /mcp through the whole stack.
+
+    Auth lives on the parent app's single AuthMiddleware (not the mounted /mcp app),
+    so requests must flow through the full app for the auth layer to run.
+    """
+    app = os.get_app()
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -446,11 +450,17 @@ def test_authorize_with_jwt_does_not_warn(monkeypatch):
     assert not relevant, f"unexpected authorize-without-JWT warning: {relevant}"
 
 
-def test_mcp_jwt_middleware_mirrors_rest_kwargs():
-    """``user_isolation`` / ``audience`` / ``admin_scope`` configured on ``AuthorizationConfig``
-    must reach the MCP JWT middleware, not just REST's. Otherwise tokens that pass REST's
-    audience check (or honour user_isolation / a custom admin scope) silently lose those
-    constraints over ``/mcp``."""
+def _parent_auth_middleware(os: AgentOS):
+    """The single AuthMiddleware on the parent app (covers REST + the mounted /mcp)."""
+    app = os.get_app()
+    return next(m for m in app.user_middleware if m.cls.__name__ == "AuthMiddleware")
+
+
+def test_auth_middleware_carries_jwt_constraints():
+    """``user_isolation`` / ``audience`` / ``admin_scope`` from ``AuthorizationConfig`` reach
+    the single parent-app auth layer, which covers /mcp -- so a token that passes REST's
+    audience check (or honours user_isolation / a custom admin scope) is held to the same
+    constraints over /mcp (same middleware instance, no second layer to drift)."""
     os = AgentOS(
         agents=[_agent()],
         enable_mcp_server=True,
@@ -462,29 +472,40 @@ def test_mcp_jwt_middleware_mirrors_rest_kwargs():
             admin_scope="admin",
         ),
     )
-    mcp_app = get_mcp_server(os)
-    jwt_mw = next(m for m in mcp_app.user_middleware if m.cls.__name__ == "JWTMiddleware")
-
-    assert jwt_mw.kwargs.get("user_isolation") is True, "user_isolation must reach /mcp's JWT middleware"
-    assert jwt_mw.kwargs.get("audience") == "myapi", "audience must reach /mcp's JWT middleware"
-    assert jwt_mw.kwargs.get("admin_scope") == "admin", "admin_scope must reach /mcp's JWT middleware"
+    mw = _parent_auth_middleware(os)
+    assert mw.kwargs.get("user_isolation") is True
+    assert mw.kwargs.get("audience") == "myapi"
+    assert mw.kwargs.get("admin_scope") == "admin"
 
 
-def test_mcp_jwt_middleware_omits_unset_kwargs():
-    """Unset optional kwargs must not be forwarded -- they shouldn't accidentally override
-    JWTMiddleware's own defaults (matches the pattern in agno/os/app.py::_add_jwt_middleware)."""
+def test_auth_middleware_omits_unset_kwargs():
+    """Unset optional kwargs must not be forwarded -- they shouldn't override the
+    middleware's own defaults."""
     os = AgentOS(
         agents=[_agent()],
         enable_mcp_server=True,
         authorization=True,
         authorization_config=AuthorizationConfig(verification_keys=["dummy"]),
     )
-    mcp_app = get_mcp_server(os)
-    jwt_mw = next(m for m in mcp_app.user_middleware if m.cls.__name__ == "JWTMiddleware")
+    mw = _parent_auth_middleware(os)
+    assert "user_isolation" not in mw.kwargs
+    assert "audience" not in mw.kwargs
+    assert "admin_scope" not in mw.kwargs
 
-    assert "user_isolation" not in jwt_mw.kwargs
-    assert "audience" not in jwt_mw.kwargs
-    assert "admin_scope" not in jwt_mw.kwargs
+
+def test_mounted_mcp_app_carries_no_auth_middleware():
+    """Auth lives only on the parent app; the mounted /mcp app has no auth layer of its own."""
+    os = AgentOS(
+        agents=[_agent()],
+        enable_mcp_server=True,
+        authorization=True,
+        authorization_config=AuthorizationConfig(verification_keys=["dummy"]),
+        settings=AgnoAPISettings(os_security_key="test-key"),
+    )
+    names = [m.cls.__name__ for m in get_mcp_server(os).user_middleware]
+    assert "AuthMiddleware" not in names
+    assert "JWTMiddleware" not in names
+    assert "_MCPKeyAuthMiddleware" not in names
 
 
 async def test_custom_middleware_passthrough_runs():
@@ -695,30 +716,17 @@ async def test_open_mode_with_db_stays_open_but_verifies_pats(tmp_path):
     assert bad_pat_response.json()["detail"] == "Invalid or expired service account token"
 
 
-def test_no_auth_mode_adds_no_key_auth_middleware():
-    """No security key and no db (no verifier): nothing is added and /mcp stays open."""
-    mcp_app = get_mcp_server(_auth_os(security_key=None))
-    assert not any(m.cls.__name__ == "_MCPKeyAuthMiddleware" for m in mcp_app.user_middleware)
+def test_no_auth_mode_installs_no_auth_layer():
+    """No security key and no db (no verifier): no auth middleware anywhere, /mcp stays open."""
+    os = _auth_os(security_key=None)
+    assert not any(m.cls.__name__ == "AuthMiddleware" for m in os.get_app().user_middleware)
+    assert not any(m.cls.__name__ == "AuthMiddleware" for m in get_mcp_server(os).user_middleware)
 
 
 async def test_no_auth_mode_stays_open():
     async with _mcp_http_client(_auth_os(security_key=None)) as client:
         response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_MCP_HEADERS)
     assert response.status_code == 200
-
-
-def test_jwt_mode_does_not_add_key_auth_middleware():
-    """JWT mode is unchanged: the JWT middleware handles /mcp auth, key auth is not added."""
-    os = AgentOS(
-        agents=[_agent()],
-        enable_mcp_server=True,
-        authorization=True,
-        authorization_config=AuthorizationConfig(verification_keys=["dummy"]),
-        settings=AgnoAPISettings(os_security_key="test-key"),
-    )
-    names = [m.cls.__name__ for m in get_mcp_server(os).user_middleware]
-    assert "JWTMiddleware" in names
-    assert "_MCPKeyAuthMiddleware" not in names
 
 
 class _FakeVerifier:
@@ -742,9 +750,10 @@ async def test_pat_verifier_statuses_map_like_rest(tmp_path, status, expected_st
     assert response.status_code == expected_status_code
 
 
-def test_key_auth_middleware_layer_position():
-    """Key auth sits where JWT would: inside transport security and app-provided middleware,
-    outside the authorize gate (add_middleware wraps outside-in)."""
+def test_mounted_mcp_middleware_layer_position():
+    """The mounted /mcp app's own layers stay ordered transport security -> app middleware
+    -> authorize gate (add_middleware wraps outside-in). Auth is not among them -- it ran
+    on the parent app before the request reached the mount."""
 
     class _Passthrough(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
@@ -760,7 +769,6 @@ def test_key_auth_middleware_layer_position():
     expected_order = [
         "_MCPTransportSecurityMiddleware",
         "_Passthrough",
-        "_MCPKeyAuthMiddleware",
         "_MCPAuthorizeMiddleware",
     ]
     positions = [names.index(name) for name in expected_order]

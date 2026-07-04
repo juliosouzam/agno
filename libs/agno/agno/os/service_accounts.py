@@ -26,13 +26,13 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from starlette.concurrency import run_in_threadpool
 
 from agno.db.base import AsyncBaseDb, BaseDb
 from agno.db.schemas.service_accounts import SERVICE_ACCOUNT_PRINCIPAL_PREFIX, ServiceAccount
-from agno.os.scopes import AgentOSScope, parse_scope
+from agno.os.scopes import AgentOSScope, check_route_scopes, parse_scope
 from agno.utils.log import log_debug, log_error, log_warning
 from agno.utils.string import hash_string_sha256
 
@@ -323,6 +323,66 @@ class ServiceAccountVerifier:
                 )
         except Exception as e:
             log_warning(f"Could not update last_used_at for service account '{account.name}': {e}")
+
+
+async def authenticate_service_account_request(
+    request: Any,
+    token: str,
+    *,
+    verifier: "ServiceAccountVerifier",
+    scope_mappings: Dict[str, List[str]],
+    admin_scope: Optional[str],
+    user_isolation: Optional[bool] = None,
+) -> Optional[Tuple[int, str, Optional[List[str]]]]:
+    """Verify a PAT and attach the account identity to request.state.
+
+    The single verify + attach + scope-enforcement path for service accounts, shared
+    by the auth middleware and the REST dependency so the surfaces cannot drift.
+    Scope enforcement always runs: service account scopes are first-party ACL data
+    owned by this AgentOS instance, unlike JWT claims.
+
+    Returns None on success, else (status_code, detail, required_scopes) for the
+    transport to render (HTTPException on REST, JSONResponse in the middleware).
+    """
+    client_key = request.client.host if request.client else None
+    result = await verifier.verify(token, client_key=client_key)
+
+    if result.status == VerificationStatus.THROTTLED:
+        return 429, "Too many failed authentication attempts", None
+    if result.status == VerificationStatus.UNAVAILABLE:
+        return 503, "Authentication is temporarily unavailable", None
+    account = result.account
+    if not result.ok or account is None:
+        return 401, "Invalid or expired service account token", None
+
+    request.state.authenticated = True
+    request.state.user_id = account.principal
+    request.state.session_id = None
+    request.state.scopes = list(account.scopes)
+    # Scope enforcement is always active for service accounts, so route-level
+    # authorization gates (require_resource_access etc.) must be active too.
+    request.state.authorization_enabled = True
+    request.state.service_account_name = account.name
+    if admin_scope:
+        request.state.admin_scope = admin_scope
+    if user_isolation is not None:
+        request.state.user_isolation_enabled = user_isolation
+
+    scope_check = check_route_scopes(
+        list(account.scopes),
+        scope_mappings,
+        request.method,
+        request.url.path,
+        admin_scope=admin_scope,
+    )
+    request.state.required_scopes = scope_check.required_scopes
+    if scope_check.accessible_resource_ids is not None:
+        request.state.accessible_resource_ids = scope_check.accessible_resource_ids
+    if not scope_check.allowed:
+        return 403, "Insufficient permissions", scope_check.required_scopes
+
+    log_debug(f"Service account authenticated: {account.principal}")
+    return None
 
 
 def get_principal(name: str) -> str:

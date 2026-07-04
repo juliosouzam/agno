@@ -1119,21 +1119,25 @@ class AgentOS:
         if service_account_verifier is not None:
             fastapi_app.state.service_account_verifier = service_account_verifier
 
-        # Add JWT middleware if authorization is enabled
+        # Install the single auth layer whenever any credential is configured. It
+        # covers the REST routes and the mounted /mcp app together (one middleware on
+        # the parent app), so the mounted sub-app carries no auth code of its own.
+        security_key = self.settings.os_security_key if self.settings else None
+        jwt_env_configured = bool(getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE"))
         if self.authorization:
             # Set authorization_enabled flag on settings so security key validation is skipped
             self.settings.authorization_enabled = True
-
-            jwt_configured = bool(getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE"))
-            security_key_set = bool(self.settings.os_security_key)
-            if jwt_configured and security_key_set:
+            if jwt_env_configured and bool(security_key):
                 log_warning(
                     "Both JWT configuration (JWT_VERIFICATION_KEY or JWT_JWKS_FILE) and OS_SECURITY_KEY are set. "
                     "With authorization=True, only JWT authorization will be used. "
                     "Consider removing OS_SECURITY_KEY from your environment."
                 )
-
-            self._add_jwt_middleware(fastapi_app)
+        if self.authorization or jwt_env_configured or security_key or service_account_verifier is not None:
+            # In JWT mode the security key is ignored (JWT takes precedence), matching
+            # get_effective_auth_mode; pass None so the middleware doesn't fall back to it.
+            effective_key = None if (self.authorization or jwt_env_configured) else security_key
+            self._add_auth_middleware(fastapi_app, security_key=effective_key)
 
         # Add trailing slash normalization middleware
         from agno.os.middleware.trailing_slash import TrailingSlashMiddleware
@@ -1162,17 +1166,26 @@ class AgentOS:
             )
         return self._service_account_verifier
 
-    def _add_jwt_middleware(self, fastapi_app: FastAPI) -> None:
-        from agno.os.middleware.jwt import JWTMiddleware, JWTValidator, build_jwt_middleware_kwargs
+    def _add_auth_middleware(self, fastapi_app: FastAPI, security_key: Optional[str]) -> None:
+        """Install the single AgentOS auth layer on the parent app.
+
+        One ``AuthMiddleware`` covers JWTs, service-account tokens, the internal
+        service token, and the OS security key across the REST routes AND the mounted
+        ``/mcp`` app (Starlette runs parent-app middleware before dispatching to a
+        mount), so no auth code lives on the mounted sub-app.
+
+        Called whenever any credential is configured: ``authorization=True`` (JWT),
+        an ``OS_SECURITY_KEY``, or a service-account verifier (a db is present).
+        """
+        from agno.os.middleware.jwt import AuthMiddleware, JWTValidator, build_jwt_middleware_kwargs
         from agno.os.scopes import AgentOSScope
 
-        # Single source of the middleware kwargs, shared with the mounted MCP app
-        # (agno/os/mcp.py::get_mcp_server) so the two surfaces cannot drift.
         middleware_kwargs = build_jwt_middleware_kwargs(
             self.authorization_config,
             authorization=self.authorization,
             service_account_verifier=self._get_service_account_verifier(),
         )
+        middleware_kwargs["security_key"] = security_key
         algorithm = middleware_kwargs["algorithm"]
         verification_keys = middleware_kwargs["verification_keys"]
         jwks_file = middleware_kwargs["jwks_file"]
@@ -1181,15 +1194,19 @@ class AgentOS:
         admin_scope: Optional[str] = middleware_kwargs.get("admin_scope")
         user_isolation = middleware_kwargs.get("user_isolation", False)
 
-        log_info(f"Adding JWT middleware for authorization (algorithm: {algorithm})")
-
-        # Create validator and store on app.state for WebSocket access
-        jwt_validator = JWTValidator(
-            verification_keys=verification_keys,
-            jwks_file=jwks_file,
-            algorithm=algorithm,
+        jwt_configured = bool(
+            verification_keys or jwks_file or getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE")
         )
-        fastapi_app.state.jwt_validator = jwt_validator
+        log_info("Adding AgentOS auth middleware" + (f" (JWT algorithm: {algorithm})" if jwt_configured else ""))
+
+        # A JWT validator on app.state is only meaningful (and only constructible --
+        # it requires a key) when JWT is actually configured. WebSocket JWT auth reads it.
+        if jwt_configured:
+            fastapi_app.state.jwt_validator = JWTValidator(
+                verification_keys=verification_keys,
+                jwks_file=jwks_file,
+                algorithm=algorithm,
+            )
         # Expose audience config + admin scope on app.state so WebSocket auth
         # (which does not flow through HTTP middleware) can honour them.
         fastapi_app.state.jwt_verify_audience = verify_audience
@@ -1200,9 +1217,10 @@ class AgentOS:
         # added by the user-scoped-DB work stay dormant.
         fastapi_app.state.user_isolation_enabled = user_isolation
 
-        # Collect interface route prefixes to exclude from JWT auth.
-        # Interfaces use their own authentication mechanisms
-        # (e.g. Slack HMAC-SHA256 signing, Telegram webhook verification).
+        # Interfaces authenticate themselves (Slack HMAC, Telegram webhook verification),
+        # so their route prefixes are excluded from the auth layer alongside the public
+        # routes. Passing excluded_route_paths replaces the middleware defaults, so the
+        # defaults are repeated here.
         excluded_route_paths: Optional[List[str]] = None
         if self.interfaces:
             interface_prefixes = [
@@ -1211,8 +1229,6 @@ class AgentOS:
                 if hasattr(interface, "prefix") and interface.prefix
             ]
             if interface_prefixes:
-                # Passing excluded_route_paths replaces the middleware defaults,
-                # so include the default excluded routes as well.
                 excluded_route_paths = [
                     "/",
                     "/health",
@@ -1223,11 +1239,8 @@ class AgentOS:
                     "/docs/oauth2-redirect",
                 ] + interface_prefixes
 
-        # Add middleware to stack. Interface route exclusions are REST-only (the
-        # mounted MCP app has no interface routes), so they are threaded in here
-        # rather than in the shared builder defaults.
         middleware_kwargs["excluded_route_paths"] = excluded_route_paths
-        fastapi_app.add_middleware(JWTMiddleware, **middleware_kwargs)
+        fastapi_app.add_middleware(AuthMiddleware, **middleware_kwargs)
 
     def get_routes(self) -> List[Any]:
         """Retrieve all routes from the FastAPI app.

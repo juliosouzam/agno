@@ -415,8 +415,9 @@ def test_case_sensitive_origin_matching(middleware):
     assert middleware._is_origin_allowed("HTTP://LOCALHOST:3000", allowed_origins) is False
 
 
-def test_raises_error_without_verification_key():
-    """Test that middleware raises error when no verification key provided."""
+def test_raises_error_without_any_credential_source():
+    """No credential source at all (no JWT key, no security key, no verifier) is a
+    silent authorize-everyone footgun; the middleware must refuse to construct."""
     with pytest.raises(ValueError) as exc_info:
         JWTMiddleware(
             app=None,
@@ -424,7 +425,15 @@ def test_raises_error_without_verification_key():
             algorithm="HS256",
         )
 
-    assert "at least one jwt verification key or jwks file is required" in str(exc_info.value).lower()
+    assert "at least one credential source" in str(exc_info.value).lower()
+
+
+def test_security_key_only_is_a_valid_credential_source():
+    """The middleware doubles as the security-key auth layer: a security_key alone,
+    with no JWT source, is a valid construction (JWT stays inert)."""
+    middleware = JWTMiddleware(app=None, security_key="s3cret")
+    assert middleware.validator is None
+    assert middleware.security_key == "s3cret"
 
 
 def test_authorization_enabled_implicitly_with_scope_mappings():
