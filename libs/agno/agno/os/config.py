@@ -8,11 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # the valid values for ``MCPServerConfig.include_tags`` / ``exclude_tags`` without reading
 # ``agno/os/mcp.py``. Keep in sync with the ``tags={...}`` argument on each
 # ``@register_builtin_tool(...)`` in that module.
-MCP_BUILTIN_TAGS: frozenset = frozenset({"core", "session", "memory"})
+MCP_BUILTIN_TAGS: frozenset = frozenset({"core", "session"})
 
 # Type alias for ``include_tags`` / ``exclude_tags`` -- gives IDE autocomplete on the
 # string values while keeping the API stringly-typed (callers still pass ``{"core"}``).
-MCPBuiltinTag = Literal["core", "session", "memory"]
+MCPBuiltinTag = Literal["core", "session"]
 
 
 class MCPServerConfig(BaseModel):
@@ -25,9 +25,13 @@ class MCPServerConfig(BaseModel):
 
     The built-in tools are tagged so they can be scoped as a group. See
     ``MCP_BUILTIN_TAGS`` for the canonical set; current values:
-      - ``"core"``    -> ``get_agentos_config``, ``run_agent``, ``run_team``, ``run_workflow``
-      - ``"session"`` -> session CRUD tools
-      - ``"memory"``  -> memory CRUD tools
+      - ``"core"``    -> ``get_agentos_config``, ``run_agent``, ``run_team``, ``run_workflow``,
+        ``continue_run``, ``cancel_run``
+      - ``"session"`` -> read-only session tools (``get_sessions``, ``get_session_runs``)
+
+    The surface is deliberately small (8 tools): it is an operator surface for LLM
+    frontends, not a database console. Session writes and memory CRUD live on the REST
+    surface; anything else can be registered as a custom tool via ``tools``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -42,7 +46,7 @@ class MCPServerConfig(BaseModel):
     # FastMCP ``Context`` parameter, which FastMCP injects natively.
     tools: Optional[List[Any]] = None
 
-    # Master switch for the ~19 built-in tools. Set to False to ship ONLY your own tools.
+    # Master switch for the 8 built-in tools. Set to False to ship ONLY your own tools.
     enable_builtin_tools: bool = True
 
     # Finer scoping over the built-ins via their tags (see ``MCP_BUILTIN_TAGS``).

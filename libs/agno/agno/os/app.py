@@ -370,6 +370,9 @@ class AgentOS:
         # List of all MCP tools used inside the AgentOS
         self.mcp_tools: List[Any] = []
         self._mcp_app: Optional[Any] = None
+        # Guards get_app() idempotency when a base_app is supplied (that path mutates
+        # the caller's app in place, so preparing twice would double routes/lifespans).
+        self._base_app_prepared: bool = False
 
         self._initialize_agents()
         self._initialize_teams()
@@ -454,17 +457,30 @@ class AgentOS:
         # Track MCP tools declared on the registry
         collect_mcp_tools_from_registry(self.registry, self.mcp_tools)
 
-        if self.enable_mcp_server:
+        # Reuse the already-started MCP app: its tools close over this AgentOS instance,
+        # so components added since construction are visible without a rebuild. Building
+        # a fresh app here would mount one whose StreamableHTTP lifespan never runs --
+        # every subsequent /mcp request would 500 until restart.
+        if self.enable_mcp_server and self._mcp_app is None:
             from agno.os.mcp import get_mcp_server
 
             self._mcp_app = get_mcp_server(self)
 
         self._reprovision_routers(app=app)
 
+    def _mount_mcp_app(self, app: FastAPI) -> None:
+        """Mount the MCP app at root exactly once (idempotent across get_app/resync calls)."""
+        if self._mcp_app is None:
+            return
+        if any(getattr(route, "app", None) is self._mcp_app for route in app.router.routes):
+            return
+        app.mount("/", self._mcp_app)
+
     def _reprovision_routers(self, app: FastAPI) -> None:
         """Re-provision all routes for the AgentOS."""
+        # The home router is added by _add_built_in_routes below; adding it here too
+        # would duplicate the GET / route on every resync.
         updated_routers = [
-            get_home_router(self),
             get_session_router(dbs=self.dbs),
             get_memory_router(dbs=self.dbs),
             get_learnings_router(dbs=self.dbs, settings=self.settings),
@@ -520,14 +536,14 @@ class AgentOS:
             self._add_router(app, router)
 
         # Mount MCP if needed
-        if self.enable_mcp_server and self._mcp_app:
-            app.mount("/", self._mcp_app)
+        if self.enable_mcp_server:
+            self._mount_mcp_app(app)
 
     def _add_built_in_routes(self, app: FastAPI) -> None:
         """Add all AgentOSbuilt-in routes to the given app."""
-        # Add the home router if MCP server is not enabled
-        if not self.enable_mcp_server:
-            self._add_router(app, get_home_router(self))
+        # Always add the home router: explicit routes win over the root MCP Mount, and
+        # without it GET / falls through to the MCP app's plain-text 404.
+        self._add_router(app, get_home_router(self))
 
         self._add_router(app, get_health_router(health_endpoint="/health"))
         self._add_router(app, get_info_router(self))
@@ -906,8 +922,15 @@ class AgentOS:
         if self.base_app:
             fastapi_app = self.base_app
 
+            # get_app() on a base_app mutates that app in place, so a second call (e.g. via
+            # get_routes()) must not prepare it again: it would nest the combined lifespan
+            # inside a new one (double db init, an orphaned MCP session manager) and mount
+            # a second copy of every route.
+            if self._base_app_prepared:
+                return fastapi_app
+
             # Initialize MCP server if enabled
-            if self.enable_mcp_server:
+            if self.enable_mcp_server and self._mcp_app is None:
                 from agno.os.mcp import get_mcp_server
 
                 self._mcp_app = get_mcp_server(self)
@@ -958,11 +981,13 @@ class AgentOS:
             if self.mcp_tools:
                 lifespans.append(partial(mcp_lifespan, mcp_tools=self.mcp_tools))
 
-            # MCP server lifespan
+            # MCP server lifespan (reuse an app built by an earlier get_app() call -- a
+            # rebuilt one would orphan the started StreamableHTTP session manager)
             if self.enable_mcp_server:
-                from agno.os.mcp import get_mcp_server
+                if self._mcp_app is None:
+                    from agno.os.mcp import get_mcp_server
 
-                self._mcp_app = get_mcp_server(self)
+                    self._mcp_app = get_mcp_server(self)
                 lifespans.append(self._mcp_app.lifespan)
 
             # Async database initialization lifespan
@@ -1034,8 +1059,8 @@ class AgentOS:
             self._add_router(fastapi_app, router)
 
         # Mount MCP if needed
-        if self.enable_mcp_server and self._mcp_app:
-            fastapi_app.mount("/", self._mcp_app)
+        if self.enable_mcp_server:
+            self._mount_mcp_app(fastapi_app)
 
         if not self._app_set:
 
@@ -1114,6 +1139,9 @@ class AgentOS:
         from agno.os.middleware.trailing_slash import TrailingSlashMiddleware
 
         fastapi_app.add_middleware(TrailingSlashMiddleware)
+
+        if self.base_app is not None:
+            self._base_app_prepared = True
 
         return fastapi_app
 

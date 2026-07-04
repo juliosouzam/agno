@@ -34,21 +34,11 @@ from agno.tools import tool  # noqa: E402
 from agno.workflow.step import Step  # noqa: E402
 from agno.workflow.workflow import Workflow  # noqa: E402
 
-# The full set of built-in tools, keyed by their tag group.
-CORE_TOOLS = {"get_agentos_config", "run_agent", "run_team", "run_workflow"}
-SESSION_TOOLS = {
-    "get_sessions",
-    "get_session",
-    "create_session",
-    "get_session_runs",
-    "get_session_run",
-    "rename_session",
-    "update_session",
-    "delete_session",
-    "delete_sessions",
-}
-MEMORY_TOOLS = {"create_memory", "get_memory", "get_memories", "update_memory", "delete_memory", "delete_memories"}
-ALL_BUILTIN_TOOLS = CORE_TOOLS | SESSION_TOOLS | MEMORY_TOOLS
+# The full set of built-in tools, keyed by their tag group. The surface is deliberately
+# 8 tools: an operator surface for LLM frontends, not a database console.
+CORE_TOOLS = {"get_agentos_config", "run_agent", "run_team", "run_workflow", "continue_run", "cancel_run"}
+SESSION_TOOLS = {"get_sessions", "get_session_runs"}
+ALL_BUILTIN_TOOLS = CORE_TOOLS | SESSION_TOOLS
 
 
 def _agent() -> Agent:
@@ -171,30 +161,30 @@ async def test_include_tags_scopes_builtins_to_core():
     assert await _tool_names(os) == CORE_TOOLS
 
 
-async def test_exclude_tags_drops_memory_builtins():
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_config=MCPServerConfig(exclude_tags={"memory"}))
+async def test_exclude_tags_drops_session_builtins():
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_config=MCPServerConfig(exclude_tags={"session"}))
     names = await _tool_names(os)
-    assert names == CORE_TOOLS | SESSION_TOOLS
-    assert not (names & MEMORY_TOOLS)
+    assert names == CORE_TOOLS
+    assert not (names & SESSION_TOOLS)
 
 
 def test_unknown_include_tag_is_rejected():
     """A typo like ``{"sessions"}`` (plural) would silently produce an empty server. The
     ``MCPBuiltinTag`` Literal makes pydantic reject it at construction."""
-    with pytest.raises(ValueError, match="Input should be 'core', 'session' or 'memory'"):
+    with pytest.raises(ValueError, match="Input should be 'core' or 'session'"):
         MCPServerConfig(include_tags={"sessions"})
 
 
-def test_unknown_exclude_tag_is_rejected():
-    """Same protection on ``exclude_tags`` -- a typo would silently exclude nothing.
-    Tag matching is case-sensitive (``"Memory"`` is not ``"memory"``)."""
-    with pytest.raises(ValueError, match="Input should be 'core', 'session' or 'memory'"):
-        MCPServerConfig(exclude_tags={"Memory"})
+def test_removed_memory_tag_is_rejected():
+    """The memory tools were removed from the MCP surface; the old tag must fail loudly
+    instead of silently scoping nothing."""
+    with pytest.raises(ValueError, match="Input should be 'core' or 'session'"):
+        MCPServerConfig(exclude_tags={"memory"})
 
 
 def test_known_tags_are_accepted():
     """Sanity: the typed fields don't fight the documented values."""
-    MCPServerConfig(include_tags={"core", "session", "memory"})
+    MCPServerConfig(include_tags={"core", "session"})
     MCPServerConfig(exclude_tags={"core"})
 
 
