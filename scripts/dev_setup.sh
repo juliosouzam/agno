@@ -73,10 +73,10 @@ VIRTUAL_ENV="${VENV_DIR}" uv pip install -e "${AGNOCTL_DIR}[dev]" -e "${AGNO_DIR
 ACTIVATE_CMD="source .venv/bin/activate"
 if command -v pbcopy &> /dev/null; then
     echo -n "${ACTIVATE_CMD}" | pbcopy
-    CLIPBOARD_MSG="(Copied to clipboard)"
+    CLIPBOARD_MSG="(Copied to clipboard. Just paste and hit enter.)"
 elif command -v xclip &> /dev/null; then
     echo -n "${ACTIVATE_CMD}" | xclip -selection clipboard
-    CLIPBOARD_MSG="(Copied to clipboard)"
+    CLIPBOARD_MSG="(Copied to clipboard. Just paste and hit enter.)"
 else
     CLIPBOARD_MSG=""
 fi
@@ -84,7 +84,11 @@ fi
 echo ""
 echo -e "    ${BOLD}Done.${NC}"
 echo ""
-echo -e "    ${DIM}Activate:${NC}  ${ACTIVATE_CMD} ${DIM}${CLIPBOARD_MSG}${NC}"
+echo -e "    ${DIM}Activate:${NC}  ${ACTIVATE_CMD}"
 echo -e "    ${DIM}Test:${NC}      pytest libs/agno/tests/unit"
 echo -e "    ${DIM}Validate:${NC}  ./scripts/format.sh && ./scripts/validate.sh"
 echo ""
+if [[ -n "$CLIPBOARD_MSG" ]]; then
+    echo -e "    ${DIM}${CLIPBOARD_MSG}${NC}"
+    echo ""
+fi
