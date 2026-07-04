@@ -3,7 +3,7 @@
 Service accounts are machine identities (coding agents, chat apps, CI) authenticated by
 opaque tokens following the GitHub PAT model: the token is random, only its SHA-256 hash
 is stored (in the AgentOS database), the plaintext is returned exactly once at creation,
-and revocation takes effect on the next request.
+and revocation is native (see the caching note below for its timing).
 
 Tokens look like ``agno_pat_<base62>`` and authenticate through the same middleware as
 JWTs. A verified service account attaches to the request with ``user_id`` set to its
@@ -11,6 +11,13 @@ principal (``sa:<name>``) and ``scopes`` set to the account's stored scopes. Unl
 claims, service account scopes are first-party ACL data owned by this AgentOS instance,
 so they are enforced in every deployment mode - including ``os_security_key`` mode and
 ``validate=False`` mode, where JWT scopes are not.
+
+Successful verifications are cached in-process for a short TTL (default 30s) so PAT auth
+does not hit the database on every request. Revocation takes effect within that TTL
+across worker processes, and immediately on the worker that processes the revoke (the
+``DELETE`` handler evicts the local cache entry). Set the cache TTL to 0 for strict
+instant revocation - every request verifies against the database. Token expiry is always
+honored, even on a cache hit.
 """
 
 import hashlib
@@ -173,29 +180,98 @@ class _FailedLookupLimiter:
             self._failures.popitem(last=False)
 
 
+class _VerificationCache:
+    """Bounded, TTL'd LRU of successful verifications, keyed by token hash.
+
+    Caches only valid accounts. Token expiry is still honored on every hit (the cached
+    account's expires_at is immutable, so it can be re-checked against the wall clock).
+    Revocation is handled out of band: the worker that processes a revoke evicts its
+    entry immediately via invalidate(); other workers converge as their entry ages out
+    within the TTL. TTL <= 0 disables the cache entirely (strict instant revocation).
+    """
+
+    def __init__(self, ttl_seconds: int, max_entries: int = 2048):
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self._entries: "OrderedDict[str, Tuple[ServiceAccount, float]]" = OrderedDict()
+
+    @property
+    def enabled(self) -> bool:
+        return self.ttl_seconds > 0
+
+    def get(self, token_hash: str) -> Optional[ServiceAccount]:
+        if not self.enabled:
+            return None
+        entry = self._entries.get(token_hash)
+        if entry is None:
+            return None
+        account, cached_at = entry
+        if time.monotonic() - cached_at > self.ttl_seconds:
+            self._entries.pop(token_hash, None)
+            return None
+        # Honor expiry even within the TTL window - never serve an expired account.
+        if account.is_expired():
+            self._entries.pop(token_hash, None)
+            return None
+        self._entries.move_to_end(token_hash)
+        return account
+
+    def put(self, token_hash: str, account: ServiceAccount) -> None:
+        if not self.enabled:
+            return
+        self._entries[token_hash] = (account, time.monotonic())
+        self._entries.move_to_end(token_hash)
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+    def invalidate(self, token_hash: str) -> None:
+        self._entries.pop(token_hash, None)
+
+
 class ServiceAccountVerifier:
     """Verifies service account tokens against the AgentOS database.
 
     Supports both sync (BaseDb) and async (AsyncBaseDb) databases; sync lookups run in
-    the threadpool so verification never blocks the event loop. Successful lookups also
-    refresh the account's last_used_at, throttled to at most one write per minute per
-    token (per worker process).
+    the threadpool so verification never blocks the event loop. Successful verifications
+    are cached in-process for ``cache_ttl_seconds`` (0 disables the cache), so a valid
+    token does not hit the database on every request; token expiry is still enforced on
+    cache hits, and revoke() callers should invalidate() the entry to evict it locally.
+    Successful lookups also refresh the account's last_used_at, throttled to at most one
+    write per minute per token (per worker process).
     """
 
-    def __init__(self, db: Union[BaseDb, AsyncBaseDb], last_used_write_interval: int = 60):
+    def __init__(
+        self,
+        db: Union[BaseDb, AsyncBaseDb],
+        last_used_write_interval: int = 60,
+        cache_ttl_seconds: int = 30,
+        cache_max_entries: int = 2048,
+    ):
         self.db = db
         self.last_used_write_interval = last_used_write_interval
         self._limiter = _FailedLookupLimiter()
+        self._cache = _VerificationCache(ttl_seconds=cache_ttl_seconds, max_entries=cache_max_entries)
         self._last_used_writes: Dict[str, float] = {}
+
+    def invalidate(self, token_hash: str) -> None:
+        """Evict a cached verification. Call on revoke so it takes effect immediately on
+        this worker; other workers converge within the cache TTL. Idempotent."""
+        self._cache.invalidate(token_hash)
 
     async def verify(self, token: str, client_key: Optional[str] = None) -> ServiceAccountVerification:
         """Verify a plaintext token. Returns a verification result, never raises."""
         key = client_key or "unknown"
+        token_hash = hash_token(token)
+
+        # Serve a recently-verified token from the cache (expiry re-checked in get()).
+        cached = self._cache.get(token_hash)
+        if cached is not None:
+            await self._maybe_touch_last_used(cached)
+            return ServiceAccountVerification(status=VerificationStatus.OK, account=cached)
 
         # The token is always looked up first: a valid token is never blocked by the
         # limiter. The limiter only shapes the FAILURE response (INVALID vs 429) so a
         # flood of bad tokens can't deny service to legitimate holders.
-        token_hash = hash_token(token)
         try:
             if isinstance(self.db, AsyncBaseDb):
                 row = await self.db.get_service_account_by_token_hash(token_hash)
@@ -213,8 +289,11 @@ class ServiceAccountVerifier:
         if row is not None:
             account = ServiceAccount.from_dict(row)
             if not (account.is_revoked() or account.is_expired()):
+                self._cache.put(token_hash, account)
                 await self._maybe_touch_last_used(account)
                 return ServiceAccountVerification(status=VerificationStatus.OK, account=account)
+            # Defensive: ensure a now-revoked/expired token is not lingering in cache.
+            self._cache.invalidate(token_hash)
             log_debug("Service account verification failed: token is revoked or expired")
         else:
             log_debug("Service account verification failed: unknown token")

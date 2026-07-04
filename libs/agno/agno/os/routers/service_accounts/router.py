@@ -211,17 +211,28 @@ def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
     @router.delete("/service-accounts/{service_account_id}", status_code=204)
     async def revoke_service_account(
         service_account_id: str,
+        request: Request,
         _: bool = Depends(auth_dependency),
     ) -> None:
-        """Revoke a service account. Takes effect on the token's next request. Idempotent."""
+        """Revoke a service account. Idempotent.
+
+        Takes effect immediately on this worker (the local verification cache entry is
+        evicted) and within the cache TTL on other workers.
+        """
         existing = await _db_call("get_service_account", service_account_id)
         if existing is None:
             raise HTTPException(status_code=404, detail=f"Service account '{service_account_id}' not found")
-        if existing.get("revoked_at") is not None:
-            return None
-        updated = await _db_call("update_service_account", service_account_id, revoked_at=int(time.time()))
-        if updated is None:
-            raise HTTPException(status_code=500, detail="Could not revoke service account")
+        if existing.get("revoked_at") is None:
+            updated = await _db_call("update_service_account", service_account_id, revoked_at=int(time.time()))
+            if updated is None:
+                raise HTTPException(status_code=500, detail="Could not revoke service account")
+
+        # Evict the cached verification so this worker rejects the token immediately;
+        # other workers converge as their cached entry ages out within the TTL.
+        verifier = getattr(request.app.state, "service_account_verifier", None)
+        token_hash = existing.get("token_hash")
+        if verifier is not None and token_hash:
+            verifier.invalidate(token_hash)
         return None
 
     return router

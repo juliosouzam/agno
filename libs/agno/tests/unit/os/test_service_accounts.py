@@ -14,6 +14,7 @@ from agno.os.service_accounts import (
     TOKEN_PREFIX,
     ServiceAccountVerifier,
     VerificationStatus,
+    _VerificationCache,
     generate_token,
     get_invalid_scopes,
     get_principal,
@@ -131,6 +132,54 @@ class TestScopeHelpers:
         assert get_privileged_scopes(["service_accounts:write"]) == ["service_accounts:write"]
 
 
+class TestVerificationCache:
+    def _account(self, name="claude-code", expires_at=None):
+        return ServiceAccount.from_dict(_account_row(name=name, expires_at=expires_at))
+
+    def test_put_then_get_hits(self):
+        cache = _VerificationCache(ttl_seconds=30)
+        cache.put("h1", self._account())
+        assert cache.get("h1") is not None
+
+    def test_ttl_zero_never_stores_or_serves(self):
+        cache = _VerificationCache(ttl_seconds=0)
+        assert cache.enabled is False
+        cache.put("h1", self._account())
+        assert cache.get("h1") is None
+
+    def test_ttl_expiry_evicts(self):
+        cache = _VerificationCache(ttl_seconds=30)
+        # Force the cached-at timestamp into the past beyond the TTL.
+        cache._entries["h1"] = (self._account(), time.monotonic() - 100)
+        assert cache.get("h1") is None
+        assert "h1" not in cache._entries
+
+    def test_expired_account_not_served_within_ttl(self):
+        cache = _VerificationCache(ttl_seconds=30)
+        # Fresh cache entry (within TTL) but the account itself has expired.
+        cache._entries["h1"] = (self._account(expires_at=int(time.time()) - 10), time.monotonic())
+        assert cache.get("h1") is None
+        assert "h1" not in cache._entries
+
+    def test_lru_eviction(self):
+        cache = _VerificationCache(ttl_seconds=30, max_entries=2)
+        cache.put("h1", self._account("a"))
+        cache.put("h2", self._account("b"))
+        cache.get("h1")  # h1 becomes most-recently-used
+        cache.put("h3", self._account("c"))  # evicts the LRU entry (h2)
+        assert cache.get("h1") is not None
+        assert cache.get("h2") is None
+        assert cache.get("h3") is not None
+
+    def test_invalidate_removes_entry(self):
+        cache = _VerificationCache(ttl_seconds=30)
+        cache.put("h1", self._account())
+        cache.invalidate("h1")
+        assert cache.get("h1") is None
+        # Idempotent
+        cache.invalidate("h1")
+
+
 class TestVerifier:
     @pytest.fixture
     def sync_db(self):
@@ -230,6 +279,55 @@ class TestVerifier:
         sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
         result = await verifier.verify(plaintext, client_key="1.2.3.4")
         assert result.ok
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_avoids_second_db_lookup(self, sync_db):
+        plaintext, token_hash, _ = generate_token()
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
+        verifier = ServiceAccountVerifier(db=sync_db, cache_ttl_seconds=30)
+        first = await verifier.verify(plaintext)
+        second = await verifier.verify(plaintext)
+        assert first.ok and second.ok
+        # The DB is consulted only once; the second verify is served from cache.
+        sync_db.get_service_account_by_token_hash.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ttl_zero_disables_cache(self, sync_db):
+        plaintext, token_hash, _ = generate_token()
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
+        verifier = ServiceAccountVerifier(db=sync_db, cache_ttl_seconds=0)
+        await verifier.verify(plaintext)
+        await verifier.verify(plaintext)
+        assert sync_db.get_service_account_by_token_hash.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_invalidate_forces_next_verify_to_hit_db(self, sync_db):
+        plaintext, token_hash, _ = generate_token()
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
+        verifier = ServiceAccountVerifier(db=sync_db, cache_ttl_seconds=30)
+        await verifier.verify(plaintext)
+        verifier.invalidate(token_hash)
+        await verifier.verify(plaintext)
+        assert sync_db.get_service_account_by_token_hash.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_revoked_after_cache_served_until_invalidated(self, sync_db):
+        # Convergence semantics: a token cached as valid keeps authenticating within the
+        # TTL until the local cache is evicted; once evicted it reflects the revocation.
+        plaintext, token_hash, _ = generate_token()
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(token_hash=token_hash)
+        verifier = ServiceAccountVerifier(db=sync_db, cache_ttl_seconds=30)
+        assert (await verifier.verify(plaintext)).ok
+
+        # Account is revoked in the DB, but the cached entry still authenticates.
+        sync_db.get_service_account_by_token_hash.return_value = _account_row(
+            token_hash=token_hash, revoked_at=int(time.time())
+        )
+        assert (await verifier.verify(plaintext)).ok
+
+        # After eviction, the next verify reflects the revocation.
+        verifier.invalidate(token_hash)
+        assert (await verifier.verify(plaintext)).status == VerificationStatus.INVALID
 
     @pytest.mark.asyncio
     async def test_async_db_lookup_is_awaited(self):

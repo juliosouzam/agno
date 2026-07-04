@@ -138,6 +138,23 @@ class TestServiceAccountLifecycleWithJWT:
         assert response.status_code == 401
         assert response.json()["detail"] == UNIFORM_401_DETAIL
 
+    def test_revoke_invalidates_cached_token_immediately(self, jwt_client):
+        # Use the token first so it is cached, then revoke: the revoking worker (this
+        # process, default 30s cache TTL) must reject it at once, not serve the cache.
+        admin_jwt = _make_jwt(["agent_os:admin"])
+        minted = _mint(jwt_client, admin_jwt).json()
+
+        assert jwt_client.get("/sessions", headers={"Authorization": f"Bearer {minted['token']}"}).status_code == 200
+
+        revoke = jwt_client.delete(
+            f"/service-accounts/{minted['id']}", headers={"Authorization": f"Bearer {admin_jwt}"}
+        )
+        assert revoke.status_code == 204
+
+        response = jwt_client.get("/sessions", headers={"Authorization": f"Bearer {minted['token']}"})
+        assert response.status_code == 401
+        assert response.json()["detail"] == UNIFORM_401_DETAIL
+
     def test_expired_pat_gets_same_uniform_401(self, jwt_client, sqlite_db):
         admin_jwt = _make_jwt(["agent_os:admin"])
         minted = _mint(jwt_client, admin_jwt).json()

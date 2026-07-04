@@ -1128,7 +1128,10 @@ class AgentOS:
         if self._service_account_verifier is None:
             from agno.os.service_accounts import ServiceAccountVerifier
 
-            self._service_account_verifier = ServiceAccountVerifier(db=self.db)
+            self._service_account_verifier = ServiceAccountVerifier(
+                db=self.db,
+                cache_ttl_seconds=self.settings.service_account_cache_ttl_seconds,
+            )
         return self._service_account_verifier
 
     def _add_jwt_middleware(self, fastapi_app: FastAPI) -> None:

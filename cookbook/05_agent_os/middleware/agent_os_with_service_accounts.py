@@ -4,8 +4,12 @@ This example demonstrates service accounts: machine identities for AgentOS.
 Coding agents and chat apps connecting to your AgentOS need long-lived credentials.
 Humans get JWTs; machines get service accounts - opaque `agno_pat_...` tokens
 following the GitHub PAT model. Only the SHA-256 hash is stored in the AgentOS
-database, the plaintext is returned exactly once at creation, and revocation takes
-effect on the token's next request.
+database, and the plaintext is returned exactly once at creation.
+
+Successful verifications are cached in-process for a short TTL (default 30s), so PAT
+auth does not hit the database on every request. Revocation takes effect within that
+TTL across workers - immediately on the worker that processes the revoke. Set
+`AgnoAPISettings(service_account_cache_ttl_seconds=0)` for strict instant revocation.
 
 Runs executed with a service account attribute to it: sessions and traces created
 through a `claude-code` token show `sa:claude-code` as the user.
@@ -13,7 +17,7 @@ through a `claude-code` token show `sa:claude-code` as the user.
 Flow demonstrated here:
 1. An admin (JWT with the admin scope) mints a token for `claude-code`
 2. The machine calls the run endpoint with its `agno_pat_...` token
-3. The admin lists and revokes tokens; revoked tokens get a 401 on the next request
+3. The admin lists and revokes tokens; the revoking worker rejects the token at once
 """
 
 from datetime import UTC, datetime, timedelta
