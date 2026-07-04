@@ -44,8 +44,8 @@ def _resolve_clients(clients: Optional[str], adapters: Dict[str, ClientAdapter])
     detected = [adapter for adapter in adapters.values() if adapter.detect()]
     if not detected:
         raise CLIError(
-            "No supported coding agents detected on this machine.",
-            hint="Install Claude Code, Codex, or Cursor, or pass --clients explicitly.",
+            "No supported clients detected on this machine.",
+            hint="Install Claude Code, Claude Desktop, Codex, or Cursor, or pass --clients explicitly.",
         )
     return detected
 
@@ -100,7 +100,9 @@ def _mint(
 def connect(
     url: Optional[str] = typer.Option(None, "--url", help="AgentOS base URL (default: autodiscover on localhost)."),
     clients: Optional[str] = typer.Option(
-        None, "--clients", help="Comma-separated clients to configure (claude-code,codex,cursor). Default: detected."
+        None,
+        "--clients",
+        help="Comma-separated clients to configure (claude-code,claude-desktop,codex,cursor). Default: detected.",
     ),
     name: Optional[str] = typer.Option(
         None, "--name", help="Use one shared service account with this name instead of one per client."
