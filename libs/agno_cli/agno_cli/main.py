@@ -6,6 +6,8 @@ import typer
 
 from agno_cli import __version__
 from agno_cli.commands.connect import connect
+from agno_cli.commands.create import create
+from agno_cli.commands.infra import infra_app
 from agno_cli.commands.status import status
 from agno_cli.commands.tokens import tokens_app
 from agno_cli.console import print_info, print_warning
@@ -21,8 +23,10 @@ app = typer.Typer(
 )
 
 app.command(name="connect")(connect)
+app.command(name="create")(create)
 app.command(name="status")(status)
 app.add_typer(tokens_app, name="tokens")
+app.add_typer(infra_app, name="infra")
 
 
 def _load_plugins() -> None:

@@ -184,16 +184,13 @@ class AgentOSAPI:
 
         response = self._request("POST", "/service-accounts", json=body)
         if response.status_code == 409:
-            raise ConflictError(
-                "A service account named '" + name + "' already exists.",
-                hint="Re-run with --rotate to revoke and re-mint it, or --skip-existing to leave it untouched.",
-            )
+            raise ConflictError("A service account named '" + name + "' already exists.")
         if response.status_code != 201:
             raise APIError(
                 "Could not create service account '" + name + "': " + _error_detail(response),
                 status_code=response.status_code,
             )
-        return ServiceAccount.from_dict(response.json())
+        return self._parse_account(response)
 
     def list_service_accounts(self) -> List[ServiceAccount]:
         accounts: List[ServiceAccount] = []
@@ -205,11 +202,16 @@ class AgentOSAPI:
                     "Could not list service accounts: " + _error_detail(response),
                     status_code=response.status_code,
                 )
-            payload = response.json()
+            payload = self._parse_json(response)
             data = payload.get("data") if isinstance(payload, dict) else payload
             if not isinstance(data, list):
                 break
-            accounts.extend(ServiceAccount.from_dict(item) for item in data)
+            for item in data:
+                if isinstance(item, dict):
+                    try:
+                        accounts.append(ServiceAccount.from_dict(item))
+                    except KeyError as e:
+                        raise APIError("The AgentOS returned a malformed service account (missing " + str(e) + ").")
             meta = payload.get("meta") if isinstance(payload, dict) else None
             total_pages = (meta or {}).get("total_pages") if isinstance(meta, dict) else None
             if not total_pages or page >= int(total_pages):
@@ -232,6 +234,27 @@ class AgentOSAPI:
             )
 
     # -- Internals -----------------------------------------------------------------
+
+    def _parse_json(self, response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except Exception:
+            raise APIError(
+                "The server at "
+                + self.base_url
+                + " returned a non-JSON response (HTTP "
+                + str(response.status_code)
+                + ") - is this really an AgentOS?"
+            )
+
+    def _parse_account(self, response: httpx.Response) -> ServiceAccount:
+        payload = self._parse_json(response)
+        if not isinstance(payload, dict):
+            raise APIError("The AgentOS returned an unexpected service-account payload.")
+        try:
+            return ServiceAccount.from_dict(payload)
+        except KeyError as e:
+            raise APIError("The AgentOS returned a malformed service account (missing " + str(e) + ").")
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:

@@ -8,7 +8,7 @@ import typer
 from agno_cli.commands._common import handle_cli_error, parse_expires, resolve_admin_token
 from agno_cli.console import console, emit_json, print_info, print_success, print_warning
 from agno_cli.discovery import discover
-from agno_cli.errors import CLIError
+from agno_cli.errors import CLIError, ConflictError
 from agno_cli.http import AgentOSAPI
 
 tokens_app = typer.Typer(name="tokens", help="Mint, list, and revoke AgentOS service-account tokens.")
@@ -44,13 +44,17 @@ def create(
     try:
         expires_in_days, never_expires = parse_expires(expires)
         with _api_for(url, json_output) as api:
-            account = api.create_service_account(
-                name=name,
-                scopes=list(scopes) or None,
-                expires_in_days=expires_in_days,
-                never_expires=never_expires,
-                allow_privileged_scopes=privileged,
-            )
+            try:
+                account = api.create_service_account(
+                    name=name,
+                    scopes=list(scopes) or None,
+                    expires_in_days=expires_in_days,
+                    never_expires=never_expires,
+                    allow_privileged_scopes=privileged,
+                )
+            except ConflictError as e:
+                e.hint = "Revoke it first (agno tokens revoke " + name + ") or pick a different name."
+                raise
     except CLIError as e:
         raise handle_cli_error(e, json_output)
 

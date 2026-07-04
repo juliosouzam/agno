@@ -45,3 +45,25 @@ def test_verify_404_when_mcp_disabled(monkeypatch):
     result = verify_mcp(MCP_URL, token=fake.security_key)
     assert result.ok is False
     assert result.status_code == 404
+
+
+def test_verify_never_raises_on_malformed_result(monkeypatch):
+    """A server returning a garbage tools/list result must yield a failed result, not a traceback."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as json_module
+
+        message = json_module.loads(request.content) if request.content else {}
+        if message.get("method") == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        if message.get("method") == "tools/list":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": "not-a-dict"})
+        return httpx.Response(202)
+
+    import agno_cli.http as http_module
+
+    monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
+    result = verify_mcp(MCP_URL, token="anything")
+    assert result.ok is True
+    assert result.tools == []

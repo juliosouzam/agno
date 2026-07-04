@@ -13,9 +13,15 @@ This discovers the AgentOS (default `http://localhost:7777`), mints one service-
 ## Commands
 
 ```bash
+agno create NAME [-t agentos-docker|agentos-aws|agentos-railway] [-u REPO_URL] [--json]
+
+agno infra up [--file FILE] [--pull] [--dry-run] [--json]
+agno infra down [--file FILE] [--volumes] [--dry-run] [--json]
+agno infra restart [--file FILE] [--pull] [--dry-run] [--json]
+
 agno connect [--url URL] [--clients claude-code,codex,cursor] [--name NAME]
-             [--scopes SCOPE ...] [--expires 90d] [--rotate | --skip-existing]
-             [--server-name agno] [--project] [--json]
+             [--scopes SCOPE ...] [--expires 90d] [--privileged]
+             [--rotate | --skip-existing] [--server-name agno] [--project] [--json]
 
 agno tokens create NAME [--scopes SCOPE ...] [--expires 90d|never] [--privileged] [--json]
 agno tokens list [--json]
@@ -24,11 +30,16 @@ agno tokens revoke NAME [--json]
 agno status [--url URL] [--json]
 ```
 
+`create` scaffolds an AgentOS project from a starter template (git clone, history stripped,
+example secrets copied into place). `infra` runs the project's compose file — the legacy
+`ag infra` resource engine (per-resource Docker/AWS orchestration) is not ported; it is
+under redesign and will plug in via the `agno_cli.plugins` entry-point group.
+
 Admin credential resolution (for minting): `AGNO_ADMIN_TOKEN` env var, then `OS_SECURITY_KEY` env var, then an interactive prompt. When the target AgentOS has authorization disabled (local dev), minting is skipped and configs are written without credentials.
 
 ## Design rules
 
-- Built to be driven by coding agents: `--json` on every command, deterministic exit codes (0 ok, 1 failure, 2 partial), no prompts in `--json` mode.
+- Built to be driven by coding agents: `--json` on every command, deterministic exit codes (0 ok, 1 failure, 2 usage error, 3 partial success), no prompts in `--json` mode.
 - Talks plain HTTP to the AgentOS REST API. Never imports the `agno` framework.
 - Truthful outcomes: no command reports success it did not verify.
 - Secrets never go to logs; `connect` writes tokens straight into client configs and never prints them. `tokens create` prints the plaintext exactly once.

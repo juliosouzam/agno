@@ -25,6 +25,16 @@ class WriteResult:
 
     method: str  # "cli" (client's own CLI did the write) | "file" (we edited the config file)
     location: str
+    note: Optional[str] = None  # caveat worth surfacing to the user (e.g. VCS-shared file)
+
+
+def servers_table(config: object) -> dict:
+    """The mcpServers mapping from a parsed config, tolerating malformed shapes."""
+    if isinstance(config, dict):
+        servers = config.get("mcpServers")
+        if isinstance(servers, dict):
+            return servers
+    return {}
 
 
 def bearer_header(token: str) -> str:

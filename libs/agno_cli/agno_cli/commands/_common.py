@@ -11,6 +11,18 @@ from agno_cli.errors import CLIError
 ADMIN_TOKEN_ENV = "AGNO_ADMIN_TOKEN"
 SECURITY_KEY_ENV = "OS_SECURITY_KEY"
 
+_SERVER_NAME_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def validate_server_name(server_name: str) -> None:
+    """MCP server entry names must stay flat: a dotted name would create nested TOML
+    tables in Codex's config that later reads could never find."""
+    if not server_name or not set(server_name) <= _SERVER_NAME_ALLOWED:
+        raise CLIError(
+            "Invalid --server-name: " + server_name,
+            hint="Use letters, digits, '-' and '_' only.",
+        )
+
 
 def resolve_admin_token(auth_mode: str, json_mode: bool) -> Optional[str]:
     """Resolve the admin credential used to call the service-accounts API.

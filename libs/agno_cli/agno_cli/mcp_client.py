@@ -57,9 +57,16 @@ def _parse_jsonrpc_body(response: httpx.Response) -> Optional[Dict[str, Any]]:
 def verify_mcp(mcp_url: str, token: Optional[str] = None, timeout: float = 15.0) -> MCPVerifyResult:
     """Handshake with an MCP streamable-HTTP endpoint and list its tools.
 
-    Never raises: connection problems come back as a failed MCPVerifyResult so callers
-    can report per-client outcomes.
+    Never raises: connection problems and malformed payloads come back as a failed
+    MCPVerifyResult so callers can report per-client outcomes.
     """
+    try:
+        return _verify_mcp(mcp_url, token, timeout)
+    except Exception as e:  # never-raises contract
+        return MCPVerifyResult(ok=False, error="MCP verification failed: " + str(e))
+
+
+def _verify_mcp(mcp_url: str, token: Optional[str], timeout: float) -> MCPVerifyResult:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -131,9 +138,11 @@ def verify_mcp(mcp_url: str, token: Optional[str] = None, timeout: float = 15.0)
                     status_code=tools_response.status_code,
                     error="MCP tools/list returned an unexpected payload.",
                 )
-            tools = [
-                tool.get("name", "") for tool in tools_message["result"].get("tools", []) if isinstance(tool, dict)
-            ]
+            result = tools_message["result"]
+            raw_tools = result.get("tools", []) if isinstance(result, dict) else []
+            if not isinstance(raw_tools, list):
+                raw_tools = []
+            tools = [tool.get("name", "") for tool in raw_tools if isinstance(tool, dict)]
             return MCPVerifyResult(ok=True, tools=tools, status_code=tools_response.status_code)
     except httpx.HTTPError as e:
         return MCPVerifyResult(ok=False, error="Could not reach the MCP endpoint: " + str(e))

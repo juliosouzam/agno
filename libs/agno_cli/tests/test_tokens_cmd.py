@@ -34,13 +34,16 @@ def test_create_human_output_prints_token(monkeypatch, fake_os):
     assert "shown once" in result.output
 
 
-def test_create_conflict_errors(monkeypatch, fake_os):
+def test_create_conflict_errors_with_tokens_hint(monkeypatch, fake_os):
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
     _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
     result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert "already exists" in payload["error"]
+    # The hint must reference flags this command actually has.
+    assert "agno tokens revoke ci-runner" in payload["hint"]
+    assert "--rotate" not in payload["hint"]
 
 
 def test_list_never_exposes_tokens(monkeypatch, fake_os):

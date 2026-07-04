@@ -10,7 +10,15 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from agno_cli.clients.base import ClientAdapter, ExistingEntry, WriteResult, bearer_header, token_from_authorization
+from agno_cli.clients.base import (
+    ClientAdapter,
+    ExistingEntry,
+    WriteResult,
+    bearer_header,
+    servers_table,
+    token_from_authorization,
+)
+from agno_cli.errors import CLIError
 
 
 class CursorAdapter(ClientAdapter):
@@ -34,10 +42,10 @@ class CursorAdapter(ClientAdapter):
     def read_existing(self, server_name: str) -> Optional[ExistingEntry]:
         # Project config wins on collisions, so check it first even in global mode.
         for path in (self.cwd / ".cursor" / "mcp.json", self.home / ".cursor" / "mcp.json"):
-            config = self._read_json(path)
-            if not config:
+            config = self._read_json_lenient(path)
+            if config is None:
                 continue
-            entry = (config.get("mcpServers") or {}).get(server_name)
+            entry = servers_table(config).get(server_name)
             if not isinstance(entry, dict):
                 continue
             url = entry.get("url")
@@ -55,22 +63,30 @@ class CursorAdapter(ClientAdapter):
 
     def write(self, server_name: str, url: str, token: Optional[str]) -> WriteResult:
         path = self.config_path
-        config = self._read_json(path) or {}
-        servers = config.setdefault("mcpServers", {})
+        config = self._read_json_strict(path)
+        servers = config.get("mcpServers")
+        if servers is None:
+            servers = {}
+            config["mcpServers"] = servers
+        elif not isinstance(servers, dict):
+            raise CLIError("Refusing to modify " + str(path) + ": 'mcpServers' is not an object.")
         entry: Dict[str, Any] = {"url": url}
         if token:
             entry["headers"] = {"Authorization": bearer_header(token)}
         servers[server_name] = entry
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        created = not path.exists()
         path.write_text(json.dumps(config, indent=2) + "\n")
-        if created:
+        if token:
             path.chmod(0o600)
-        return WriteResult(method="file", location=str(path))
+        note = None
+        if self.project and token:
+            note = str(path) + " is project-scoped; keep it out of version control (it now contains a token)."
+        return WriteResult(method="file", location=str(path), note=note)
 
     @staticmethod
-    def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    def _read_json_lenient(path: Path) -> Optional[Dict[str, Any]]:
+        """For reads: a missing or malformed file simply means no entry found."""
         if not path.exists():
             return None
         try:
@@ -78,3 +94,19 @@ class CursorAdapter(ClientAdapter):
         except (OSError, json.JSONDecodeError):
             return None
         return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _read_json_strict(path: Path) -> Dict[str, Any]:
+        """For writes: refuse to clobber a file we cannot parse."""
+        if not path.exists():
+            return {}
+        try:
+            parsed = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise CLIError(
+                "Refusing to modify " + str(path) + ": the existing file is not valid JSON (" + str(e) + ").",
+                hint="Fix or move the file, then re-run.",
+            )
+        if not isinstance(parsed, dict):
+            raise CLIError("Refusing to modify " + str(path) + ": expected a JSON object at the top level.")
+        return parsed

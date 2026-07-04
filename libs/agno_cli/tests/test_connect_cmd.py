@@ -56,8 +56,8 @@ def test_connect_happy_path(monkeypatch, fake_os, fake_clients):
     for account in fake_os.accounts.values():
         assert account["token"] not in result.output
 
-    # Tokens landed in the client configs.
-    claude_config = json.loads((fake_clients / ".mcp.json").read_text())
+    # Tokens landed in the client configs (Claude user scope = ~/.claude.json).
+    claude_config = json.loads((fake_clients / ".claude.json").read_text())
     assert claude_config["mcpServers"]["agno"]["url"] == MCP_URL
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
     token = cursor_config["mcpServers"]["agno"]["headers"]["Authorization"]
@@ -82,7 +82,7 @@ def test_connect_conflict_without_rotate_fails_noninteractive(monkeypatch, fake_
     assert _connect().exit_code == 0
 
     # Wipe client configs but keep server-side accounts: mint now conflicts.
-    (fake_clients / ".mcp.json").unlink()
+    (fake_clients / ".claude.json").write_text("{}")
     (fake_clients / ".codex" / "config.toml").unlink()
     (fake_clients / ".cursor" / "mcp.json").unlink()
 
@@ -190,4 +190,60 @@ def test_connect_skip_existing_leaves_broken_entry(monkeypatch, fake_os, fake_cl
     result = _connect(["--skip-existing"])
     payload = json.loads(result.output)
     assert all(r["status"] == "skipped" for r in payload["results"])
+    assert result.exit_code == 1
+
+
+def test_connect_skip_existing_never_touches_foreign_entry(monkeypatch, fake_os, fake_clients):
+    """An entry pointing at a DIFFERENT AgentOS is untouchable under --skip-existing."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    foreign = {"mcpServers": {"agno": {"url": "http://other-os:9999/mcp", "headers": {"Authorization": "Bearer keep"}}}}
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(foreign))
+
+    result = _connect(["--clients", "cursor", "--skip-existing"])
+    payload = json.loads(result.output)
+    assert payload["results"][0]["status"] == "skipped"
+    assert "other-os" in payload["results"][0]["error"]
+    config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert config["mcpServers"]["agno"]["url"] == "http://other-os:9999/mcp"
+    assert config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer keep"
+    assert fake_os.create_calls == 0
+
+
+def test_connect_replacing_foreign_entry_is_reported(monkeypatch, fake_os, fake_clients):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    foreign = {"mcpServers": {"agno": {"url": "http://other-os:9999/mcp"}}}
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(foreign))
+
+    result = _connect(["--clients", "cursor"])
+    payload = json.loads(result.output)
+    assert payload["results"][0]["status"] == "connected"
+    assert payload["results"][0]["replaced_url"] == "http://other-os:9999/mcp"
+
+
+def test_connect_partial_failure_keeps_json_contract(monkeypatch, fake_os, fake_clients):
+    """One corrupt client config fails that client only; output stays one JSON document, exit 3."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    (fake_clients / ".cursor" / "mcp.json").write_text("{corrupt")
+
+    result = _connect()
+    payload = json.loads(result.output)
+    by_client = {r["client"]: r for r in payload["results"]}
+    assert by_client["cursor"]["status"] == "failed"
+    assert "Refusing to modify" in by_client["cursor"]["error"]
+    assert by_client["claude-code"]["status"] == "connected"
+    assert by_client["codex"]["status"] == "connected"
+    assert result.exit_code == 3
+
+
+def test_connect_detects_shadowing_claude_local_entry(monkeypatch, fake_os, fake_clients):
+    """A stale local-scope entry shadows the user-scope write; connect must fail loudly, not lie."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    (fake_clients / ".claude.json").write_text(
+        json.dumps({"projects": {str(fake_clients): {"mcpServers": {"agno": {"url": "http://stale:1/mcp"}}}}})
+    )
+
+    result = _connect(["--clients", "claude-code", "--rotate"])
+    payload = json.loads(result.output)
+    assert payload["results"][0]["status"] == "failed"
+    assert "shadow" in payload["results"][0]["error"]
     assert result.exit_code == 1

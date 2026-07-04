@@ -71,6 +71,18 @@ class CodexAdapter(ClientAdapter):
         block = "\n".join(block_lines) + "\n"
 
         existing_text = self.config_path.read_text() if self.config_path.exists() else ""
+        if existing_text:
+            try:
+                tomllib.loads(existing_text)
+            except tomllib.TOMLDecodeError as e:
+                raise CLIError(
+                    "Refusing to modify "
+                    + str(self.config_path)
+                    + ": the existing TOML does not parse ("
+                    + str(e)
+                    + ").",
+                    hint="Fix or move the file, then re-run.",
+                )
         new_text = self._replace_section(existing_text, server_name, block)
 
         try:
@@ -81,9 +93,8 @@ class CodexAdapter(ClientAdapter):
             )
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        created = not self.config_path.exists()
         self.config_path.write_text(new_text)
-        if created:
+        if token:
             self.config_path.chmod(0o600)
         return WriteResult(method="file", location=str(self.config_path))
 
@@ -99,25 +110,47 @@ class CodexAdapter(ClientAdapter):
 
     @staticmethod
     def _replace_section(text: str, server_name: str, block: str) -> str:
-        """Replace (or append) the [mcp_servers.<name>] section, including dotted subtables."""
+        """Replace (or append) the [mcp_servers.<name>] section, including dotted subtables.
+
+        Every table header — [table] and [[array-of-tables]] alike — ends the previous
+        section, so content following the managed section is never swallowed. Trailing
+        comment/blank lines inside the managed section that lead into the next header
+        are preserved, since they usually describe what follows.
+        """
         section_prefix = "[mcp_servers." + server_name
         lines = text.splitlines()
         kept: List[str] = []
+        dropped: List[str] = []
         insert_at: Optional[int] = None
         in_section = False
+
+        def flush_trailing_comments() -> None:
+            trailing: List[str] = []
+            for dropped_line in reversed(dropped):
+                if dropped_line.strip() == "" or dropped_line.lstrip().startswith("#"):
+                    trailing.append(dropped_line)
+                else:
+                    break
+            kept.extend(reversed(trailing))
+            dropped.clear()
+
         for line in lines:
             stripped = line.strip()
-            is_header = stripped.startswith("[") and not stripped.startswith("[[")
-            if is_header:
+            if stripped.startswith("["):
                 owns = stripped.startswith(section_prefix + "]") or stripped.startswith(section_prefix + ".")
+                if in_section and not owns:
+                    flush_trailing_comments()
+                in_section = owns
                 if owns:
-                    in_section = True
                     if insert_at is None:
                         insert_at = len(kept)
                     continue
-                in_section = False
-            if not in_section:
+            if in_section:
+                dropped.append(line)
+            else:
                 kept.append(line)
+        if in_section:
+            dropped.clear()
 
         block_lines = block.rstrip("\n").splitlines()
         if insert_at is not None:

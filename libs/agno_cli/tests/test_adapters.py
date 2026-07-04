@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+import pytest
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -14,6 +16,7 @@ else:
 from agno_cli.clients.claude_code import ClaudeCodeAdapter
 from agno_cli.clients.codex import CodexAdapter
 from agno_cli.clients.cursor import CursorAdapter
+from agno_cli.errors import CLIError
 
 URL = "http://localhost:7777/mcp"
 TOKEN = "agno_pat_test123"
@@ -64,31 +67,77 @@ def test_claude_write_cli_retries_on_already_exists(tmp_path: Path):
     assert runner.calls[2][:3] == ["claude", "mcp", "add"]
 
 
-def test_claude_write_file_fallback_without_binary(tmp_path: Path):
+def test_claude_write_file_fallback_user_scope(tmp_path: Path):
+    """Without the binary, user-scope writes land in ~/.claude.json, never a VCS-shared file."""
     adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
     result = adapter.write("agno", URL, TOKEN)
 
     assert result.method == "file"
-    config = json.loads((tmp_path / ".mcp.json").read_text())
+    config = json.loads((tmp_path / ".claude.json").read_text())
     entry = config["mcpServers"]["agno"]
     assert entry["url"] == URL
     assert entry["headers"]["Authorization"] == "Bearer " + TOKEN
+    assert ((tmp_path / ".claude.json").stat().st_mode & 0o777) == 0o600
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_claude_write_file_fallback_project_scope_warns(tmp_path: Path):
+    adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, scope="project", which=lambda name: None)
+    result = adapter.write("agno", URL, TOKEN)
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    assert config["mcpServers"]["agno"]["url"] == URL
+    assert result.note is not None and "version control" in result.note
+
+
+def test_claude_write_preserves_unrelated_user_config(tmp_path: Path):
+    (tmp_path / ".claude.json").write_text(json.dumps({"onboarding": True, "projects": {"/x": {}}}))
+    adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
+    adapter.write("agno", URL, TOKEN)
+    config = json.loads((tmp_path / ".claude.json").read_text())
+    assert config["onboarding"] is True
+    assert config["projects"] == {"/x": {}}
+    assert config["mcpServers"]["agno"]["url"] == URL
+
+
+def test_claude_write_refuses_corrupt_config(tmp_path: Path):
+    (tmp_path / ".claude.json").write_text("{not json")
+    adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
+    with pytest.raises(CLIError) as exc_info:
+        adapter.write("agno", URL, TOKEN)
+    assert "Refusing to modify" in exc_info.value.message
+    assert (tmp_path / ".claude.json").read_text() == "{not json"
 
 
 def test_claude_write_without_token_omits_headers(tmp_path: Path):
     adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
     adapter.write("agno", URL, None)
-    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["agno"]
+    entry = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["agno"]
     assert "headers" not in entry
 
 
-def test_claude_read_existing_project_file(tmp_path: Path):
+def test_claude_read_existing_roundtrip(tmp_path: Path):
     adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
     adapter.write("agno", URL, TOKEN)
     entry = adapter.read_existing("agno")
     assert entry is not None
     assert entry.url == URL
     assert entry.token == TOKEN
+
+
+def test_claude_local_scope_wins_over_user_scope(tmp_path: Path):
+    """Claude Code resolves local > project > user; read_existing must match."""
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"agno": {"url": "http://user-scope/mcp"}},
+                "projects": {str(tmp_path): {"mcpServers": {"agno": {"url": "http://local-scope/mcp"}}}},
+            }
+        )
+    )
+    adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None)
+    entry = adapter.read_existing("agno")
+    assert entry is not None
+    assert entry.url == "http://local-scope/mcp"
 
 
 def test_claude_read_existing_user_scope(tmp_path: Path):
@@ -194,6 +243,35 @@ def test_codex_read_missing_or_malformed(tmp_path: Path):
     assert adapter.read_existing("agno") is None
 
 
+def test_codex_write_refuses_corrupt_config(tmp_path: Path):
+    adapter = CodexAdapter(home=tmp_path)
+    adapter.config_path.parent.mkdir(parents=True)
+    adapter.config_path.write_text("this is [not valid toml")
+    with pytest.raises(CLIError) as exc_info:
+        adapter.write("agno", URL, TOKEN)
+    assert "Refusing to modify" in exc_info.value.message
+
+
+def test_codex_preserves_array_of_tables_after_section(tmp_path: Path):
+    """[[array-of-tables]] following the managed section must survive a rewrite."""
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    original = (
+        '[mcp_servers.agno]\nurl = "http://old:1/mcp"\n\n'
+        "# profiles below\n"
+        '[[profiles]]\nname = "work"\n\n'
+        '[[profiles]]\nname = "personal"\n'
+    )
+    (config_dir / "config.toml").write_text(original)
+    adapter = CodexAdapter(home=tmp_path)
+    adapter.write("agno", URL, TOKEN)
+
+    parsed = tomllib.loads(adapter.config_path.read_text())
+    assert parsed["mcp_servers"]["agno"]["url"] == URL
+    assert [p["name"] for p in parsed["profiles"]] == ["work", "personal"]
+    assert "# profiles below" in adapter.config_path.read_text()
+
+
 # -- Cursor ----------------------------------------------------------------------------
 
 
@@ -245,3 +323,24 @@ def test_cursor_detect(tmp_path: Path):
     assert adapter.detect() is False
     (tmp_path / ".cursor").mkdir()
     assert adapter.detect() is True
+
+
+def test_cursor_write_refuses_corrupt_config(tmp_path: Path):
+    config_dir = tmp_path / ".cursor"
+    config_dir.mkdir()
+    (config_dir / "mcp.json").write_text("{broken")
+    adapter = CursorAdapter(home=tmp_path, cwd=tmp_path)
+    with pytest.raises(CLIError) as exc_info:
+        adapter.write("agno", URL, TOKEN)
+    assert "Refusing to modify" in exc_info.value.message
+    assert (config_dir / "mcp.json").read_text() == "{broken"
+
+
+def test_cursor_malformed_servers_shape_is_tolerated_on_read(tmp_path: Path):
+    config_dir = tmp_path / ".cursor"
+    config_dir.mkdir()
+    (config_dir / "mcp.json").write_text(json.dumps({"mcpServers": ["not", "a", "dict"]}))
+    adapter = CursorAdapter(home=tmp_path, cwd=tmp_path)
+    assert adapter.read_existing("agno") is None
+    with pytest.raises(CLIError):
+        adapter.write("agno", URL, TOKEN)
