@@ -1163,25 +1163,23 @@ class AgentOS:
         return self._service_account_verifier
 
     def _add_jwt_middleware(self, fastapi_app: FastAPI) -> None:
-        from agno.os.middleware.jwt import JWTMiddleware, JWTValidator
+        from agno.os.middleware.jwt import JWTMiddleware, JWTValidator, build_jwt_middleware_kwargs
         from agno.os.scopes import AgentOSScope
 
-        verify_audience = False
-        jwks_file = None
-        verification_keys = None
-        algorithm = "RS256"
-        audience = None
-        admin_scope: Optional[str] = None
-        user_isolation = False
-
-        if self.authorization_config:
-            algorithm = self.authorization_config.algorithm or "RS256"
-            verification_keys = self.authorization_config.verification_keys
-            jwks_file = self.authorization_config.jwks_file
-            verify_audience = self.authorization_config.verify_audience or False
-            audience = self.authorization_config.audience
-            admin_scope = self.authorization_config.admin_scope
-            user_isolation = self.authorization_config.user_isolation
+        # Single source of the middleware kwargs, shared with the mounted MCP app
+        # (agno/os/mcp.py::get_mcp_server) so the two surfaces cannot drift.
+        middleware_kwargs = build_jwt_middleware_kwargs(
+            self.authorization_config,
+            authorization=self.authorization,
+            service_account_verifier=self._get_service_account_verifier(),
+        )
+        algorithm = middleware_kwargs["algorithm"]
+        verification_keys = middleware_kwargs["verification_keys"]
+        jwks_file = middleware_kwargs["jwks_file"]
+        verify_audience = middleware_kwargs["verify_audience"]
+        audience = middleware_kwargs.get("audience")
+        admin_scope: Optional[str] = middleware_kwargs.get("admin_scope")
+        user_isolation = middleware_kwargs.get("user_isolation", False)
 
         log_info(f"Adding JWT middleware for authorization (algorithm: {algorithm})")
 
@@ -1225,26 +1223,10 @@ class AgentOS:
                     "/docs/oauth2-redirect",
                 ] + interface_prefixes
 
-        # Add middleware to stack
-        middleware_kwargs: Dict[str, Any] = {
-            "verification_keys": verification_keys,
-            "jwks_file": jwks_file,
-            "algorithm": algorithm,
-            "authorization": self.authorization,
-            "verify_audience": verify_audience,
-            "excluded_route_paths": excluded_route_paths,
-        }
-        if audience:
-            middleware_kwargs["audience"] = audience
-        if admin_scope:
-            middleware_kwargs["admin_scope"] = admin_scope
-        # Default to False on the middleware; only forward when actually enabled
-        # so manual app.add_middleware(JWTMiddleware) defaults stay backwards-compatible.
-        if user_isolation:
-            middleware_kwargs["user_isolation"] = True
-        service_account_verifier = self._get_service_account_verifier()
-        if service_account_verifier is not None:
-            middleware_kwargs["service_account_verifier"] = service_account_verifier
+        # Add middleware to stack. Interface route exclusions are REST-only (the
+        # mounted MCP app has no interface routes), so they are threaded in here
+        # rather than in the shared builder defaults.
+        middleware_kwargs["excluded_route_paths"] = excluded_route_paths
         fastapi_app.add_middleware(JWTMiddleware, **middleware_kwargs)
 
     def get_routes(self) -> List[Any]:

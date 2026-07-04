@@ -4180,7 +4180,9 @@ class AsyncSqliteDb(AsyncBaseDb):
             log_debug(f"Error listing service accounts: {e}")
             return [], 0
 
-    async def update_service_account(self, service_account_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    async def update_service_account(
+        self, service_account_id: str, return_record: bool = True, **kwargs: Any
+    ) -> Optional[Dict[str, Any]]:
         try:
             table = await self._get_table(table_type="service_accounts")
             if table is None:
@@ -4188,6 +4190,8 @@ class AsyncSqliteDb(AsyncBaseDb):
             async with self.async_session_factory() as sess:
                 async with sess.begin():
                     await sess.execute(table.update().where(table.c.id == service_account_id).values(**kwargs))
+            if not return_record:
+                return None
             return await self.get_service_account(service_account_id)
         except Exception as e:
             log_debug(f"Error updating service account: {e}")

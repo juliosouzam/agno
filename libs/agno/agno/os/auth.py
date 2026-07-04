@@ -1,7 +1,8 @@
 import asyncio
 import hmac
+from functools import lru_cache
 from os import getenv
-from typing import Any, List, Literal, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,6 +19,14 @@ from agno.os.settings import AgnoAPISettings
 
 # Create a global HTTPBearer instance
 security = HTTPBearer(auto_error=False)
+
+
+@lru_cache(maxsize=1)
+def _default_scope_mappings() -> Dict[str, List[str]]:
+    """The default route→scope mappings, built once (they are static data) so the
+    per-request service-account path does not rebuild the dict on every call."""
+    return get_default_scope_mappings()
+
 
 # Scopes granted to the internal service token (used by the scheduler executor).
 # Shared constant so auth.py and jwt.py stay in sync.
@@ -98,7 +107,7 @@ async def _authenticate_service_account(request: Request, token: str) -> bool:
 
     scope_check = check_route_scopes(
         list(account.scopes),
-        get_default_scope_mappings(),
+        _default_scope_mappings(),
         request.method,
         request.url.path,
         admin_scope=admin_scope,
@@ -135,7 +144,7 @@ def _has_jwt_middleware(app: Any) -> bool:
     user_middleware = getattr(app, "user_middleware", None) or []
     for mw in user_middleware:
         cls = getattr(mw, "cls", None)
-        if cls is JWTMiddleware:
+        if isinstance(cls, type) and issubclass(cls, JWTMiddleware):
             return True
     return False
 
@@ -265,6 +274,20 @@ def validate_websocket_token(token: str, settings: AgnoAPISettings) -> bool:
 
     # Verify the token matches the configured security key
     return token == settings.os_security_key
+
+
+async def validate_websocket_service_account(token: str, app: Any) -> bool:
+    """Validate a service-account token (``agno_pat_...``) for WebSocket authentication.
+
+    The REST dependency accepts service account tokens in every deployment mode, so the
+    WebSocket path must too -- without this, the same PAT authenticates every REST call
+    but is rejected on WS with a bare security-key comparison.
+    """
+    verifier = getattr(app.state, "service_account_verifier", None)
+    if verifier is None:
+        return False
+    result = await verifier.verify(token)
+    return bool(result.ok and result.account is not None)
 
 
 def build_insufficient_permissions_detail(required_scopes: Optional[List[str]]) -> str:

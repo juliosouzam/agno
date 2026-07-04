@@ -6,7 +6,7 @@ httpx, rich, and typer.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
@@ -116,22 +116,16 @@ class AgentOSAPI:
 
     def health(self) -> Optional[Dict[str, Any]]:
         """GET /health. Returns the payload, or None when unreachable or not an AgentOS."""
-        try:
-            response = self._client.get("/health")
-        except httpx.HTTPError:
-            return None
-        if response.status_code != 200:
-            return None
-        try:
-            payload = response.json()
-        except Exception:
-            return None
-        return payload if isinstance(payload, dict) else None
+        return self._get_json_or_none("/health")
 
     def info(self) -> Optional[Dict[str, Any]]:
         """GET /info (unauthenticated). Returns the payload, or None when unavailable."""
+        return self._get_json_or_none("/info")
+
+    def _get_json_or_none(self, path: str) -> Optional[Dict[str, Any]]:
+        """GET a JSON object, or None when unreachable, non-200, or not a JSON object."""
         try:
-            response = self._client.get("/info")
+            response = self._client.get(path)
         except httpx.HTTPError:
             return None
         if response.status_code != 200:
@@ -192,11 +186,19 @@ class AgentOSAPI:
             )
         return self._parse_account(response)
 
-    def list_service_accounts(self) -> List[ServiceAccount]:
+    def list_service_accounts(self, include_revoked: bool = True) -> List[ServiceAccount]:
         accounts: List[ServiceAccount] = []
+        for page_accounts in self._iter_service_account_pages(include_revoked=include_revoked):
+            accounts.extend(page_accounts)
+        return accounts
+
+    def _iter_service_account_pages(self, include_revoked: bool = True) -> Iterator[List[ServiceAccount]]:
         page = 1
         while True:
-            response = self._request("GET", "/service-accounts", params={"page": page, "limit": 100})
+            params: Dict[str, Any] = {"page": page, "limit": 100}
+            if not include_revoked:
+                params["include_revoked"] = False
+            response = self._request("GET", "/service-accounts", params=params)
             if response.status_code != 200:
                 raise APIError(
                     "Could not list service accounts: " + _error_detail(response),
@@ -205,24 +207,29 @@ class AgentOSAPI:
             payload = self._parse_json(response)
             data = payload.get("data") if isinstance(payload, dict) else payload
             if not isinstance(data, list):
-                break
+                return
+            accounts: List[ServiceAccount] = []
             for item in data:
                 if isinstance(item, dict):
                     try:
                         accounts.append(ServiceAccount.from_dict(item))
                     except KeyError as e:
                         raise APIError("The AgentOS returned a malformed service account (missing " + str(e) + ").")
+            yield accounts
             meta = payload.get("meta") if isinstance(payload, dict) else None
             total_pages = (meta or {}).get("total_pages") if isinstance(meta, dict) else None
             if not total_pages or page >= int(total_pages):
-                break
+                return
             page += 1
-        return accounts
 
     def find_service_account(self, name: str) -> Optional[ServiceAccount]:
-        for account in self.list_service_accounts():
-            if account.name == name:
-                return account
+        # Active accounts only, one page at a time, stopping at the first match --
+        # token rotation grows the revoked history monotonically, so downloading the
+        # full list to find one active name gets steadily more expensive.
+        for page_accounts in self._iter_service_account_pages(include_revoked=False):
+            for account in page_accounts:
+                if account.name == name:
+                    return account
         return None
 
     def revoke_service_account(self, account_id: str) -> None:

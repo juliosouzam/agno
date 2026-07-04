@@ -18,6 +18,7 @@ from agno.os.scopes import (
     check_route_scopes,
     get_default_scope_mappings,
     get_required_scopes_for_route,
+    has_required_scopes,
 )
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
 from agno.os.service_accounts import VerificationStatus
@@ -315,6 +316,59 @@ class JWTValidator:
             "scopes": scopes,
             "audience": payload.get(self.audience_claim),
         }
+
+
+def build_jwt_middleware_kwargs(
+    authorization_config: Optional[Any],
+    *,
+    authorization: bool,
+    service_account_verifier: Optional[Any] = None,
+    excluded_route_paths: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """JWTMiddleware kwargs derived from an ``AuthorizationConfig``, in one place.
+
+    Both the REST app wiring (``agno.os.app``) and the mounted MCP app
+    (``agno.os.mcp.get_mcp_server``) construct their middleware from this builder, so
+    the two surfaces cannot drift: a token accepted on one is accepted with identical
+    constraints (audience, admin scope, user isolation) on the other.
+
+    Optional flags are only included when set, so the middleware's own defaults keep
+    applying to manual ``app.add_middleware(JWTMiddleware, ...)`` setups.
+    """
+    algorithm = "RS256"
+    verification_keys = None
+    jwks_file = None
+    verify_audience = False
+    audience = None
+    admin_scope: Optional[str] = None
+    user_isolation = False
+
+    if authorization_config:
+        algorithm = authorization_config.algorithm or "RS256"
+        verification_keys = authorization_config.verification_keys
+        jwks_file = authorization_config.jwks_file
+        verify_audience = authorization_config.verify_audience or False
+        audience = authorization_config.audience
+        admin_scope = authorization_config.admin_scope
+        user_isolation = authorization_config.user_isolation
+
+    kwargs: Dict[str, Any] = {
+        "verification_keys": verification_keys,
+        "jwks_file": jwks_file,
+        "algorithm": algorithm,
+        "authorization": authorization,
+        "verify_audience": verify_audience,
+        "excluded_route_paths": excluded_route_paths,
+    }
+    if audience:
+        kwargs["audience"] = audience
+    if admin_scope:
+        kwargs["admin_scope"] = admin_scope
+    if user_isolation:
+        kwargs["user_isolation"] = True
+    if service_account_verifier is not None:
+        kwargs["service_account_verifier"] = service_account_verifier
+    return kwargs
 
 
 class JWTMiddleware(BaseHTTPMiddleware):
@@ -761,6 +815,13 @@ class JWTMiddleware(BaseHTTPMiddleware):
         if self._is_route_excluded(path):
             return await call_next(request)
 
+        # Already authenticated by an outer instance of this middleware (the mounted
+        # /mcp app carries its own JWTMiddleware built from the same config as the
+        # parent app's) -- request.state is shared through the mount, so re-verifying
+        # would only repeat the identical checks (and DB lookups for service accounts).
+        if getattr(request.state, "authenticated", False):
+            return await call_next(request)
+
         # Get origin and CORS allowed origins for error responses
         origin = request.headers.get("origin")
         cors_allowed_origins = getattr(request.app.state, "cors_allowed_origins", None)
@@ -793,13 +854,28 @@ class JWTMiddleware(BaseHTTPMiddleware):
             request.state.admin_scope = self.admin_scope
             request.state.user_isolation_enabled = self.user_isolation
 
-            # Enforce RBAC for internal token (do not skip scope checks)
+            # Enforce RBAC for internal token (do not skip scope checks). Deliberately
+            # the strict check, not _check_scopes: the GET-listing fallback would turn
+            # an insufficient-scope 403 into a silent empty listing, masking scope
+            # misconfiguration for a credential that has no per-resource scopes.
             if self.authorization:
-                error_response = self._check_scopes(
-                    request, method, path, internal_scopes, origin, cors_allowed_origins
-                )
-                if error_response is not None:
-                    return error_response
+                required_scopes = self._get_required_scopes(method, path)
+                if required_scopes and not has_required_scopes(
+                    internal_scopes,
+                    required_scopes,
+                    admin_scope=self.admin_scope,
+                ):
+                    log_warning(
+                        f"Internal service token denied for {method} {path}. "
+                        f"Required: {required_scopes}, Token has: {internal_scopes}"
+                    )
+                    return self._create_error_response(
+                        403,
+                        "Insufficient permissions",
+                        origin,
+                        cors_allowed_origins,
+                        required_scopes=required_scopes,
+                    )
 
             return await call_next(request)
 

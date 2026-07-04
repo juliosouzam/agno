@@ -1266,8 +1266,14 @@ class BaseDb(ABC):
         """
         raise NotImplementedError
 
-    def update_service_account(self, service_account_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
-        """Update a service account by ID (e.g. set revoked_at or last_used_at)."""
+    def update_service_account(
+        self, service_account_id: str, return_record: bool = True, **kwargs: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Update a service account by ID (e.g. set revoked_at or last_used_at).
+
+        With return_record=False the post-update re-fetch is skipped and None is
+        returned on success too — for callers that discard the row (last_used touches).
+        """
         raise NotImplementedError
 
     def delete_service_account(self, service_account_id: str) -> bool:
@@ -2151,7 +2157,9 @@ class AsyncBaseDb(ABC):
         """
         raise NotImplementedError
 
-    async def update_service_account(self, service_account_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    async def update_service_account(
+        self, service_account_id: str, return_record: bool = True, **kwargs: Any
+    ) -> Optional[Dict[str, Any]]:
         """Update a service account by ID (e.g. set revoked_at or last_used_at)."""
         raise NotImplementedError
 

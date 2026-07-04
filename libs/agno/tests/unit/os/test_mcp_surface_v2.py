@@ -214,9 +214,10 @@ async def test_get_session_runs_history_is_trimmed():
             }
         ],
     }
+    from agno.os.mcp_results import trim_session_run
     from agno.os.schema import RunSchema
 
-    trimmed = mcp_mod._trim_session_run(RunSchema.from_dict(session["runs"][0]))
+    trimmed = trim_session_run(RunSchema.from_dict(session["runs"][0]))
     assert trimmed["content"] == "hi there"
     assert trimmed["status"] == "COMPLETED"
     assert "messages" not in trimmed
@@ -312,3 +313,159 @@ def test_get_app_idempotent_with_base_app():
     assert os._mcp_app is mcp_app_first
     mounts = [r for r in second.router.routes if getattr(r, "app", None) is mcp_app_first]
     assert len(mounts) == 1
+
+
+# ==================== Tool scope enforcement ====================
+
+
+def _request_with_state(**state):
+    from types import SimpleNamespace
+
+    # scope: fastmcp's get_access_token reads request.scope.get("user") on the
+    # request our patched get_http_request returns.
+    return SimpleNamespace(state=SimpleNamespace(**state), scope={})
+
+
+def _pat_request(scopes, name="bot", **extra_state):
+    return _request_with_state(
+        authenticated=True,
+        user_id="sa:" + name,
+        session_id=None,
+        scopes=list(scopes),
+        authorization_enabled=True,
+        service_account_name=name,
+        **extra_state,
+    )
+
+
+def _patch_request(monkeypatch, request):
+    import fastmcp.server.dependencies as fastmcp_deps
+
+    monkeypatch.setattr(fastmcp_deps, "get_http_request", lambda: request)
+
+
+async def test_scope_gate_blocks_underscoped_pat_on_run_agent(monkeypatch):
+    """A sessions:read-only PAT must get the same 403-equivalent on MCP as on REST."""
+    _patch_request(monkeypatch, _pat_request(["sessions:read"]))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        result = await client.call_tool("run_agent", {"agent_id": "demo-agent", "message": "hi"}, raise_on_error=False)
+    assert result.is_error
+    assert "Insufficient permissions" in str(result.content)
+    assert "agents:run" in str(result.content)
+
+
+async def test_scope_gate_allows_matching_scope_through(monkeypatch):
+    """With agents:run the gate passes and the tool proceeds to component lookup."""
+    _patch_request(monkeypatch, _pat_request(["agents:run"]))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        result = await client.call_tool("run_agent", {"agent_id": "ghost", "message": "hi"}, raise_on_error=False)
+    assert result.is_error
+    assert "Agent ghost not found" in str(result.content)
+    assert "Insufficient permissions" not in str(result.content)
+
+
+async def test_scope_gate_honours_per_resource_scopes(monkeypatch):
+    """agents:<id>:run grants that agent only, mirroring REST per-resource scopes."""
+    _patch_request(monkeypatch, _pat_request(["agents:ghost:run"]))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        allowed = await client.call_tool("run_agent", {"agent_id": "ghost", "message": "hi"}, raise_on_error=False)
+        blocked = await client.call_tool("run_agent", {"agent_id": "demo-agent", "message": "hi"}, raise_on_error=False)
+    assert "Agent ghost not found" in str(allowed.content)
+    assert "Insufficient permissions" in str(blocked.content)
+
+
+async def test_scope_gate_covers_session_and_config_tools(monkeypatch):
+    """get_sessions needs sessions:read; get_agentos_config needs config:read."""
+    _patch_request(monkeypatch, _pat_request(["agents:run"]))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        sessions_result = await client.call_tool("get_sessions", {}, raise_on_error=False)
+        config_result = await client.call_tool("get_agentos_config", {}, raise_on_error=False)
+    assert "Insufficient permissions" in str(sessions_result.content)
+    assert "Insufficient permissions" in str(config_result.content)
+
+
+async def test_scope_gate_default_scopes_cover_the_golden_path(monkeypatch):
+    """The default mint scopes must be able to discover and run: the agno connect flow."""
+    from agno.os.service_accounts import DEFAULT_SERVICE_ACCOUNT_SCOPES
+
+    _patch_request(monkeypatch, _pat_request(DEFAULT_SERVICE_ACCOUNT_SCOPES))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    os.get_app()
+    async with Client(build_mcp_server(os)) as client:
+        config_result = await client.call_tool("get_agentos_config", {}, raise_on_error=False)
+        run_result = await client.call_tool("run_agent", {"agent_id": "ghost", "message": "hi"}, raise_on_error=False)
+    assert not config_result.is_error
+    assert "Agent ghost not found" in str(run_result.content)
+
+
+async def test_scope_gate_admin_scope_bypasses(monkeypatch):
+    _patch_request(monkeypatch, _pat_request(["admin"], admin_scope="admin"))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        result = await client.call_tool("run_agent", {"agent_id": "ghost", "message": "hi"}, raise_on_error=False)
+    assert "Agent ghost not found" in str(result.content)
+
+
+async def test_scope_gate_skips_anonymous_and_security_key_callers(monkeypatch):
+    """Callers without ACL-bearing identities (open / security-key humans) pass, as on REST."""
+    _patch_request(monkeypatch, _request_with_state(authenticated=True))
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    async with Client(build_mcp_server(os)) as client:
+        result = await client.call_tool("run_agent", {"agent_id": "ghost", "message": "hi"}, raise_on_error=False)
+    assert "Agent ghost not found" in str(result.content)
+
+
+# ==================== include_tags / history detail ====================
+
+
+async def test_empty_include_tags_registers_no_builtin_tools():
+    """An explicitly empty include_tags set means no built-in tools, not all of them."""
+    from agno.os.config import MCPServerConfig
+
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_config=MCPServerConfig(include_tags=set()))
+    async with Client(build_mcp_server(os)) as client:
+        tools = await client.list_tools()
+    assert tools == []
+
+
+async def test_get_session_runs_run_id_returns_full_detail(monkeypatch):
+    """run_id is the full-detail escape hatch: one untrimmed run, or a loud not-found."""
+    from agno.os.schema import RunSchema
+
+    run = RunSchema.from_dict(
+        {
+            "run_id": "r1",
+            "agent_id": "a-1",
+            "run_input": "hello",
+            "content": "hi there",
+            "status": "COMPLETED",
+            "messages": [{"role": "system", "content": "FULL_TRANSCRIPT"}],
+        }
+    )
+
+    async def fake_get_db(dbs, db_id):
+        return object()
+
+    async def fake_get_session_runs(db, session_id, session_type, user_id):
+        return [run]
+
+    monkeypatch.setattr(mcp_mod, "get_db", fake_get_db)
+    monkeypatch.setattr(mcp_mod.session_service, "get_session_runs", fake_get_session_runs)
+
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    os.get_app()  # populates os.dbs, as at serve time
+    async with Client(build_mcp_server(os)) as client:
+        trimmed = await client.call_tool("get_session_runs", {"session_id": "s1"})
+        full = await client.call_tool("get_session_runs", {"session_id": "s1", "run_id": "r1"})
+        missing = await client.call_tool(
+            "get_session_runs", {"session_id": "s1", "run_id": "zzz"}, raise_on_error=False
+        )
+
+    assert "FULL_TRANSCRIPT" not in str(trimmed.content)
+    assert "FULL_TRANSCRIPT" in str(full.content)
+    assert missing.is_error
+    assert "Run zzz not found" in str(missing.content)

@@ -258,6 +258,18 @@ def _connect_one(
             check = verify_mcp(os_info.mcp_url, token=existing.token)
             if check.ok and (existing.token is not None or not minting):
                 result.update(status="already-connected", location=existing.location, verify=check.public_dict())
+                if name is not None and existing.token is not None:
+                    # Shared-account mode: hand the verified token from this client's
+                    # config to the remaining clients so they reuse the shared account.
+                    # Without this the next client hits the name conflict and re-mints,
+                    # revoking the token just reported OK for this client.
+                    result["_account"] = ServiceAccount(
+                        id="",
+                        name=name,
+                        principal="sa:" + name,
+                        token_prefix="",
+                        token=existing.token,
+                    )
                 return
             if skip_existing:
                 result.update(

@@ -12,7 +12,7 @@ from fastmcp.server.http import (
 from fastmcp.tools.tool import ToolResult
 
 from agno.db.base import SessionType
-from agno.os.mcp_results import build_run_tool_result
+from agno.os.mcp_results import build_run_tool_result, trim_session_run
 from agno.os.schema import (
     AgentSummaryResponse,
     PaginatedResponse,
@@ -56,7 +56,9 @@ def _enabled_builtin_tags(config: "Optional[MCPServerConfig]") -> set:
         return set(_BUILTIN_TOOL_TAGS)
     if not config.enable_builtin_tools:
         return set()
-    enabled = set(config.include_tags) if config.include_tags else set(_BUILTIN_TOOL_TAGS)
+    # An explicitly empty include_tags set means "no built-in tools", so test against
+    # None rather than truthiness.
+    enabled = set(config.include_tags) if config.include_tags is not None else set(_BUILTIN_TOOL_TAGS)
     if config.exclude_tags:
         enabled -= set(config.exclude_tags)
     return enabled
@@ -202,6 +204,57 @@ def _scoped_caller_user_id() -> Optional[str]:
     return get_scoped_user_id(request)
 
 
+@functools.lru_cache(maxsize=1)
+def _tool_scope_mappings() -> Dict[str, List[str]]:
+    """The default route→scope mappings, built once (they are static data)."""
+    from agno.os.scopes import get_default_scope_mappings
+
+    return get_default_scope_mappings()
+
+
+def _require_tool_scopes(method: str, path: str) -> None:
+    """Enforce the caller's scopes against the REST route this tool call is equivalent to.
+
+    The MCP tools are an alternate transport for the REST surface, so authorization
+    reuses the REST mechanism verbatim: map the tool call onto its REST route and run
+    ``check_route_scopes`` with the same mappings (per-resource scopes and the admin
+    bypass behave identically). Service-account scopes are ACL data enforced in every
+    deployment mode, mirroring ``agno.os.auth._authenticate_service_account``; JWT
+    scopes are enforced when authorization is enabled. Anonymous callers (open or
+    security-key deployments) carry no scopes and pass.
+
+    Custom ``scope_mappings`` passed to a manually-installed JWTMiddleware apply to the
+    literal request path (``/mcp``), not to these synthetic routes -- the tool gate
+    always enforces the default mappings.
+    """
+    from fastmcp.server.dependencies import get_http_request
+
+    from agno.os.auth import build_insufficient_permissions_detail
+    from agno.os.scopes import check_route_scopes
+
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return
+
+    state = request.state
+    is_service_account = getattr(state, "service_account_name", None) is not None
+    if not is_service_account and not getattr(state, "authorization_enabled", False):
+        return
+
+    admin_scope_raw = getattr(state, "admin_scope", None)
+    admin_scope = admin_scope_raw if isinstance(admin_scope_raw, str) else None
+    scope_check = check_route_scopes(
+        list(getattr(state, "scopes", None) or []),
+        _tool_scope_mappings(),
+        method,
+        path,
+        admin_scope=admin_scope,
+    )
+    if not scope_check.allowed:
+        raise Exception(build_insufficient_permissions_detail(scope_check.required_scopes))
+
+
 # Events forwarded to the client as progress notifications during agent/team runs.
 # Content deltas are deliberately excluded: MCP progress is a status channel, and
 # per-token notifications would flood clients that request a progress token.
@@ -217,17 +270,6 @@ _TOOL_CALL_PROGRESS_EVENTS = frozenset(
 # Error events captured so a failed run surfaces its real error message. The streaming
 # error paths yield only these events -- the final run output is never yielded on failure.
 _RUN_ERROR_EVENTS = frozenset({RunEvent.run_error.value, TeamRunEvent.run_error.value})
-
-# Per-run fields kept when rendering conversation history. The full RunSchema carries the
-# message transcript (system prompt included), events, and reasoning traces -- like the run
-# tools, the history tool ships only what a frontend model needs, not the raw internals.
-_SESSION_RUN_HISTORY_FIELDS = ("run_id", "run_input", "content", "status", "created_at", "agent_id", "team_id")
-
-
-def _trim_session_run(run: Any) -> Dict[str, Any]:
-    """Compact view of one persisted run for conversation-history reads."""
-    data = run.model_dump() if hasattr(run, "model_dump") else dict(run)
-    return {key: data[key] for key in _SESSION_RUN_HISTORY_FIELDS if data.get(key) is not None}
 
 
 async def _report_progress(ctx: Context, progress: float, message: str, total: Optional[float] = None) -> None:
@@ -282,16 +324,19 @@ async def _consume_agentic_stream(ctx: Context, stream: Any, label: str) -> Unio
 async def _run_agentic_component(
     ctx: Context, component: Any, message: str, user_id: Optional[str], session_id: Optional[str], label: str
 ) -> Union[RunOutput, TeamRunOutput]:
-    """Shared run path for agents and teams: stream with progress, or plain await for remotes.
+    """Shared run path for agents and teams: stream with progress for native components,
+    plain await for everything else.
 
-    Remote components proxy to another AgentOS over HTTP and their streaming ``arun``
-    never yields the final output object, so they take the non-streaming path (no
-    intermediate progress, same result contract).
+    Only native ``Agent`` / ``Team`` instances take the streaming path: remotes proxy to
+    another AgentOS over HTTP and ``AgentProtocol`` implementations follow the protocol's
+    streaming contract -- in both cases the streaming ``arun`` never yields the final
+    output object, so they run non-streaming (no intermediate progress, same result
+    contract).
     """
-    from agno.agent.remote import RemoteAgent
-    from agno.team.remote import RemoteTeam
+    from agno.agent.agent import Agent
+    from agno.team.team import Team
 
-    if isinstance(component, (RemoteAgent, RemoteTeam)):
+    if not isinstance(component, (Agent, Team)):
         return await component.arun(message, user_id=user_id, session_id=session_id)
 
     stream = component.arun(
@@ -462,6 +507,7 @@ def build_mcp_server(
         annotations={"readOnlyHint": True, "idempotentHint": True},
     )  # type: ignore
     async def config() -> Dict[str, Any]:
+        _require_tool_scopes("GET", "/config")
         return {
             "os_id": os.id or "AgentOS",
             "description": os.description,
@@ -493,6 +539,7 @@ def build_mcp_server(
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> ToolResult:
+        _require_tool_scopes("POST", f"/agents/{agent_id}/runs")
         agent = get_agent_by_id(agent_id, os.agents)
         if agent is None:
             raise Exception(f"Agent {agent_id} not found")
@@ -518,6 +565,7 @@ def build_mcp_server(
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> ToolResult:
+        _require_tool_scopes("POST", f"/teams/{team_id}/runs")
         team = get_team_by_id(team_id, os.teams)
         if team is None:
             raise Exception(f"Team {team_id} not found")
@@ -546,6 +594,7 @@ def build_mcp_server(
     ) -> ToolResult:
         from agno.workflow.remote import RemoteWorkflow
 
+        _require_tool_scopes("POST", f"/workflows/{workflow_id}/runs")
         workflow = get_workflow_by_id(workflow_id, os.workflows)
         if workflow is None:
             raise Exception(f"Workflow {workflow_id} not found")
@@ -590,6 +639,7 @@ def build_mcp_server(
         user_id: Optional[str] = None,
     ) -> ToolResult:
         component, component_type, component_id = _resolve_lifecycle_component(agent_id, team_id, workflow_id)
+        _require_tool_scopes("POST", f"/{component_type}/{component_id}/runs/{run_id}/continue")
         user_id = _resolve_user_id(user_id)
         await _verify_run_ownership(component, component_type, component_id, session_id, run_id)
         await _report_progress(ctx, 0.0, f"Continuing run {run_id}")
@@ -623,6 +673,7 @@ def build_mcp_server(
         workflow_id: Optional[str] = None,
     ) -> str:
         component, component_type, component_id = _resolve_lifecycle_component(agent_id, team_id, workflow_id)
+        _require_tool_scopes("POST", f"/{component_type}/{component_id}/runs/{run_id}/cancel")
         await _verify_run_ownership(component, component_type, component_id, session_id, run_id)
         await run_service.cancel_component_run(component, run_id)
         return f"Run {run_id} cancellation requested"
@@ -653,6 +704,7 @@ def build_mcp_server(
         sort_order: Literal["asc", "desc"] = "desc",
         db_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        _require_tool_scopes("GET", "/sessions")
         user_id = _resolve_user_id(user_id)
         db = await get_db(os.dbs, db_id)
         session_type_enum = SessionType(session_type)
@@ -694,37 +746,46 @@ def build_mcp_server(
         description=(
             "Read a session's conversation history: each run's input and response content with its "
             "run_id, status, and timestamp, oldest first. Returns the answer content only, not the full "
-            "message transcript. session_type is auto-detected when omitted; db_id is only needed when "
-            "get_agentos_config lists multiple databases."
+            "message transcript. Pass run_id to get one run in FULL detail instead (complete transcript, "
+            "events, metrics) -- the escape hatch for debugging. session_type is auto-detected when "
+            "omitted; db_id is only needed when get_agentos_config lists multiple databases."
         ),
         tags={"session"},
         annotations={"readOnlyHint": True},
     )  # type: ignore
     async def get_session_runs(
         session_id: str,
+        run_id: Optional[str] = None,
         session_type: Optional[Literal["agent", "team", "workflow"]] = None,
         user_id: Optional[str] = None,
         db_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        _require_tool_scopes("GET", f"/sessions/{session_id}/runs")
         user_id = _resolve_user_id(user_id)
         db = await get_db(os.dbs, db_id)
         session_type_enum = SessionType(session_type) if session_type else None
 
         if isinstance(db, RemoteDb):
-            result = await db.get_session_runs(
+            runs = await db.get_session_runs(
                 session_id=session_id,
                 session_type=session_type_enum,
                 user_id=user_id,
                 db_id=db_id,
                 headers=_forwarded_auth_headers(),
             )
-            return [_trim_session_run(r) for r in result]
+        else:
+            # SessionNotFoundError propagates as the tool error verbatim ("Session {id} not found").
+            runs = await session_service.get_session_runs(
+                db, session_id=session_id, session_type=session_type_enum, user_id=user_id
+            )
 
-        # SessionNotFoundError propagates as the tool error verbatim ("Session {id} not found").
-        runs = await session_service.get_session_runs(
-            db, session_id=session_id, session_type=session_type_enum, user_id=user_id
-        )
-        return [_trim_session_run(r) for r in runs]
+        if run_id is not None:
+            for run in runs:
+                data = run.model_dump() if hasattr(run, "model_dump") else dict(run)
+                if data.get("run_id") == run_id:
+                    return [data]
+            raise Exception(f"Run {run_id} not found in session {session_id}")
+        return [trim_session_run(r) for r in runs]
 
     # Register any user-provided custom tools. These share the same server, mount (/mcp),
     # lifespan, and JWT middleware as the built-in tools.
@@ -842,11 +903,14 @@ def _add_key_auth_middleware(
             if not result.ok or account is None:
                 return JSONResponse({"detail": "Invalid or expired service account token"}, status_code=401)
 
-            # Attribution: _resolve_user_id reads request.state.user_id for tool calls.
+            # Attribution: _resolve_user_id reads request.state.user_id for tool calls,
+            # and the tool scope gate reads scopes/authorization_enabled. Mirrors the
+            # state set by agno.os.auth._authenticate_service_account.
             request.state.authenticated = True
             request.state.user_id = account.principal
             request.state.session_id = None
             request.state.scopes = list(account.scopes)
+            request.state.authorization_enabled = True
             request.state.service_account_name = account.name
             return await call_next(request)
 
@@ -953,34 +1017,21 @@ def get_mcp_server(
             )
         _add_authorize_middleware(mcp_app, mcp_config.authorize)
 
-    # Add JWT middleware to MCP app if authorization is enabled. Mirror the kwargs that
-    # the REST surface gets in agno/os/app.py::_add_jwt_middleware -- otherwise tokens that
-    # pass the REST audience check (or honour user_isolation / admin_scope) silently lose
-    # those constraints over /mcp.
+    # Add JWT middleware to MCP app if authorization is enabled. The kwargs come from the
+    # same builder the REST surface uses (agno/os/middleware/jwt.py) -- otherwise tokens
+    # that pass the REST audience check (or honour user_isolation / admin_scope) silently
+    # lose those constraints over /mcp.
     if os.authorization and os.authorization_config:
-        from agno.os.middleware.jwt import JWTMiddleware
+        from agno.os.middleware.jwt import JWTMiddleware, build_jwt_middleware_kwargs
 
-        jwt_kwargs: Dict[str, Any] = {
-            "verification_keys": os.authorization_config.verification_keys,
-            "jwks_file": os.authorization_config.jwks_file,
-            "algorithm": os.authorization_config.algorithm or "RS256",
-            "authorization": os.authorization,
-            "verify_audience": os.authorization_config.verify_audience or False,
-        }
-        if os.authorization_config.audience:
-            jwt_kwargs["audience"] = os.authorization_config.audience
-        if os.authorization_config.admin_scope:
-            jwt_kwargs["admin_scope"] = os.authorization_config.admin_scope
-        # Default to False on the middleware; only forward when actually enabled, matching the
-        # REST wiring's pattern so manual JWTMiddleware defaults stay backwards-compatible.
-        if os.authorization_config.user_isolation:
-            jwt_kwargs["user_isolation"] = True
         # The MCP app is a separately mounted Starlette app with its own app.state, so the
         # service account verifier must be passed at construction - the middleware cannot
         # find it on the main app's state from inside the mount.
-        service_account_verifier = os._get_service_account_verifier()
-        if service_account_verifier is not None:
-            jwt_kwargs["service_account_verifier"] = service_account_verifier
+        jwt_kwargs = build_jwt_middleware_kwargs(
+            os.authorization_config,
+            authorization=os.authorization,
+            service_account_verifier=os._get_service_account_verifier(),
+        )
         mcp_app.add_middleware(JWTMiddleware, **jwt_kwargs)
     else:
         # Non-JWT deployments: the REST surface enforces OS_SECURITY_KEY and service

@@ -20,7 +20,6 @@ instant revocation - every request verifies against the database. Token expiry i
 honored, even on a cache hit.
 """
 
-import hashlib
 import re
 import secrets
 import time
@@ -35,6 +34,7 @@ from agno.db.base import AsyncBaseDb, BaseDb
 from agno.db.schemas.service_accounts import SERVICE_ACCOUNT_PRINCIPAL_PREFIX, ServiceAccount
 from agno.os.scopes import AgentOSScope, parse_scope
 from agno.utils.log import log_debug, log_error, log_warning
+from agno.utils.string import hash_string_sha256
 
 # Prefix makes tokens greppable for secret scanners.
 TOKEN_PREFIX = "agno_pat_"
@@ -44,11 +44,14 @@ TOKEN_PREFIX = "agno_pat_"
 TOKEN_DISPLAY_PREFIX_LENGTH = 16
 
 # Run and read, nothing else. Anything broader requires an explicit request.
+# config:read is included so a default token can discover what it can run
+# (GET /config on REST, get_agentos_config over MCP).
 DEFAULT_SERVICE_ACCOUNT_SCOPES: List[str] = [
     "agents:run",
     "teams:run",
     "workflows:run",
     "sessions:read",
+    "config:read",
 ]
 
 DEFAULT_EXPIRY_DAYS = 90
@@ -80,7 +83,7 @@ def _base62_encode(data: bytes) -> str:
 
 def hash_token(token: str) -> str:
     """Return the SHA-256 hex digest of a token. This is the only form ever stored."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hash_string_sha256(token)
 
 
 def generate_token() -> Tuple[str, str, str]:
@@ -313,9 +316,11 @@ class ServiceAccountVerifier:
         self._last_used_writes[account.id] = now
         try:
             if isinstance(self.db, AsyncBaseDb):
-                await self.db.update_service_account(account.id, last_used_at=int(now))
+                await self.db.update_service_account(account.id, return_record=False, last_used_at=int(now))
             else:
-                await run_in_threadpool(self.db.update_service_account, account.id, last_used_at=int(now))
+                await run_in_threadpool(
+                    self.db.update_service_account, account.id, return_record=False, last_used_at=int(now)
+                )
         except Exception as e:
             log_warning(f"Could not update last_used_at for service account '{account.name}': {e}")
 

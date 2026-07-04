@@ -15,7 +15,6 @@ visible in the local process list. The file fallback avoids this; both paths end
 read-back so a write that did not take effect is reported, never assumed.
 """
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -26,8 +25,10 @@ from agnoctl.clients.base import (
     ExistingEntry,
     WriteResult,
     bearer_header,
+    read_json_lenient,
     servers_table,
     token_from_authorization,
+    write_servers_entry,
 )
 from agnoctl.errors import CLIError
 
@@ -49,7 +50,6 @@ def _entry_from_servers(servers: Dict[str, Any], server_name: str, location: str
 
 class ClaudeCodeAdapter(ClientAdapter):
     key = "claude-code"
-    display_name = "Claude Code"
 
     def __init__(
         self,
@@ -78,7 +78,7 @@ class ClaudeCodeAdapter(ClientAdapter):
 
     def read_existing(self, server_name: str) -> Optional[ExistingEntry]:
         """Return the entry Claude Code would resolve: local > project > user scope."""
-        user_config = self._read_json_lenient(self._user_config_path)
+        user_config = read_json_lenient(self._user_config_path)
 
         if user_config:
             projects = user_config.get("projects")
@@ -91,7 +91,7 @@ class ClaudeCodeAdapter(ClientAdapter):
                     if entry:
                         return entry
 
-        project_config = self._read_json_lenient(self._project_config_path)
+        project_config = read_json_lenient(self._project_config_path)
         if project_config:
             entry = _entry_from_servers(servers_table(project_config), server_name, str(self._project_config_path))
             if entry:
@@ -110,8 +110,8 @@ class ClaudeCodeAdapter(ClientAdapter):
             self._write_via_cli(server_name, url, token)
             return WriteResult(method="cli", location="claude mcp add (scope: " + self.scope + ")")
         if self.scope == "project":
-            return self._write_config_file(self._project_config_path, server_name, url, token, top_level=True)
-        return self._write_config_file(self._user_config_path, server_name, url, token, top_level=True)
+            return self._write_config_file(self._project_config_path, server_name, url, token)
+        return self._write_config_file(self._user_config_path, server_name, url, token)
 
     # -- CLI path ---------------------------------------------------------------
 
@@ -145,51 +145,12 @@ class ClaudeCodeAdapter(ClientAdapter):
 
     # -- File fallback ------------------------------------------------------------
 
-    def _write_config_file(
-        self, path: Path, server_name: str, url: str, token: Optional[str], top_level: bool
-    ) -> WriteResult:
-        config = self._read_json_strict(path)
-        servers = config.get("mcpServers")
-        if servers is None:
-            servers = {}
-            config["mcpServers"] = servers
-        elif not isinstance(servers, dict):
-            raise CLIError("Refusing to modify " + str(path) + ": 'mcpServers' is not an object.")
+    def _write_config_file(self, path: Path, server_name: str, url: str, token: Optional[str]) -> WriteResult:
         entry: Dict[str, Any] = {"type": "http", "url": url}
         if token:
             entry["headers"] = {"Authorization": bearer_header(token)}
-        servers[server_name] = entry
-        path.write_text(json.dumps(config, indent=2) + "\n")
-        if token:
-            path.chmod(0o600)
+        write_servers_entry(path, server_name, entry, secure=bool(token))
         note = None
         if path == self._project_config_path and token:
             note = str(path) + " is project-scoped and often committed to version control; it now contains a token."
         return WriteResult(method="file", location=str(path), note=note)
-
-    @staticmethod
-    def _read_json_lenient(path: Path) -> Optional[Dict[str, Any]]:
-        """For reads: a missing or malformed file simply means no entry found."""
-        if not path.exists():
-            return None
-        try:
-            parsed = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    @staticmethod
-    def _read_json_strict(path: Path) -> Dict[str, Any]:
-        """For writes: refuse to clobber a file we cannot parse."""
-        if not path.exists():
-            return {}
-        try:
-            parsed = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            raise CLIError(
-                "Refusing to modify " + str(path) + ": the existing file is not valid JSON (" + str(e) + ").",
-                hint="Fix or move the file, then re-run.",
-            )
-        if not isinstance(parsed, dict):
-            raise CLIError("Refusing to modify " + str(path) + ": expected a JSON object at the top level.")
-        return parsed

@@ -31,7 +31,6 @@ def _toml_string(value: str) -> str:
 
 class CodexAdapter(ClientAdapter):
     key = "codex"
-    display_name = "Codex"
 
     def __init__(self, home: Optional[Path] = None):
         self.home = home or Path.home()

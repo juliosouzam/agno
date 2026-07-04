@@ -5,9 +5,13 @@ configuration: how to detect the client on this machine, read an existing entry 
 (for idempotent re-runs), and write an entry pointing at an AgentOS MCP endpoint.
 """
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from agnoctl.errors import CLIError
 
 
 @dataclass
@@ -50,9 +54,59 @@ def token_from_authorization(value: Optional[str]) -> Optional[str]:
     return value.strip() or None
 
 
+def read_json_lenient(path: Path) -> Optional[Dict[str, Any]]:
+    """For reads: a missing or malformed file simply means no entry found."""
+    if not path.exists():
+        return None
+    try:
+        parsed = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def read_json_strict(path: Path) -> Dict[str, Any]:
+    """For writes: refuse to clobber a file we cannot parse."""
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise CLIError(
+            "Refusing to modify " + str(path) + ": the existing file is not valid JSON (" + str(e) + ").",
+            hint="Fix or move the file, then re-run.",
+        )
+    if not isinstance(parsed, dict):
+        raise CLIError("Refusing to modify " + str(path) + ": expected a JSON object at the top level.")
+    return parsed
+
+
+def write_servers_entry(
+    path: Path, server_name: str, entry: Dict[str, Any], *, secure: bool, mkdir: bool = False
+) -> None:
+    """Create or replace one ``mcpServers`` entry in a JSON config file.
+
+    Shared by the file-editing adapters so the safety behavior -- strict parse before
+    write, refusal on a malformed ``mcpServers``, 0600 permissions when the entry
+    carries a token -- cannot drift between clients.
+    """
+    config = read_json_strict(path)
+    servers = config.get("mcpServers")
+    if servers is None:
+        servers = {}
+        config["mcpServers"] = servers
+    elif not isinstance(servers, dict):
+        raise CLIError("Refusing to modify " + str(path) + ": 'mcpServers' is not an object.")
+    servers[server_name] = entry
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    if secure:
+        path.chmod(0o600)
+
+
 class ClientAdapter(ABC):
     key: str
-    display_name: str
 
     @abstractmethod
     def detect(self) -> bool:

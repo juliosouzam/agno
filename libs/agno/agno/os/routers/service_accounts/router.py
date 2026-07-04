@@ -6,6 +6,7 @@ from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 
 from agno.db.schemas.service_accounts import ServiceAccount
 from agno.os.routers.service_accounts.schema import (
@@ -84,7 +85,9 @@ def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
         try:
             if asyncio.iscoroutinefunction(fn):
                 return await fn(*args, **kwargs)
-            return fn(*args, **kwargs)
+            # Sync DB drivers do blocking I/O; keep it off the event loop like the
+            # services layer and the ServiceAccountVerifier do.
+            return await run_in_threadpool(fn, *args, **kwargs)
         except NotImplementedError:
             raise HTTPException(status_code=503, detail="Service accounts not supported by the configured database")
 

@@ -247,3 +247,32 @@ def test_connect_detects_shadowing_claude_local_entry(monkeypatch, fake_os, fake
     assert payload["results"][0]["status"] == "failed"
     assert "shadow" in payload["results"][0]["error"]
     assert result.exit_code == 1
+
+
+def test_connect_shared_account_reuses_token_for_new_client(monkeypatch, fake_os, fake_clients):
+    """Regression: in shared-account mode, an already-connected client must hand the
+    shared token to clients connecting later, instead of the later client hitting the
+    name conflict and re-minting (which revoked the token just reported OK)."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _connect(["--name", "shared"])
+    assert result.exit_code == 0, result.output
+    assert fake_os.create_calls == 1
+
+    claude_config = json.loads((fake_clients / ".claude.json").read_text())
+    shared_token = claude_config["mcpServers"]["agno"]["headers"]["Authorization"].split(" ", 1)[1]
+
+    # A new client appears after the first run: cursor has no entry yet.
+    (fake_clients / ".cursor" / "mcp.json").unlink(missing_ok=True)
+
+    result = _connect(["--name", "shared"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    statuses = {r["client"]: r["status"] for r in payload["results"]}
+    assert statuses["claude-code"] == "already-connected"
+    assert statuses["cursor"] == "connected"
+
+    # No second mint, no revocation: the shared token still verifies everywhere.
+    assert fake_os.create_calls == 1
+    assert fake_os.active_tokens() == [shared_token]
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer " + shared_token

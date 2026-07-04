@@ -13,7 +13,12 @@ from agno import __version__ as agno_version
 from agno.agent.factory import AgentFactory
 from agno.agent.protocol import AgentProtocol
 from agno.exceptions import RemoteServerUnavailableError
-from agno.os.auth import get_authentication_dependency, get_effective_auth_mode, validate_websocket_token
+from agno.os.auth import (
+    get_authentication_dependency,
+    get_effective_auth_mode,
+    validate_websocket_service_account,
+    validate_websocket_token,
+)
 from agno.os.managers import websocket_manager
 from agno.os.middleware.jwt import JWTValidator
 from agno.os.middleware.user_scope import (
@@ -42,6 +47,7 @@ from agno.os.schema import (
     WorkflowSummaryResponse,
 )
 from agno.os.scopes import AgentOSScope, has_required_scopes
+from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
 from agno.os.settings import AgnoAPISettings
 from agno.os.utils import resolve_ws_jwt_config
 from agno.team.factory import TeamFactory
@@ -385,6 +391,14 @@ def get_websocket_router(
                                 json.dumps({"event": "auth_error", "error": error_msg, "error_type": error_type})
                             )
                         continue
+                    elif token.startswith(SERVICE_ACCOUNT_TOKEN_PREFIX):
+                        # Service account tokens are verified in every deployment mode,
+                        # mirroring the REST dependency: an explicit PAT either verifies
+                        # or is rejected -- it never falls back to the security key.
+                        if await validate_websocket_service_account(token, websocket.app):
+                            await websocket_manager.authenticate_websocket(websocket)
+                        else:
+                            await websocket.send_text(json.dumps({"event": "auth_error", "error": "Invalid token"}))
                     elif validate_websocket_token(token, settings):
                         # Legacy os_security_key authentication
                         await websocket_manager.authenticate_websocket(websocket)

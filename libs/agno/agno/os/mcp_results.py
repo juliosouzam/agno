@@ -137,3 +137,17 @@ def build_run_tool_result(run_output: AnyRunOutput, result_mode: str = "trimmed"
         structured = trimmed_structured_content(run_output)
 
     return ToolResult(content=content, structured_content=structured)
+
+
+# Per-run fields kept when rendering conversation history. The full RunSchema carries the
+# message transcript (system prompt included), events, and reasoning traces -- like the run
+# tools, the history tool ships only what a frontend model needs, not the raw internals.
+# Lives here so the two "what MCP clients see of a run" policies (fresh results above,
+# history reads) stay in one file.
+SESSION_RUN_HISTORY_FIELDS = ("run_id", "run_input", "content", "status", "created_at", "agent_id", "team_id")
+
+
+def trim_session_run(run: Any) -> Dict[str, Any]:
+    """Compact view of one persisted run for conversation-history reads."""
+    data = run.model_dump() if hasattr(run, "model_dump") else dict(run)
+    return {key: data[key] for key in SESSION_RUN_HISTORY_FIELDS if data.get(key) is not None}

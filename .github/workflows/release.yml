@@ -39,13 +39,16 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: libs/agnoctl/dist
 
+      # skip-existing (not continue-on-error): re-releasing an unchanged agnoctl
+      # version is fine, but a real publish failure must block the dependent
+      # agno job — its agnoctl pin would otherwise point at a dist that never landed.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        continue-on-error: true
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: libs/agnoctl/dist
+          skip-existing: true
 
   build-release-agno:
     # agno depends on agnoctl; publish agnoctl first so a fresh agno release

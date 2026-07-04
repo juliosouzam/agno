@@ -4,9 +4,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from agno.db.schemas.service_accounts import SERVICE_ACCOUNT_PRINCIPAL_PREFIX
 from agno.os.service_accounts import (
     DEFAULT_EXPIRY_DAYS,
+    get_principal,
     is_valid_service_account_name,
 )
 
@@ -68,7 +68,7 @@ class ServiceAccountResponse(BaseModel):
         return cls(
             id=data["id"],
             name=data["name"],
-            principal=f"{SERVICE_ACCOUNT_PRINCIPAL_PREFIX}{data['name']}",
+            principal=get_principal(data["name"]),
             token_prefix=data["token_prefix"],
             scopes=data.get("scopes") or [],
             created_at=data["created_at"],

@@ -27,7 +27,9 @@ classifiers = [
 ]
 
 dependencies = [
-  "agnoctl>=0.1.0rc1",
+  # The CLI needs >=3.9; the marker keeps agno itself installable on the older
+  # interpreters its requires-python still admits.
+  "agnoctl>=0.1.0rc1; python_version >= '3.9'",
   "docstring-parser",
   "gitpython",
   "h11>=0.16.0",
