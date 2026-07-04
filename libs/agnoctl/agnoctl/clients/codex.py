@@ -15,7 +15,14 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agnoctl.clients.base import ClientAdapter, ExistingEntry, WriteResult, bearer_header, token_from_authorization
+from agnoctl.clients.base import (
+    ClientAdapter,
+    ExistingEntry,
+    WriteResult,
+    atomic_write_text,
+    bearer_header,
+    token_from_authorization,
+)
 from agnoctl.errors import CLIError
 
 if sys.version_info >= (3, 11):
@@ -92,9 +99,7 @@ class CodexAdapter(ClientAdapter):
             )
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(new_text)
-        if token:
-            self.config_path.chmod(0o600)
+        atomic_write_text(self.config_path, new_text, secure=bool(token))
         return WriteResult(method="file", location=str(self.config_path))
 
     # -- Internals -----------------------------------------------------------------

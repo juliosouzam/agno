@@ -135,5 +135,7 @@ class ClaudeDesktopAdapter(ClientAdapter):
 
         note = None
         if self._which("npx") is None:
-            note = "Claude Desktop launches this server with 'npx mcp-remote'; install Node.js/npx or it will not start."
+            note = (
+                "Claude Desktop launches this server with 'npx mcp-remote'; install Node.js/npx or it will not start."
+            )
         return WriteResult(method="file", location=str(self.config_path), note=note)

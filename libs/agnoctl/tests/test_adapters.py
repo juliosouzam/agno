@@ -1,6 +1,8 @@
 """Client adapters: config reads/writes for Claude Code, Codex, and Cursor."""
 
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -13,13 +15,20 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+import agnoctl.clients.base as base_module
+from agnoctl.clients.base import atomic_write_text
 from agnoctl.clients.claude_code import ClaudeCodeAdapter
+from agnoctl.clients.claude_desktop import ClaudeDesktopAdapter
 from agnoctl.clients.codex import CodexAdapter
 from agnoctl.clients.cursor import CursorAdapter
 from agnoctl.errors import CLIError
 
 URL = "http://localhost:7777/mcp"
 TOKEN = "agno_pat_test123"
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
 
 
 class FakeRunner:
@@ -344,3 +353,114 @@ def test_cursor_malformed_servers_shape_is_tolerated_on_read(tmp_path: Path):
     assert adapter.read_existing("agno") is None
     with pytest.raises(CLIError):
         adapter.write("agno", URL, TOKEN)
+
+
+# -- Atomic, permission-safe writes ----------------------------------------------------
+
+
+@pytest.fixture
+def permissive_umask():
+    """Run the test as if the process umask were 0, so a naive write would create a
+    world-readable file. The atomic writer must still land the secret at 0600."""
+    old = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+def _file_writing_adapters(tmp_path: Path):
+    """Each (adapter, config_path) that persists a token to a file directly (not via a CLI)."""
+    return [
+        (ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None), tmp_path / ".claude.json"),
+        (CodexAdapter(home=tmp_path), tmp_path / ".codex" / "config.toml"),
+        (CursorAdapter(home=tmp_path, cwd=tmp_path), tmp_path / ".cursor" / "mcp.json"),
+        (
+            ClaudeDesktopAdapter(home=tmp_path, config_path=tmp_path / "claude_desktop_config.json"),
+            tmp_path / "claude_desktop_config.json",
+        ),
+    ]
+
+
+def test_token_write_is_created_0600_even_under_permissive_umask(tmp_path: Path, permissive_umask):
+    """A fresh config carrying a token must be created 0600, never a wider mode -- the
+    file must never exist at 0644 with the secret in it, not even transiently."""
+    for adapter, path in _file_writing_adapters(tmp_path):
+        adapter.write("agno", URL, TOKEN)
+        assert path.exists()
+        assert _mode(path) == 0o600, (adapter.key, oct(_mode(path)))
+
+
+def test_token_write_merged_into_existing_config_tightens_to_0600(tmp_path: Path, permissive_umask):
+    """Merging a token into a pre-existing 0644 config must still end at 0600 -- the
+    merge case must not leave the secret at the old, wider permissions."""
+    # Claude Code user scope: an existing ~/.claude.json with unrelated state at 0644.
+    claude_path = tmp_path / ".claude.json"
+    claude_path.write_text(json.dumps({"onboarding": True}))
+    claude_path.chmod(0o644)
+    ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None).write("agno", URL, TOKEN)
+    assert _mode(claude_path) == 0o600
+    merged = json.loads(claude_path.read_text())
+    assert merged["onboarding"] is True and merged["mcpServers"]["agno"]["url"] == URL
+
+    # Cursor: an existing global mcp.json with another server at 0644.
+    cursor_dir = tmp_path / ".cursor"
+    cursor_dir.mkdir()
+    cursor_path = cursor_dir / "mcp.json"
+    cursor_path.write_text(json.dumps({"mcpServers": {"other": {"url": "https://other/mcp"}}}))
+    cursor_path.chmod(0o644)
+    CursorAdapter(home=tmp_path, cwd=tmp_path).write("agno", URL, TOKEN)
+    assert _mode(cursor_path) == 0o600
+
+    # Codex: an existing config.toml with a comment and another server at 0644.
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    codex_path = codex_dir / "config.toml"
+    codex_path.write_text('# mine\n[mcp_servers.other]\nurl = "https://other/mcp"\n')
+    codex_path.chmod(0o644)
+    CodexAdapter(home=tmp_path).write("agno", URL, TOKEN)
+    assert _mode(codex_path) == 0o600
+
+
+def test_tokenless_write_does_not_tighten_existing_mode(tmp_path: Path):
+    """A write with no token must not silently re-permission an existing shared config;
+    it keeps the file's current mode."""
+    path = tmp_path / ".claude.json"
+    path.write_text(json.dumps({"onboarding": True}))
+    path.chmod(0o644)
+    ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None).write("agno", URL, None)
+    assert _mode(path) == 0o644
+
+
+def test_writes_leave_no_temp_files_behind(tmp_path: Path):
+    for adapter, path in _file_writing_adapters(tmp_path):
+        adapter.write("agno", URL, TOKEN)
+        leftovers = [p.name for p in path.parent.iterdir() if p.name != path.name and p.suffix == ".tmp"]
+        assert leftovers == [], (adapter.key, leftovers)
+
+
+def test_failed_replace_preserves_original_and_cleans_up(tmp_path: Path, monkeypatch):
+    """If the final atomic replace fails, the pre-existing config is left intact and no
+    partial temp file is left lying around."""
+    path = tmp_path / ".claude.json"
+    original = json.dumps({"onboarding": True})
+    path.write_text(original)
+
+    def boom(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(base_module.os, "replace", boom)
+    with pytest.raises(OSError):
+        ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None).write("agno", URL, TOKEN)
+
+    assert path.read_text() == original
+    leftovers = [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"]
+    assert leftovers == []
+
+
+def test_atomic_write_text_direct_secure(tmp_path: Path, permissive_umask):
+    target = tmp_path / "nested" / "secret.txt"
+    target.parent.mkdir()
+    atomic_write_text(target, "s3cr3t", secure=True)
+    assert target.read_text() == "s3cr3t"
+    assert _mode(target) == 0o600

@@ -13,7 +13,13 @@ import typer
 
 from agnoctl.clients import CLIENT_ALIASES, build_adapters
 from agnoctl.clients.base import ClientAdapter
-from agnoctl.commands._common import handle_cli_error, parse_expires, resolve_admin_token, validate_server_name
+from agnoctl.commands._common import (
+    handle_cli_error,
+    parse_expires,
+    require_secure_url,
+    resolve_admin_token,
+    validate_server_name,
+)
 from agnoctl.console import emit_json, print_error, print_info, print_success, print_warning
 from agnoctl.discovery import MCP_ENABLE_INSTRUCTIONS, OSInfo, discover
 from agnoctl.errors import CLIError, ConflictError
@@ -170,6 +176,9 @@ def connect(
     skip_existing: bool = typer.Option(
         False, "--skip-existing", help="Never touch existing accounts or config entries."
     ),
+    allow_http: bool = typer.Option(
+        False, "--allow-http", help="Permit sending credentials over plaintext HTTP to a non-loopback host."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a single JSON document for machine consumption."),
 ) -> None:
     """Connect this machine's coding agents to a running AgentOS over MCP."""
@@ -185,6 +194,7 @@ def connect(
             project=project,
             rotate=rotate,
             skip_existing=skip_existing,
+            allow_http=allow_http,
             json_mode=json_output,
         )
     except CLIError as e:
@@ -202,6 +212,7 @@ def _connect(
     project: bool,
     rotate: bool,
     skip_existing: bool,
+    allow_http: bool,
     json_mode: bool,
 ) -> None:
     validate_server_name(server_name)
@@ -225,6 +236,11 @@ def _connect(
     selected = _resolve_clients(clients_remaining, adapters) if clients is None or clients_remaining else []
 
     minting = os_info.auth_mode not in ("none",) and bool(selected)
+    # When we mint, the admin token is attached to base_url and the minted PATs are written
+    # into client configs and sent to the (same-origin) MCP URL. Refuse to do any of that
+    # over plaintext HTTP to a non-loopback host unless the operator opted in.
+    if minting:
+        require_secure_url(os_info.base_url, allow_http=allow_http, what="the admin credential and minted tokens")
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
     if not minting and selected and not json_mode:
         print_info("Authorization is disabled on this AgentOS; connecting without credentials.")

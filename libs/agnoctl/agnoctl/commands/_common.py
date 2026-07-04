@@ -1,8 +1,10 @@
 """Helpers shared by CLI commands."""
 
+import ipaddress
 import os
 import sys
 from typing import Optional, Tuple
+from urllib.parse import urlsplit
 
 import typer
 
@@ -24,6 +26,53 @@ def validate_server_name(server_name: str) -> None:
         )
 
 
+def validate_project_name(name: str) -> None:
+    """A project name becomes a directory under the CWD, so it must be a single flat path
+    segment. Reject absolute paths, path separators, and '..' (which would let a scaffold
+    escape the CWD or clobber an arbitrary directory) by holding it to the same
+    conservative character set as MCP server names."""
+    if not name or not set(name) <= _SERVER_NAME_ALLOWED:
+        raise CLIError(
+            "Invalid project name: " + name,
+            hint="Use a single directory name of letters, digits, '-' and '_' only (no '/', '..' or absolute paths).",
+        )
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    """True for hosts that never leave the machine: localhost, 127.0.0.0/8, ::1, and the
+    unspecified addresses (0.0.0.0, ::) that dev servers bind to."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def require_secure_url(url: str, *, allow_http: bool, what: str = "a credential") -> None:
+    """Refuse to attach a bearer credential over plaintext HTTP to a non-loopback host.
+
+    The admin token and freshly minted PATs are sent as ``Authorization: Bearer`` headers;
+    over http:// to a remote host that hands the secret to anyone on the path. TLS is
+    required unless the target is loopback (local dev) or the operator has explicitly
+    opted in with ``--allow-http`` for a trusted private network.
+    """
+    if allow_http:
+        return
+    parts = urlsplit(url)
+    if parts.scheme.lower() == "https":
+        return
+    if _is_loopback_host(parts.hostname):
+        return
+    raise CLIError(
+        "Refusing to send " + what + " to " + url + " over plaintext HTTP.",
+        hint="Use an https:// URL, or pass --allow-http to override on a trusted private network.",
+    )
+
+
 def resolve_admin_token(auth_mode: str, json_mode: bool) -> Optional[str]:
     """Resolve the admin credential used to call the service-accounts API.
 
@@ -42,6 +91,13 @@ def resolve_admin_token(auth_mode: str, json_mode: bool) -> Optional[str]:
             hint="Set " + ADMIN_TOKEN_ENV + " (or " + SECURITY_KEY_ENV + ") and re-run.",
         )
     return typer.prompt("Admin credential for this AgentOS", hide_input=True)
+
+
+def stdin_is_interactive() -> bool:
+    """Whether we can prompt the user. False in automation contexts (non-TTY); commands
+    also treat --json as non-interactive. Wrapped so it can be stubbed in tests, where the
+    runner swaps sys.stdin out from under a direct isatty patch."""
+    return sys.stdin.isatty()
 
 
 def parse_expires(value: str) -> Tuple[Optional[int], bool]:

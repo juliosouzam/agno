@@ -35,6 +35,14 @@ from agnoctl.errors import CLIError
 SUBPROCESS_TIMEOUT = 60.0
 
 
+def _redact_token(text: str, token: Optional[str]) -> str:
+    """Strip the bearer token (raw and as an Authorization value) out of a string before
+    it reaches a user-facing error or JSON output."""
+    if not token:
+        return text
+    return text.replace(bearer_header(token), "Bearer ***").replace(token, "***")
+
+
 def _entry_from_servers(servers: Dict[str, Any], server_name: str, location: str) -> Optional[ExistingEntry]:
     entry = servers.get(server_name)
     if not isinstance(entry, dict):
@@ -141,7 +149,9 @@ class ClaudeCodeAdapter(ClientAdapter):
                 result = self._run_claude(add_args)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            raise CLIError("claude mcp add failed: " + (detail or "unknown error"))
+            # The token rode in via argv; if the CLI echoed the command back in its error,
+            # keep the secret out of the message we print / return as JSON.
+            raise CLIError("claude mcp add failed: " + (_redact_token(detail, token) or "unknown error"))
 
     # -- File fallback ------------------------------------------------------------
 

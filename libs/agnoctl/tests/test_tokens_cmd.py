@@ -106,3 +106,57 @@ def test_expires_invalid(monkeypatch, fake_os):
     result = _run(["tokens", "create", "ci-runner", "--expires", "soon", "--json"] + URL_ARGS)
     assert result.exit_code == 1
     assert "Invalid --expires" in json.loads(result.output)["error"]
+
+
+REMOTE_HTTP = ["--url", "http://os.example.com:7777"]
+
+
+def test_create_refuses_plaintext_http_to_remote_host(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner", "--json"] + REMOTE_HTTP)
+    assert result.exit_code == 1
+    assert "plaintext HTTP" in json.loads(result.output)["error"]
+    # Nothing was minted.
+    assert fake_os.create_calls == 0
+
+
+def test_create_allow_http_override_permits_remote_http(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "create", "ci-runner", "--json", "--allow-http"] + REMOTE_HTTP)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["token"].startswith("agno_pat_")
+
+
+def test_list_refuses_plaintext_http_with_admin_credential(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _run(["tokens", "list", "--json"] + REMOTE_HTTP)
+    assert result.exit_code == 1
+    assert "plaintext HTTP" in json.loads(result.output)["error"]
+
+
+def test_revoke_interactive_decline_aborts(monkeypatch, fake_os):
+    """A TTY user who answers 'no' cancels the revoke; the account stays active."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    monkeypatch.setattr("agnoctl.commands.tokens.stdin_is_interactive", lambda: True)
+    result = _run(["tokens", "revoke", "ci-runner"] + URL_ARGS, input="n\n")
+    assert result.exit_code == 0, result.output
+    assert fake_os.accounts["ci-runner"]["revoked_at"] is None
+
+
+def test_revoke_interactive_accept_revokes(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    monkeypatch.setattr("agnoctl.commands.tokens.stdin_is_interactive", lambda: True)
+    result = _run(["tokens", "revoke", "ci-runner"] + URL_ARGS, input="y\n")
+    assert result.exit_code == 0, result.output
+    assert fake_os.accounts["ci-runner"]["revoked_at"] is not None
+
+
+def test_revoke_yes_skips_confirmation(monkeypatch, fake_os):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    monkeypatch.setattr("agnoctl.commands.tokens.stdin_is_interactive", lambda: True)
+    result = _run(["tokens", "revoke", "ci-runner", "--yes"] + URL_ARGS)
+    assert result.exit_code == 0, result.output
+    assert fake_os.accounts["ci-runner"]["revoked_at"] is not None

@@ -181,6 +181,38 @@ def test_connect_missing_admin_credential(monkeypatch, fake_os, fake_clients):
     assert "AGNO_ADMIN_TOKEN" in payload["hint"]
 
 
+def _connect_remote(args=(), **kwargs):
+    return runner.invoke(app, ["connect", "--json", "--url", "http://os.example.com:7777"] + list(args), **kwargs)
+
+
+def test_connect_refuses_plaintext_http_when_minting(monkeypatch, fake_os, fake_clients):
+    """Minting attaches the admin token and writes minted PATs; refuse to do that over
+    plaintext HTTP to a non-loopback host, and mint nothing."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _connect_remote(["--clients", "cursor"])
+    assert result.exit_code == 1
+    assert "plaintext HTTP" in json.loads(result.output)["error"]
+    assert fake_os.accounts == {}
+
+
+def test_connect_allow_http_permits_remote_http(monkeypatch, fake_os, fake_clients):
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = _connect_remote(["--clients", "cursor", "--allow-http"])
+    assert result.exit_code == 0, result.output
+    assert list(fake_os.accounts.keys()) == ["cursor"]
+
+
+def test_connect_no_auth_over_http_is_allowed(monkeypatch, fake_clients):
+    """With auth disabled there is no credential to protect, so a remote http OS connects
+    without requiring --allow-http (no token is ever written)."""
+    from tests.conftest import FakeAgentOS, install_fake
+
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none"))
+    result = _connect_remote(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert fake_clients  # config written, no token
+
+
 def test_connect_skip_existing_leaves_broken_entry(monkeypatch, fake_os, fake_clients):
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
     assert _connect().exit_code == 0

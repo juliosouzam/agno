@@ -6,7 +6,13 @@ from typing import List, Optional
 
 import typer
 
-from agnoctl.commands._common import handle_cli_error, parse_expires, resolve_admin_token
+from agnoctl.commands._common import (
+    handle_cli_error,
+    parse_expires,
+    require_secure_url,
+    resolve_admin_token,
+    stdin_is_interactive,
+)
 from agnoctl.console import console, emit_json, print_info, print_success, print_warning
 from agnoctl.discovery import discover
 from agnoctl.errors import CLIError, ConflictError
@@ -16,6 +22,9 @@ tokens_app = typer.Typer(name="tokens", help="Mint, list, and revoke AgentOS ser
 
 UrlOption = typer.Option(None, "--url", help="AgentOS base URL (default: autodiscover on localhost).")
 JsonOption = typer.Option(False, "--json", help="Emit a single JSON document for machine consumption.")
+AllowHttpOption = typer.Option(
+    False, "--allow-http", help="Permit sending credentials over plaintext HTTP to a non-loopback host."
+)
 
 
 def _timestamp(value: Optional[int]) -> str:
@@ -24,9 +33,21 @@ def _timestamp(value: Optional[int]) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _api_for(url: Optional[str], json_mode: bool) -> AgentOSAPI:
+def _api_for(url: Optional[str], json_mode: bool, allow_http: bool, sensitive: bool = False) -> AgentOSAPI:
     os_info = discover(url)
+    # Surface which OS we resolved before we mint or attach a credential: on a shared host
+    # autodiscovery could land on a port-squatter, and the operator should see the target.
+    if url is None and not json_mode:
+        print_info("Using AgentOS at " + os_info.base_url)
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode)
+    # Refuse to put a bearer credential (admin token) or receive a freshly minted PAT over
+    # plaintext HTTP unless the target is loopback or the operator opted in with --allow-http.
+    if admin_token is not None or sensitive:
+        require_secure_url(
+            os_info.base_url,
+            allow_http=allow_http,
+            what="a token" if sensitive else "the admin credential",
+        )
     return AgentOSAPI(os_info.base_url, admin_token=admin_token)
 
 
@@ -40,11 +61,14 @@ def create(
     ),
     url: Optional[str] = UrlOption,
     json_output: bool = JsonOption,
+    allow_http: bool = AllowHttpOption,
 ) -> None:
     """Mint a service-account token. The plaintext is shown exactly once."""
     try:
         expires_in_days, never_expires = parse_expires(expires)
-        with _api_for(url, json_output) as api:
+        # The plaintext PAT rides back in the create response, so this call is sensitive
+        # even when the OS itself requires no admin credential to reach it.
+        with _api_for(url, json_output, allow_http, sensitive=True) as api:
             try:
                 account = api.create_service_account(
                     name=name,
@@ -78,10 +102,11 @@ def create(
 def list_(
     url: Optional[str] = UrlOption,
     json_output: bool = JsonOption,
+    allow_http: bool = AllowHttpOption,
 ) -> None:
     """List service accounts (metadata and display prefixes only, never tokens)."""
     try:
-        with _api_for(url, json_output) as api:
+        with _api_for(url, json_output, allow_http) as api:
             accounts = api.list_service_accounts()
     except CLIError as e:
         raise handle_cli_error(e, json_output)
@@ -117,13 +142,24 @@ def revoke(
     name: str = typer.Argument(..., help="Name of the service account to revoke."),
     url: Optional[str] = UrlOption,
     json_output: bool = JsonOption,
+    allow_http: bool = AllowHttpOption,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive confirmation prompt."),
 ) -> None:
     """Revoke a service account. Takes effect on the account's next request."""
     try:
-        with _api_for(url, json_output) as api:
+        with _api_for(url, json_output, allow_http) as api:
             account = api.find_service_account(name)
             if account is None:
                 raise CLIError("No service account named '" + name + "' found.")
+            # Revocation is irreversible; confirm interactively. Automation (--json or a
+            # non-TTY) proceeds without prompting, as does an explicit --yes.
+            if not yes and not json_output and stdin_is_interactive():
+                if not typer.confirm(
+                    "Revoke service account '" + name + "'? Its tokens stop working on their next request.",
+                    default=False,
+                ):
+                    print_info("Aborted; no changes made.")
+                    raise typer.Exit(0)
             api.revoke_service_account(account.id)
     except CLIError as e:
         raise handle_cli_error(e, json_output)

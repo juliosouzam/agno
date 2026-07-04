@@ -169,7 +169,9 @@ def test_connect_configures_claude_desktop_end_to_end(monkeypatch, fake_os, tmp_
     cfg = tmp_path / "claude_desktop_config.json"
 
     def build(home=None, cwd=None, project=False):
-        return {"claude-desktop": ClaudeDesktopAdapter(home=tmp_path, config_path=cfg, which=lambda name: "/usr/bin/npx")}
+        return {
+            "claude-desktop": ClaudeDesktopAdapter(home=tmp_path, config_path=cfg, which=lambda name: "/usr/bin/npx")
+        }
 
     monkeypatch.setattr(connect_module, "build_adapters", build)
     result = CliRunner().invoke(app, ["connect", "--json", "--url", "http://localhost:7777"])
