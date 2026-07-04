@@ -120,24 +120,54 @@ def _is_jwt_configured() -> bool:
     return bool(getenv("JWT_VERIFICATION_KEY") or getenv("JWT_JWKS_FILE"))
 
 
+def _has_jwt_middleware(app: Any) -> bool:
+    """Check whether the app has JWTMiddleware installed via ``add_middleware``.
+
+    Covers deployments that wire JWT auth by calling ``app.add_middleware(JWTMiddleware, ...)``
+    directly instead of via ``AgentOS(authorization=True)`` or JWT env vars.
+    """
+    if app is None:
+        return False
+    try:
+        from agno.os.middleware.jwt import JWTMiddleware
+    except ImportError:
+        return False
+    user_middleware = getattr(app, "user_middleware", None) or []
+    for mw in user_middleware:
+        cls = getattr(mw, "cls", None)
+        if cls is JWTMiddleware:
+            return True
+    return False
+
+
 def get_effective_auth_mode(
-    settings: Optional[AgnoAPISettings], authorization: bool = False
+    settings: Optional[AgnoAPISettings],
+    authorization: bool = False,
+    app: Any = None,
 ) -> Literal["none", "security_key", "jwt"]:
     """Return the authentication mode effectively enforced by the OS.
 
     Mirrors the precedence used by ``get_authentication_dependency``:
-    JWT (via authorization=True on AgentOS or JWT environment variables) takes
-    precedence over the security key, which takes precedence over no auth.
+    JWT (via authorization=True on AgentOS, JWT environment variables, or a manually
+    installed ``JWTMiddleware``) takes precedence over the security key, which takes
+    precedence over no auth.
 
     Args:
         settings: The API settings containing the security key and authorization flag
         authorization: The AgentOS authorization flag (JWT middleware enabled)
+        app: The Starlette/FastAPI app instance; when provided, its middleware stack
+            is inspected so a manually-installed ``JWTMiddleware`` is detected.
 
     Returns:
         "jwt" when JWT authorization is effectively active, "security_key" when
         only the OS security key is enforced, "none" when authentication is disabled.
     """
-    if authorization or (settings is not None and settings.authorization_enabled) or _is_jwt_configured():
+    if (
+        authorization
+        or (settings is not None and settings.authorization_enabled)
+        or _is_jwt_configured()
+        or _has_jwt_middleware(app)
+    ):
         return "jwt"
     if settings is not None and settings.os_security_key:
         return "security_key"

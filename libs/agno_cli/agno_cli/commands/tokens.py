@@ -1,5 +1,6 @@
 """`agno tokens`: thin wrappers over the AgentOS service-accounts API."""
 
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -126,6 +127,11 @@ def revoke(
             api.revoke_service_account(account.id)
     except CLIError as e:
         raise handle_cli_error(e, json_output)
+
+    # The DELETE endpoint returns 204, so the account object above is the pre-revoke
+    # snapshot. Stamp revoked_at locally to reflect what the API state now is.
+    if account.revoked_at is None:
+        account.revoked_at = int(time.time())
 
     if json_output:
         emit_json({"revoked": account.public_dict()})

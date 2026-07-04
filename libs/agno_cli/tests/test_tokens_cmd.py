@@ -65,6 +65,21 @@ def test_revoke_by_name(monkeypatch, fake_os):
     assert fake_os.accounts["ci-runner"]["revoked_at"] is not None
 
 
+def test_revoke_json_body_shows_revoked_at(monkeypatch, fake_os):
+    """Regression: the revoke response body must reflect the post-revoke state.
+
+    Before the fix, the CLI emitted the pre-revoke snapshot (fetched before the
+    DELETE call), so ``revoked.revoked_at`` was ``None`` in the JSON body even
+    though the account was in fact revoked on the server.
+    """
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    result = _run(["tokens", "revoke", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["revoked"]["revoked_at"] is not None
+
+
 def test_revoke_unknown_name(monkeypatch, fake_os):
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
     result = _run(["tokens", "revoke", "ghost", "--json"] + URL_ARGS)
