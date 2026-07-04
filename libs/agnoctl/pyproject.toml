@@ -6,7 +6,7 @@ requires-python = ">=3.9,<4"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
-  {name = "Ashpreet Bedi", email = "ashpreet@agno.com"}
+  {name = "Agno Team", email = "hello@agno.com"}
 ]
 keywords = ["agno", "agentos", "agents", "cli", "mcp"]
 classifiers = [
