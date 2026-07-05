@@ -1121,8 +1121,17 @@ def get_mcp_server(
     mcp = build_mcp_server(os)
     mcp_config: "Optional[MCPServerConfig]" = getattr(os, "mcp_config", None)
 
-    # Use http_app for Streamable HTTP transport (modern MCP standard)
-    mcp_app = mcp.http_app(path="/mcp")
+    # Use http_app for Streamable HTTP transport (modern MCP standard).
+    # fastmcp >= 3.4.3 ships its own always-on Host/Origin guard (421/403) with
+    # localhost-only defaults, which would gate deployed hosts before this
+    # module's middleware runs. AgentOS keeps a single validation engine — the
+    # opt-in transport-security middleware below (400 invalid_host /
+    # invalid_origin, driven by MCPServerConfig.allowed_hosts) — so the
+    # built-in guard is disabled where the parameter exists.
+    http_app_kwargs: Dict[str, Any] = {"path": "/mcp"}
+    if "host_origin_protection" in inspect.signature(mcp.http_app).parameters:
+        http_app_kwargs["host_origin_protection"] = False
+    mcp_app = mcp.http_app(**http_app_kwargs)
 
     # Middleware runs in reverse registration order (last added is outermost / runs first).
     # Target running order: transport security -> app middleware -> authorize gate -> tool.
