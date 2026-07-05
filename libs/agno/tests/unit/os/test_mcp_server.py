@@ -27,7 +27,6 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 import agno.os.mcp as mcp_mod  # noqa: E402
 from agno.agent import Agent  # noqa: E402
 from agno.db.schemas.service_accounts import ServiceAccount  # noqa: E402
-from agno.db.sqlite import SqliteDb  # noqa: E402
 from agno.models.base import Model  # noqa: E402
 from agno.models.message import MessageMetrics  # noqa: E402
 from agno.models.response import ModelResponse  # noqa: E402
@@ -487,7 +486,7 @@ async def test_run_agent_omitted_session_end_to_end_returns_distinct_ids(monkeyp
     calls return two distinct session_ids in structuredContent, and nothing sticks to the
     instance (the tool always hands arun a concrete session, so the sticky branch never fires)."""
     monkeypatch.setattr(mcp_mod, "_resolve_user_id", lambda caller: None)
-    agent = Agent(id="demo-agent", name="Demo Agent", model=_MockModel(), db=SqliteDb(db_file=":memory:"))
+    agent = Agent(id="demo-agent", name="Demo Agent", model=_MockModel())
     os = AgentOS(agents=[agent], enable_mcp_server=True)
 
     async with Client(build_mcp_server(os)) as client:
