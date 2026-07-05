@@ -4,6 +4,7 @@ import functools
 import inspect
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Union
+from uuid import uuid4
 
 from fastmcp import Context, FastMCP
 from fastmcp.server.http import (
@@ -473,6 +474,25 @@ def _http_request_or_none() -> Optional[Any]:
         return None
 
 
+def _session_id_or_new(session_id: Optional[str]) -> str:
+    """Return the caller's session_id, or mint a fresh one when it is omitted.
+
+    The run tools must not forward ``session_id=None`` to ``arun``: a component that is
+    reused across calls -- a shared ``AgentProtocol``/``RemoteAgent``/``RemoteTeam``, a
+    remote workflow, or any instance not deep-copied per call -- would fall back to the
+    sticky per-instance session that ``initialize_session`` caches on it, collapsing every
+    "sessionless" run into one ever-growing conversation and leaking history between
+    unrelated requests. The REST run routes mint a uuid per run for exactly this reason
+    (see ``routers/agents/router.py``); the MCP run tools do the same so the documented
+    contract -- "omit session_id to start a new one" -- holds regardless of how the
+    component was resolved. An explicit session_id is always honoured, so continuing a
+    conversation still works.
+    """
+    if session_id is None or session_id == "":
+        return str(uuid4())
+    return session_id
+
+
 def _classify_lifecycle_target(
     agent_id: Optional[str], team_id: Optional[str], workflow_id: Optional[str]
 ) -> "tuple[Literal['agents', 'teams', 'workflows'], str]":
@@ -706,6 +726,8 @@ def build_mcp_server(
         _require_tool_scopes("POST", f"/agents/{agent_id}/runs")
         user_id = _resolve_user_id(user_id)
         agent = await _resolve_run_component(os, "agents", agent_id, user_id=user_id, session_id=session_id)
+        # Mint a fresh session per call when omitted (matches REST), never the sticky default.
+        session_id = _session_id_or_new(session_id)
         run_output = await _run_agentic_component(
             ctx, agent, message, user_id, session_id, label=f"Agent {agent.name or agent_id}"
         )
@@ -730,6 +752,8 @@ def build_mcp_server(
         _require_tool_scopes("POST", f"/teams/{team_id}/runs")
         user_id = _resolve_user_id(user_id)
         team = await _resolve_run_component(os, "teams", team_id, user_id=user_id, session_id=session_id)
+        # Mint a fresh session per call when omitted (matches REST), never the sticky default.
+        session_id = _session_id_or_new(session_id)
         run_output = await _run_agentic_component(
             ctx, team, message, user_id, session_id, label=f"Team {team.name or team_id}"
         )
@@ -757,6 +781,8 @@ def build_mcp_server(
         _require_tool_scopes("POST", f"/workflows/{workflow_id}/runs")
         user_id = _resolve_user_id(user_id)
         workflow = await _resolve_run_component(os, "workflows", workflow_id, user_id=user_id, session_id=session_id)
+        # Mint a fresh session per call when omitted (matches REST), never the sticky default.
+        session_id = _session_id_or_new(session_id)
         if isinstance(workflow, RemoteWorkflow):
             run_output = await workflow.arun(message, user_id=user_id, session_id=session_id)
             return build_run_tool_result(run_output, result_mode)

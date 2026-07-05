@@ -13,9 +13,10 @@ import pytest
 
 pytest.importorskip("fastmcp")
 
+import asyncio  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
-from typing import Optional  # noqa: E402
+from typing import Any, AsyncIterator, Iterator, Optional  # noqa: E402
 from uuid import uuid4  # noqa: E402
 
 import httpx  # noqa: E402
@@ -26,6 +27,10 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 import agno.os.mcp as mcp_mod  # noqa: E402
 from agno.agent import Agent  # noqa: E402
 from agno.db.schemas.service_accounts import ServiceAccount  # noqa: E402
+from agno.db.sqlite import SqliteDb  # noqa: E402
+from agno.models.base import Model  # noqa: E402
+from agno.models.message import MessageMetrics  # noqa: E402
+from agno.models.response import ModelResponse  # noqa: E402
 from agno.os import AgentOS, MCPServerConfig  # noqa: E402
 from agno.os.config import AuthorizationConfig  # noqa: E402
 from agno.os.mcp import _resolve_user_id, build_mcp_server, get_mcp_server  # noqa: E402
@@ -291,6 +296,228 @@ async def test_run_workflow_threads_resolved_identity(monkeypatch):
 
     assert captured["user_id"] == "jwt-alice"
     assert captured["session_id"] == "s-3"
+
+
+# ==================== Session minting (omitted session_id -> fresh session per call) ====================
+#
+# The run tools must mint a fresh session_id when the caller omits one, exactly like the
+# REST run routes, rather than forwarding session_id=None and letting the component fall
+# back to its sticky per-instance session. The autouse _resolve_by_identity fixture hands
+# the run tools the SHARED instance -- the same resolution shape as an AgentProtocol /
+# RemoteAgent / RemoteTeam / remote workflow, which get_agent_by_id returns without a
+# per-call deep_copy -- so these tests exercise exactly the path where the bug (every
+# "sessionless" call collapsing into one ever-growing conversation) manifested.
+
+
+class _MockModel(Model):
+    """Minimal offline model: returns a canned response with no network call, so the run
+    tools can drive the real ``arun`` / ``initialize_session`` path in a unit test."""
+
+    def __init__(self) -> None:
+        super().__init__(id="test-model", name="test-model", provider="test")
+        self.instructions = None
+        self._r = ModelResponse(content="ok", role="assistant", response_usage=MessageMetrics())
+
+    def get_instructions_for_model(self, *a: Any, **k: Any) -> Any:
+        return None
+
+    def get_system_message_for_model(self, *a: Any, **k: Any) -> Any:
+        return None
+
+    async def aget_instructions_for_model(self, *a: Any, **k: Any) -> Any:
+        return None
+
+    async def aget_system_message_for_model(self, *a: Any, **k: Any) -> Any:
+        return None
+
+    def parse_args(self, *a: Any, **k: Any) -> dict:
+        return {}
+
+    def invoke(self, *a: Any, **k: Any) -> ModelResponse:
+        return self._r
+
+    async def ainvoke(self, *a: Any, **k: Any) -> ModelResponse:
+        return self._r
+
+    def invoke_stream(self, *a: Any, **k: Any) -> Iterator[ModelResponse]:
+        yield self._r
+
+    async def ainvoke_stream(self, *a: Any, **k: Any) -> AsyncIterator[ModelResponse]:
+        yield self._r
+        return
+
+    def _parse_provider_response(self, response: Any, **k: Any) -> ModelResponse:
+        return self._r
+
+    def _parse_provider_response_delta(self, response: Any) -> ModelResponse:
+        return self._r
+
+
+def _capture_run_sessions(component, run_output) -> list:
+    """Record the session_id the run tool hands ``arun`` on every call.
+
+    Returns a list appended to per call, so distinctness across sequential and parallel
+    calls can be asserted. Mirrors ``_stub_arun`` but keeps every call's session_id instead
+    of only the last. Before the fix the tool forwarded ``session_id=None``; after it, a
+    fresh uuid per call.
+    """
+    sessions: list = []
+
+    async def fake_arun(message, **kwargs):
+        sessions.append(kwargs.get("session_id"))
+        if kwargs.get("yield_run_output") or isinstance(run_output, WorkflowRunOutput):
+            yield run_output
+
+    component.arun = fake_arun  # type: ignore[method-assign]
+    return sessions
+
+
+def _result_session_id(result) -> Optional[str]:
+    structured = result.structured_content or {}
+    return (structured.get("result", structured) or {}).get("session_id")
+
+
+async def test_run_agent_mints_a_new_session_when_omitted():
+    """Omitting session_id makes run_agent pass a fresh (non-None) session_id to arun."""
+    agent = _agent()
+    sessions = _capture_run_sessions(agent, RunOutput(content="ok"))
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    await _call_tool(os, "run_agent", {"agent_id": agent.id, "message": "hi"})
+
+    assert len(sessions) == 1
+    assert sessions[0] is not None and sessions[0] != ""
+
+
+async def test_run_agent_omitted_session_is_distinct_per_call():
+    """Two sessionless run_agent calls against the SAME instance get two distinct sessions
+    -- the core regression: sessionless runs must not collapse into one shared conversation."""
+    agent = _agent()
+    sessions = _capture_run_sessions(agent, RunOutput(content="ok"))
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        await client.call_tool("run_agent", {"agent_id": agent.id, "message": "one"})
+        await client.call_tool("run_agent", {"agent_id": agent.id, "message": "two"})
+
+    assert all(s for s in sessions)  # both non-empty
+    assert sessions[0] != sessions[1]
+
+
+async def test_run_agent_parallel_omitted_sessions_are_distinct():
+    """Concurrent sessionless run_agent calls still mint distinct sessions (no shared default)."""
+    agent = _agent()
+    sessions = _capture_run_sessions(agent, RunOutput(content="ok"))
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        await asyncio.gather(
+            client.call_tool("run_agent", {"agent_id": agent.id, "message": "a"}),
+            client.call_tool("run_agent", {"agent_id": agent.id, "message": "b"}),
+        )
+
+    assert len(sessions) == 2
+    assert all(s for s in sessions)
+    assert sessions[0] != sessions[1]
+
+
+async def test_run_agent_explicit_session_is_reused():
+    """An explicit session_id is honoured verbatim across calls -- continuity still works."""
+    agent = _agent()
+    sessions = _capture_run_sessions(agent, RunOutput(content="ok"))
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        await client.call_tool("run_agent", {"agent_id": agent.id, "message": "one", "session_id": "fixed-1"})
+        await client.call_tool("run_agent", {"agent_id": agent.id, "message": "two", "session_id": "fixed-1"})
+
+    assert sessions == ["fixed-1", "fixed-1"]
+
+
+async def test_run_team_omitted_session_is_distinct_per_call():
+    """run_team applies the same fix: sessionless calls mint distinct sessions."""
+    team = Team(id="demo-team", name="Demo Team", members=[_agent()])
+    sessions = _capture_run_sessions(team, TeamRunOutput(content="ok"))
+    os = AgentOS(teams=[team], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        await client.call_tool("run_team", {"team_id": team.id, "message": "one"})
+        await client.call_tool("run_team", {"team_id": team.id, "message": "two"})
+
+    assert all(s for s in sessions)
+    assert sessions[0] != sessions[1]
+
+
+async def test_run_team_explicit_session_is_reused():
+    team = Team(id="demo-team", name="Demo Team", members=[_agent()])
+    sessions = _capture_run_sessions(team, TeamRunOutput(content="ok"))
+    os = AgentOS(teams=[team], enable_mcp_server=True)
+
+    await _call_tool(os, "run_team", {"team_id": team.id, "message": "hi", "session_id": "team-sess"})
+
+    assert sessions == ["team-sess"]
+
+
+async def test_run_workflow_omitted_session_is_distinct_per_call():
+    """run_workflow applies the same fix: sessionless calls mint distinct sessions."""
+    workflow = Workflow(id="demo-wf", name="Demo WF", steps=[Step(agent=_agent())])
+    sessions = _capture_run_sessions(workflow, WorkflowRunOutput(content="ok"))
+    os = AgentOS(workflows=[workflow], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        await client.call_tool("run_workflow", {"workflow_id": workflow.id, "message": "one"})
+        await client.call_tool("run_workflow", {"workflow_id": workflow.id, "message": "two"})
+
+    assert all(s for s in sessions)
+    assert sessions[0] != sessions[1]
+
+
+async def test_run_workflow_explicit_session_is_reused():
+    workflow = Workflow(id="demo-wf", name="Demo WF", steps=[Step(agent=_agent())])
+    sessions = _capture_run_sessions(workflow, WorkflowRunOutput(content="ok"))
+    os = AgentOS(workflows=[workflow], enable_mcp_server=True)
+
+    await _call_tool(os, "run_workflow", {"workflow_id": workflow.id, "message": "hi", "session_id": "wf-sess"})
+
+    assert sessions == ["wf-sess"]
+
+
+async def test_run_agent_omitted_session_end_to_end_returns_distinct_ids(monkeypatch):
+    """End-to-end reproduction: driving the REAL arun on a shared instance, two sessionless
+    calls return two distinct session_ids in structuredContent, and nothing sticks to the
+    instance (the tool always hands arun a concrete session, so the sticky branch never fires)."""
+    monkeypatch.setattr(mcp_mod, "_resolve_user_id", lambda caller: None)
+    agent = Agent(id="demo-agent", name="Demo Agent", model=_MockModel(), db=SqliteDb(db_file=":memory:"))
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    async with Client(build_mcp_server(os)) as client:
+        r1 = await client.call_tool("run_agent", {"agent_id": agent.id, "message": "one"})
+        r2 = await client.call_tool("run_agent", {"agent_id": agent.id, "message": "two"})
+
+    s1, s2 = _result_session_id(r1), _result_session_id(r2)
+    assert s1 and s2 and s1 != s2
+    # No sticky session leaked onto the shared instance.
+    assert agent.session_id is None
+
+
+async def test_continue_run_targets_the_given_session_and_never_mints(monkeypatch):
+    """continue_run must resume the exact session it was handed, never mint a new one --
+    so the PAUSED -> continue_run HITL flow resolves the original run/session."""
+    monkeypatch.setattr(mcp_mod, "_resolve_user_id", lambda caller: None)
+    agent = _agent()
+    captured: dict = {}
+
+    async def fake_acontinue_run(*, run_id, session_id, user_id, requirements, stream=False):
+        captured.update(run_id=run_id, session_id=session_id)
+        return RunOutput(run_id=run_id, session_id=session_id, content="resumed")
+
+    agent.acontinue_run = fake_acontinue_run  # type: ignore[method-assign]
+    os = AgentOS(agents=[agent], enable_mcp_server=True)
+
+    result = await _call_tool(os, "continue_run", {"run_id": "run-1", "session_id": "orig-sess", "agent_id": agent.id})
+
+    assert captured["session_id"] == "orig-sess"
+    assert _result_session_id(result) == "orig-sess"
 
 
 # ==================== Identity in custom tools ====================
