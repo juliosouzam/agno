@@ -9,10 +9,17 @@ __all__ = [
     "AgentAsJudgeEvaluation",
     "AgentAsJudgeResult",
     "BaseEval",
+    "Case",
+    "CaseResult",
     "PerformanceEval",
     "PerformanceResult",
     "ReliabilityEval",
     "ReliabilityResult",
+    "SuiteResult",
+    "acli",
+    "arun_cases",
+    "cli",
+    "run_cases",
 ]
 
 
@@ -34,4 +41,8 @@ def __getattr__(name: str):
         from agno.eval import reliability
 
         return getattr(reliability, name)
+    elif name in ("Case", "CaseResult", "SuiteResult", "arun_cases", "run_cases", "cli", "acli"):
+        from agno.eval import suite
+
+        return getattr(suite, name)
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
