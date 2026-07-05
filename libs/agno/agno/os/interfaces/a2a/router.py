@@ -30,9 +30,45 @@ from agno.os.interfaces.a2a.utils import (
     map_run_output_to_a2a_task,
     stream_a2a_response_with_error_handling,
 )
+from agno.os.auth import check_resource_access
+from agno.os.middleware.user_scope import get_scoped_user_id, resolve_run_user_id, verify_run_in_session
 from agno.os.utils import get_agent_by_id, get_request_kwargs, get_team_by_id, get_workflow_by_id
 from agno.team import RemoteTeam, Team
 from agno.workflow import RemoteWorkflow, Workflow
+
+
+def _enforce_dynamic_dispatch_scope(request: Request, entity: object, entity_id: str) -> None:
+    """Re-check the run scope for the resolved family on the deprecated dispatch routes.
+
+    ``POST /message:send`` / ``:stream`` resolve the target as an agent, team, OR workflow
+    at runtime, so the route-level gate can only require a single coarse scope (``agents:run``).
+    That would let an ``agents:run``-only token execute teams/workflows. Once the entity is
+    resolved we know its family, so enforce ``<family>:run`` via the canonical RBAC decision.
+    No-op when RBAC is not active.
+    """
+    if not getattr(request.state, "authorization_enabled", False):
+        return
+    if isinstance(entity, (Team, RemoteTeam)):
+        family = "teams"
+    elif isinstance(entity, (Workflow, RemoteWorkflow)):
+        family = "workflows"
+    else:
+        family = "agents"
+    if not check_resource_access(request, entity_id, family, "run"):
+        raise HTTPException(status_code=403, detail=f"Insufficient permissions to run this {family[:-1]}")
+
+
+def _resolve_a2a_user_id(request: Request, request_body: dict) -> Optional[str]:
+    """Resolve the run's ``user_id``, mirroring the REST run route's identity pinning.
+
+    A2A must not take run identity from the client: the client-supplied ``X-User-ID``
+    header / ``metadata.userId`` is honoured for attribution only when the caller is
+    anonymous (see ``resolve_run_user_id`` for the full precedence).
+    """
+    client_uid = request.headers.get("X-User-ID")
+    if not client_uid:
+        client_uid = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+    return resolve_run_user_id(request, client_uid)
 
 
 def attach_routes(
@@ -130,9 +166,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Check if non-blocking execution is requested
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
@@ -213,7 +247,21 @@ def attach_routes(
         if not isinstance(agent, Agent):
             raise HTTPException(status_code=501, detail="Task polling is not supported for this agent type")
 
-        run_output = await agent.aget_run_output(run_id=task_id, session_id=context_id)
+        # Scope the run lookup to the caller for non-admins (aget_run_output filters the
+        # session by user_id); admins and unscoped callers read unfiltered, matching the REST
+        # run-read route. contextId names the session the run lives in and is required to
+        # look it up at all (a missing one would otherwise raise deep in storage).
+        if not context_id:
+            raise HTTPException(status_code=400, detail="contextId is required to poll a task")
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            # Ownership + component pin before the read, mirroring tasks:cancel and the REST
+            # run-read route: a scoped caller may only reach runs that live in a session it
+            # owns AND that belong to this path component (fails closed on cross-component).
+            await verify_run_in_session(
+                agent, context_id, task_id, scoped_user_id, component_type="agents", component_id=id
+            )
+        run_output = await agent.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
         if not run_output:
             raise HTTPException(status_code=404, detail="Task not found")
 
@@ -248,6 +296,21 @@ def attach_routes(
             raise HTTPException(status_code=400, detail="Task cancellation is not supported for remote agents")
         if not isinstance(agent, Agent):
             raise HTTPException(status_code=501, detail="Task cancellation is not supported for this agent type")
+
+        # Verify ownership before applying a global cancellation intent: a scoped principal
+        # may only cancel a run inside a session it owns AND reached through the component that
+        # owns the run (component_type/component_id mirror the REST cancel route and fail closed
+        # on a cross-component run). acancel_run is keyed on run_id alone, so the check happens
+        # here. Like REST, a scoped caller therefore cannot cancel-before-start (no persisted
+        # session yet); admins/unscoped callers skip the check and retain that behaviour.
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            context_id = params.get("contextId")
+            if not context_id:
+                raise HTTPException(status_code=400, detail="contextId is required to cancel a task")
+            await verify_run_in_session(
+                agent, context_id, task_id, scoped_user_id, component_type="agents", component_id=id
+            )
 
         # cancel_run always stores cancellation intent (even for not-yet-registered runs
         # in cancel-before-start scenarios), so we always return success.
@@ -302,9 +365,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the Agent and stream the response
         try:
@@ -412,9 +473,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Check if non-blocking execution is requested
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
@@ -493,7 +552,21 @@ def attach_routes(
         if isinstance(team, RemoteTeam):
             raise HTTPException(status_code=400, detail="Task polling is not supported for remote teams")
 
-        run_output = await team.aget_run_output(run_id=task_id, session_id=context_id)
+        # Scope the run lookup to the caller for non-admins (aget_run_output filters the
+        # session by user_id); admins and unscoped callers read unfiltered, matching the REST
+        # run-read route. contextId names the session the run lives in and is required to
+        # look it up at all (a missing one would otherwise raise deep in storage).
+        if not context_id:
+            raise HTTPException(status_code=400, detail="contextId is required to poll a task")
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            # Ownership + component pin before the read, mirroring tasks:cancel and the REST
+            # run-read route: a scoped caller may only reach runs that live in a session it
+            # owns AND that belong to this path component (fails closed on cross-component).
+            await verify_run_in_session(
+                team, context_id, task_id, scoped_user_id, component_type="teams", component_id=id
+            )
+        run_output = await team.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
         if not run_output:
             raise HTTPException(status_code=404, detail="Task not found")
 
@@ -526,6 +599,21 @@ def attach_routes(
             raise HTTPException(status_code=404, detail="Team not found")
         if isinstance(team, RemoteTeam):
             raise HTTPException(status_code=400, detail="Task cancellation is not supported for remote teams")
+
+        # Verify ownership before applying a global cancellation intent: a scoped principal
+        # may only cancel a run inside a session it owns AND reached through the component that
+        # owns the run (component_type/component_id mirror the REST cancel route and fail closed
+        # on a cross-component run). acancel_run is keyed on run_id alone, so the check happens
+        # here. Like REST, a scoped caller therefore cannot cancel-before-start (no persisted
+        # session yet); admins/unscoped callers skip the check and retain that behaviour.
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            context_id = params.get("contextId")
+            if not context_id:
+                raise HTTPException(status_code=400, detail="contextId is required to cancel a task")
+            await verify_run_in_session(
+                team, context_id, task_id, scoped_user_id, component_type="teams", component_id=id
+            )
 
         # cancel_run always stores cancellation intent (even for not-yet-registered runs
         # in cancel-before-start scenarios), so we always return success.
@@ -580,9 +668,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the Team and stream the response
         try:
@@ -690,9 +776,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the Workflow
         try:
@@ -775,9 +859,7 @@ def attach_routes(
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the Workflow and stream the response
         try:
@@ -871,12 +953,13 @@ def attach_routes(
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
+        # The route gate only required agents:run; enforce the resolved family's run scope.
+        _enforce_dynamic_dispatch_scope(request, entity, agent_id)
+
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the agent, team, or workflow
         try:
@@ -985,12 +1068,13 @@ def attach_routes(
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
+        # The route gate only required agents:run; enforce the resolved family's run scope.
+        _enforce_dynamic_dispatch_scope(request, entity, agent_id)
+
         # 2. Map the request to our run_input and run variables
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         # 3. Run the Agent, Team, or Workflow and stream the response
         try:
