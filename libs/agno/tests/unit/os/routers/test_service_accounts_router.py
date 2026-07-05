@@ -51,12 +51,28 @@ def settings():
     return AgnoAPISettings()
 
 
+def _authenticated_app(mock_db, settings):
+    """An app whose caller is an authenticated, unscoped root (os_security_key / JWT).
+
+    Minting requires authentication, so the happy-path fixture authenticates. A middleware
+    marks request.state.authenticated = True, standing in for the auth layer that would set
+    it in production. Anonymous open-mode behaviour is covered separately by
+    TestCreateServiceAccountUnauthenticatedOpenMode.
+    """
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def set_authenticated(request, call_next):
+        request.state.authenticated = True
+        return await call_next(request)
+
+    app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
+    return app
+
+
 @pytest.fixture
 def client(mock_db, settings):
-    app = FastAPI()
-    router = get_service_accounts_router(os_db=mock_db, settings=settings)
-    app.include_router(router)
-    return TestClient(app)
+    return TestClient(_authenticated_app(mock_db, settings))
 
 
 # =============================================================================
@@ -117,8 +133,21 @@ class TestCreateServiceAccount:
         response = client.post("/service-accounts", json={"name": "ci", "scopes": ["service_accounts:write"]})
         assert response.status_code == 400
 
-    def test_privileged_scope_allowed_with_flag(self, client):
-        response = client.post(
+    def test_privileged_scope_allowed_with_flag_for_authenticated_root(self, mock_db, settings):
+        # A trusted root (os_security_key / internal token sets request.state.authenticated)
+        # may mint a privileged token when the explicit flag is set. An UNauthenticated
+        # (open-mode) caller may not -- see TestCreateServiceAccountUnauthenticatedOpenMode.
+        from fastapi import Request
+
+        app = FastAPI()
+
+        @app.middleware("http")
+        async def set_authenticated(request: Request, call_next):
+            request.state.authenticated = True
+            return await call_next(request)
+
+        app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
+        response = TestClient(app).post(
             "/service-accounts",
             json={"name": "ci", "scopes": ["sessions:write"], "allow_privileged_scopes": True},
         )
@@ -140,9 +169,7 @@ class TestCreateServiceAccount:
     def test_db_without_support_returns_503(self, settings):
         db = MagicMock()
         db.get_service_account_by_name = MagicMock(side_effect=NotImplementedError)
-        app = FastAPI()
-        app.include_router(get_service_accounts_router(os_db=db, settings=settings))
-        response = TestClient(app).post("/service-accounts", json={"name": "ci"})
+        response = TestClient(_authenticated_app(db, settings)).post("/service-accounts", json={"name": "ci"})
         assert response.status_code == 503
 
 
@@ -199,12 +226,100 @@ class TestCreateServiceAccountSubsetRule:
         response = client.post("/service-accounts", json={"name": "ci", "scopes": ["agents:other-agent:run"]})
         assert response.status_code == 403
 
-    def test_unscoped_root_caller_is_exempt(self, mock_db, settings):
-        # No request.state.scopes (os_security_key or open dev instance)
+    def test_unscoped_unauthenticated_caller_cannot_mint(self, mock_db, settings):
+        # No request.state.scopes and not authenticated (an open dev instance). Even a plain
+        # non-privileged token is refused: an anonymously-minted PAT persists as a durable
+        # credential after the operator later enables auth. See
+        # TestCreateServiceAccountUnauthenticatedOpenMode.
         app = FastAPI()
         app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
         response = TestClient(app).post("/service-accounts", json={"name": "ci", "scopes": ["teams:run"]})
-        assert response.status_code == 201
+        assert response.status_code == 401
+
+
+class TestCreateServiceAccountUnauthenticatedOpenMode:
+    """S4: on an OPEN instance (no security key, no JWT) request.state.authenticated is
+    falsy and scopes is unset. Such an anonymous caller must NOT be able to mint ANY token
+    -- privileged or not -- because a minted PAT persists as a durable credential even after
+    the operator later enables auth (PAT scopes are enforced independently of the
+    authorization flag). Minting requires a real credential (OS_SECURITY_KEY or JWT)."""
+
+    @pytest.fixture
+    def anon_client(self, mock_db, settings):
+        app = FastAPI()
+        app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
+        return TestClient(app)
+
+    def test_anonymous_cannot_mint_default_token(self, anon_client):
+        response = anon_client.post("/service-accounts", json={"name": "ci"})
+        assert response.status_code == 401
+        assert "Authentication is required" in response.json()["detail"]
+
+    def test_anonymous_cannot_mint_never_expiring_run_token(self, anon_client):
+        # The durable-credential case: a never-expiring run/read token would survive the
+        # operator later enabling auth. Refused even though its scopes are non-privileged.
+        response = anon_client.post(
+            "/service-accounts",
+            json={"name": "backdoor", "scopes": ["agents:run", "sessions:read"], "never_expires": True},
+        )
+        assert response.status_code == 401
+
+    def test_anonymous_cannot_mint_admin_even_with_flag(self, anon_client):
+        response = anon_client.post(
+            "/service-accounts",
+            json={
+                "name": "backdoor",
+                "scopes": ["agent_os:admin"],
+                "allow_privileged_scopes": True,
+                "never_expires": True,
+            },
+        )
+        assert response.status_code == 401
+        assert "Authentication is required" in response.json()["detail"]
+
+    def test_anonymous_cannot_mint_write_scope_even_with_flag(self, anon_client):
+        response = anon_client.post(
+            "/service-accounts",
+            json={"name": "w", "scopes": ["sessions:write"], "allow_privileged_scopes": True},
+        )
+        assert response.status_code == 401
+
+    def test_anonymous_cannot_mint_service_accounts_scope_even_with_flag(self, anon_client):
+        response = anon_client.post(
+            "/service-accounts",
+            json={"name": "minter", "scopes": ["service_accounts:write"], "allow_privileged_scopes": True},
+        )
+        assert response.status_code == 401
+
+
+class TestCreateServiceAccountSecurityKeyRoot:
+    """A caller validated by the OS security key is a trusted, unscoped root: the auth
+    dependency marks it authenticated, so it may mint privileged tokens. Regression test for
+    the security-key path failing to set request.state.authenticated (which would falsely
+    route a legitimate root through the fail-closed anonymous branch)."""
+
+    def test_security_key_root_can_mint_privileged(self, mock_db):
+        settings = AgnoAPISettings(os_security_key="root-key-123")
+        app = FastAPI()
+        app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
+        response = TestClient(app).post(
+            "/service-accounts",
+            headers={"Authorization": "Bearer root-key-123"},
+            json={"name": "ci", "scopes": ["agent_os:admin"], "allow_privileged_scopes": True},
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["scopes"] == ["agent_os:admin"]
+
+    def test_invalid_security_key_is_rejected(self, mock_db):
+        settings = AgnoAPISettings(os_security_key="root-key-123")
+        app = FastAPI()
+        app.include_router(get_service_accounts_router(os_db=mock_db, settings=settings))
+        response = TestClient(app).post(
+            "/service-accounts",
+            headers={"Authorization": "Bearer wrong-key"},
+            json={"name": "ci"},
+        )
+        assert response.status_code == 401
 
 
 # =============================================================================

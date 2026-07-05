@@ -1095,6 +1095,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.authenticated = False
             request.state.token = token
 
+        # validate=False decode-failure fall-through: a token was present but could not be
+        # decoded (this mode skips signature verification, so only a structurally-malformed
+        # token lands here). The success path sets the completion marker and runs _check_scopes;
+        # its ABSENCE identifies this fall-through. Treat the caller as authenticated-but-empty
+        # -- no identity, no claims, no scopes -- identical to a valid token carrying no ``sub``
+        # and no scopes, so a malformed token is never more permissive than such a token. When
+        # RBAC is on, run the SAME scope gate the success path runs; without it, routes gated
+        # only by the middleware's own _check_scopes (memory, knowledge, sessions, metrics, ...)
+        # would skip enforcement, while the state below only covers the downstream route/tool
+        # gates (runs, MCP). ``user_id`` is pinned to None (matching the no-``sub`` success path)
+        # so the user-isolation layer scopes queries by owner rather than reading a stale id.
+        if not getattr(request.state, _AUTH_COMPLETE_ATTR, False):
+            request.state.authorization_enabled = self.authorization or False
+            request.state.scopes = []
+            request.state.user_id = None
+            request.state.admin_scope = self.admin_scope
+            request.state.user_isolation_enabled = self.user_isolation
+            if self.authorization:
+                error_response = self._check_scopes(request, method, path, [], origin, cors_allowed_origins)
+                if error_response is not None:
+                    return error_response
+
         return await call_next(request)
 
     async def _dispatch_service_account(
