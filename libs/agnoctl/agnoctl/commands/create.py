@@ -17,9 +17,9 @@ from agnoctl.console import emit_json, print_info, print_success
 from agnoctl.errors import CLIError
 
 TEMPLATES: Dict[str, str] = {
-    "agentos-docker": "https://github.com/agno-agi/agent-platform-docker",
-    "agentos-aws": "https://github.com/agno-agi/agent-platform-aws",
-    "agentos-railway": "https://github.com/agno-agi/agent-platform-railway",
+    "agentos-docker": "https://github.com/agno-agi/agentos-docker",
+    "agentos-aws": "https://github.com/agno-agi/agentos-aws",
+    "agentos-railway": "https://github.com/agno-agi/agentos-railway",
 }
 
 DEFAULT_TEMPLATE = "agentos-docker"

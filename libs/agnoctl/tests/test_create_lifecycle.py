@@ -56,7 +56,7 @@ def test_create_scaffolds_project(fake_git, tmp_path):
     assert not (project / ".env").exists()
     assert "secrets" not in payload
     clone_args = fake_git.calls[0]
-    assert "https://github.com/agno-agi/agent-platform-docker" in clone_args
+    assert "https://github.com/agno-agi/agentos-docker" in clone_args
 
 
 @pytest.mark.parametrize("name", ["../escape", "a/b", "/tmp/abs", ".."])
