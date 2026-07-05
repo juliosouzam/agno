@@ -1,6 +1,6 @@
 [project]
 name = "agno"
-version = "2.7.0a2"
+version = "2.7.0a3"
 description = "The programming language for agentic software."
 requires-python = ">=3.9,<4"
 readme = "README.md"
@@ -24,7 +24,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "agnoctl>=0.1.0a1",
+  "agnoctl>=0.1.0a3",
   "docstring-parser",
   # Prevent the request-smuggling CVE in h11 < 0.16
   "h11>=0.16.0",
@@ -71,6 +71,7 @@ dev = [
 ]
 
 os = ["fastapi", "python-multipart>=0.0.18", "uvicorn", "websockets", "sqlalchemy", "PyJWT", "opentelemetry-sdk", "openinference-instrumentation-agno", "croniter>=1.3", "pytz>=2023.3"]
+mcp = ["mcp>=1.9.2", "fastmcp"]
 scheduler = ["croniter>=1.3", "pytz>=2023.3"]
 
 # Dependencies for Telemetry
@@ -132,7 +133,6 @@ google_bigquery = ["google-cloud-bigquery"]
 google_slides = ["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"]
 googlemaps = ["googlemaps", "google-maps-places"]
 matplotlib = ["matplotlib"]
-mcp = ["mcp>=1.9.2"]
 mem0 = ["mem0ai"]
 memori = ["memori>=3.0.5"]
 newspaper = ["newspaper4k", "lxml_html_clean"]
