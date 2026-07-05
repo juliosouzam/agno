@@ -1,8 +1,7 @@
-"""Credential-handling guardrails: plaintext-HTTP refusal, name validation, redaction."""
+"""Credential-handling guardrails: plaintext-HTTP refusal, name validation."""
 
 import pytest
 
-from agnoctl.clients.claude_code import _redact_token
 from agnoctl.commands._common import _is_loopback_host, require_secure_url, validate_project_name
 from agnoctl.errors import CLIError
 
@@ -78,18 +77,3 @@ def test_validate_project_name_accepts_flat_names(name):
 def test_validate_project_name_rejects_traversal_and_separators(name):
     with pytest.raises(CLIError):
         validate_project_name(name)
-
-
-# -- token redaction -------------------------------------------------------------------
-
-
-def test_redact_token_scrubs_bearer_and_raw():
-    token = "agno_pat_secretvalue"
-    text = "command failed: --header Authorization: Bearer " + token + " (raw " + token + ")"
-    scrubbed = _redact_token(text, token)
-    assert token not in scrubbed
-    assert "Bearer ***" in scrubbed
-
-
-def test_redact_token_noop_without_token():
-    assert _redact_token("nothing to hide", None) == "nothing to hide"

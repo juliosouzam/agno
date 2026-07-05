@@ -1,8 +1,11 @@
 """Claude Code adapter.
 
-Preferred write path: the `claude mcp add` CLI (the sanctioned interface; it owns config
-placement). Fallback when the binary is missing: edit the config file for the requested
-scope directly — ~/.claude.json (user scope) or <cwd>/.mcp.json (project scope).
+Write path depends on whether the entry carries a token. A token on `claude mcp add`'s
+argv would be visible in the local process list (and captured by execve audit logs), so a
+token-bearing entry is written to the config file directly at 0600 — ~/.claude.json (user
+scope) or <cwd>/.mcp.json (project scope). A tokenless entry goes through the `claude mcp
+add` CLI (the sanctioned interface; it owns config placement) when the binary is present,
+falling back to the same file write otherwise.
 
 Reads follow Claude Code's same-name resolution precedence: local scope
 (~/.claude.json projects.<cwd>.mcpServers) > project (.mcp.json) > user
@@ -10,9 +13,8 @@ Reads follow Claude Code's same-name resolution precedence: local scope
 adapter reports is the one Claude Code will actually use, which is how connect
 detects stale shadowing entries after a write.
 
-Note: the CLI write path passes the Authorization header via argv, which is transiently
-visible in the local process list. The file fallback avoids this; both paths end with a
-read-back so a write that did not take effect is reported, never assumed.
+After the write, connect reads the entry back and re-verifies it, so a write that did not
+take effect (or a shadowing entry) is reported, never assumed.
 """
 
 import shutil
@@ -33,14 +35,6 @@ from agnoctl.clients.base import (
 from agnoctl.errors import CLIError
 
 SUBPROCESS_TIMEOUT = 60.0
-
-
-def _redact_token(text: str, token: Optional[str]) -> str:
-    """Strip the bearer token (raw and as an Authorization value) out of a string before
-    it reaches a user-facing error or JSON output."""
-    if not token:
-        return text
-    return text.replace(bearer_header(token), "Bearer ***").replace(token, "***")
 
 
 def _entry_from_servers(servers: Dict[str, Any], server_name: str, location: str) -> Optional[ExistingEntry]:
@@ -114,8 +108,11 @@ class ClaudeCodeAdapter(ClientAdapter):
         return None
 
     def write(self, server_name: str, url: str, token: Optional[str]) -> WriteResult:
-        if self._which("claude") is not None:
-            self._write_via_cli(server_name, url, token)
+        # A token on `claude mcp add`'s argv would be exposed to `ps`/proc and execve audit
+        # logs, so a token-bearing entry is written to the config file directly (0600). The
+        # sanctioned CLI is used only for tokenless entries, where there is no secret to leak.
+        if token is None and self._which("claude") is not None:
+            self._write_via_cli(server_name, url)
             return WriteResult(method="cli", location="claude mcp add (scope: " + self.scope + ")")
         if self.scope == "project":
             return self._write_config_file(self._project_config_path, server_name, url, token)
@@ -135,13 +132,10 @@ class ClaudeCodeAdapter(ClientAdapter):
         except subprocess.TimeoutExpired:
             raise CLIError("The claude CLI did not respond within " + str(int(SUBPROCESS_TIMEOUT)) + "s: " + args[2])
 
-    def _write_via_cli(self, server_name: str, url: str, token: Optional[str]) -> None:
-        # Variadic flags (--header) must come after the name and URL, or Claude Code's
-        # parser consumes the positional arguments.
+    def _write_via_cli(self, server_name: str, url: str) -> None:
+        # Reached only for tokenless entries (see write): no --header, so nothing sensitive
+        # rides on argv and the CLI error text carries no secret to redact.
         add_args: List[str] = ["claude", "mcp", "add", "--transport", "http", "--scope", self.scope, server_name, url]
-        if token:
-            add_args += ["--header", "Authorization: " + bearer_header(token)]
-
         result = self._run_claude(add_args)
         if result.returncode != 0 and "already exists" in (result.stderr or "").lower():
             remove = self._run_claude(["claude", "mcp", "remove", "--scope", self.scope, server_name])
@@ -149,9 +143,7 @@ class ClaudeCodeAdapter(ClientAdapter):
                 result = self._run_claude(add_args)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            # The token rode in via argv; if the CLI echoed the command back in its error,
-            # keep the secret out of the message we print / return as JSON.
-            raise CLIError("claude mcp add failed: " + (_redact_token(detail, token) or "unknown error"))
+            raise CLIError("claude mcp add failed: " + (detail or "unknown error"))
 
     # -- File fallback ------------------------------------------------------------
 

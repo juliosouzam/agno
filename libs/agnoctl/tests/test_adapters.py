@@ -48,21 +48,37 @@ class FakeRunner:
 # -- Claude Code -----------------------------------------------------------------------
 
 
-def test_claude_write_via_cli_flag_order(tmp_path: Path):
+def test_claude_token_write_never_reaches_cli_argv(tmp_path: Path):
+    """Even with `claude` installed, a token-bearing write must not shell out: the token
+    would be visible on `claude mcp add`'s argv (ps/proc, execve audit logs). It is written
+    to the config file directly at 0600 instead."""
     runner = FakeRunner()
     adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: "/usr/bin/claude", runner=runner)
     result = adapter.write("agno", URL, TOKEN)
 
+    assert runner.calls == []  # the CLI (and thus argv) was never invoked
+    assert result.method == "file"
+    entry = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["agno"]
+    assert entry["headers"]["Authorization"] == "Bearer " + TOKEN
+    assert _mode(tmp_path / ".claude.json") == 0o600
+
+
+def test_claude_tokenless_write_via_cli_flag_order(tmp_path: Path):
+    """A tokenless entry goes through the sanctioned CLI when `claude` is installed; with no
+    token there is no --header, so nothing sensitive lands on argv."""
+    runner = FakeRunner()
+    adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: "/usr/bin/claude", runner=runner)
+    result = adapter.write("agno", URL, None)
+
     assert result.method == "cli"
     args = runner.calls[0]
     assert args[:3] == ["claude", "mcp", "add"]
-    # Variadic --header must come after the positional name and URL.
-    assert args.index("--header") > args.index("agno") > args.index("--transport")
-    assert args.index("--header") > args.index(URL)
-    assert "Authorization: Bearer " + TOKEN in args
+    assert "--header" not in args  # no token, nothing on argv to expose
+    # Flags precede the positional name and URL, or Claude Code's parser eats the positionals.
+    assert args.index("--transport") < args.index("agno") < args.index(URL)
 
 
-def test_claude_write_cli_retries_on_already_exists(tmp_path: Path):
+def test_claude_tokenless_cli_retries_on_already_exists(tmp_path: Path):
     runner = FakeRunner(
         results=[
             subprocess.CompletedProcess([], 1, stdout="", stderr="MCP server agno already exists"),
@@ -71,7 +87,7 @@ def test_claude_write_cli_retries_on_already_exists(tmp_path: Path):
         ]
     )
     adapter = ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: "/usr/bin/claude", runner=runner)
-    adapter.write("agno", URL, TOKEN)
+    adapter.write("agno", URL, None)
     assert runner.calls[1][:3] == ["claude", "mcp", "remove"]
     assert runner.calls[2][:3] == ["claude", "mcp", "add"]
 
