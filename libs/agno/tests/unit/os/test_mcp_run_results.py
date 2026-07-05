@@ -12,6 +12,7 @@ pytest.importorskip("fastmcp")
 
 from fastmcp import Client  # noqa: E402
 
+import agno.os.mcp as mcp_mod  # noqa: E402
 from agno.agent import Agent  # noqa: E402
 from agno.media import Image  # noqa: E402
 from agno.models.message import Message  # noqa: E402
@@ -45,6 +46,27 @@ def _stub_arun_stream(component, *items):
             yield item
 
     component.arun = fake_arun  # type: ignore[method-assign]
+
+
+@pytest.fixture(autouse=True)
+def _resolve_by_identity(monkeypatch):
+    """Resolve run tools to the in-memory (stubbed) component instance.
+
+    Production ``_resolve_run_component`` deep-copies (create_fresh) and consults the DB
+    registry, which would discard the ``.arun`` stub these tests set on the instance. The
+    real resolution behaviour (create_fresh isolation, db/registry, factories) is covered
+    by test_mcp_resolution.py.
+    """
+
+    async def _resolve(os, kind, component_id, *, user_id, session_id):
+        pool = {"agents": os.agents, "teams": os.teams, "workflows": os.workflows}.get(kind) or []
+        for component in pool:
+            if getattr(component, "id", None) == component_id:
+                return component
+        singular = {"agents": "Agent", "teams": "Team", "workflows": "Workflow"}[kind]
+        raise Exception(f"{singular} {component_id} not found")
+
+    monkeypatch.setattr(mcp_mod, "_resolve_run_component", _resolve)
 
 
 def _full_run_output() -> RunOutput:

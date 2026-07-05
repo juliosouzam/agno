@@ -47,7 +47,7 @@ def attach_routes(
     # ============= AGENTS =============
     @router.get("/agents/{id}/.well-known/agent-card.json")
     async def get_agent_card(request: Request, id: str):
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -121,7 +121,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_run_agent)
 
         # 1. Get the Agent to run
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if not isinstance(agent, (Agent, RemoteAgent)):
@@ -205,7 +205,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if isinstance(agent, RemoteAgent):
@@ -241,7 +241,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if isinstance(agent, RemoteAgent):
@@ -295,7 +295,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_stream_agent)
 
         # 1. Get the Agent to run
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -333,7 +333,7 @@ def attach_routes(
     # ============= TEAMS =============
     @router.get("/teams/{id}/.well-known/agent-card.json")
     async def get_team_card(request: Request, id: str):
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -405,7 +405,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_run_team)
 
         # 1. Get the Team to run
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -487,7 +487,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
         if isinstance(team, RemoteTeam):
@@ -521,7 +521,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
         if isinstance(team, RemoteTeam):
@@ -573,7 +573,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_stream_team)
 
         # 1. Get the Team to run
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -611,7 +611,7 @@ def attach_routes(
     # ============= WORKFLOWS =============
     @router.get("/workflows/{id}/.well-known/agent-card.json")
     async def get_workflow_card(request: Request, id: str):
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -683,7 +683,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_run_workflow)
 
         # 1. Get the Workflow to run
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -768,7 +768,7 @@ def attach_routes(
         kwargs = await get_request_kwargs(request, a2a_stream_workflow)
 
         # 1. Get the Workflow to run
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -863,11 +863,11 @@ def attach_routes(
             )
         entity: Optional[Union[Agent, RemoteAgent, AgentProtocol, Team, RemoteTeam, Workflow, RemoteWorkflow]] = None
         if agents:
-            entity = get_agent_by_id(agent_id, agents)
+            entity = get_agent_by_id(agent_id, agents, create_fresh=True)
         if not entity and teams:
-            entity = get_team_by_id(agent_id, teams)
+            entity = get_team_by_id(agent_id, teams, create_fresh=True)
         if not entity and workflows:
-            entity = get_workflow_by_id(agent_id, workflows)
+            entity = get_workflow_by_id(agent_id, workflows, create_fresh=True)
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
@@ -977,11 +977,11 @@ def attach_routes(
             )
         entity: Optional[Union[Agent, RemoteAgent, AgentProtocol, Team, RemoteTeam, Workflow, RemoteWorkflow]] = None
         if agents:
-            entity = get_agent_by_id(agent_id, agents)
+            entity = get_agent_by_id(agent_id, agents, create_fresh=True)
         if not entity and teams:
-            entity = get_team_by_id(agent_id, teams)
+            entity = get_team_by_id(agent_id, teams, create_fresh=True)
         if not entity and workflows:
-            entity = get_workflow_by_id(agent_id, workflows)
+            entity = get_workflow_by_id(agent_id, workflows, create_fresh=True)
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 

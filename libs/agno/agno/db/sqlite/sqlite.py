@@ -14,6 +14,7 @@ from agno.db.schemas.culture import CulturalKnowledge
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
+from agno.db.schemas.service_accounts import resolve_service_account_sort_column
 from agno.db.sqlite.schemas import get_table_schema_definition
 from agno.db.sqlite.utils import (
     apply_sorting,
@@ -5188,9 +5189,7 @@ class SqliteDb(BaseDb):
                 offset = (page - 1) * limit
 
                 # Apply sorting
-                if sort_by not in {"created_at", "name", "last_used_at", "expires_at"}:
-                    sort_by = "created_at"
-                sort_column = table.c[sort_by]
+                sort_column = table.c[resolve_service_account_sort_column(sort_by)]
                 order_by = sort_column.asc() if sort_order == "asc" else sort_column.desc()
 
                 # Get paginated results

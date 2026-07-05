@@ -249,12 +249,18 @@ class ServiceAccountVerifier:
         last_used_write_interval: int = 60,
         cache_ttl_seconds: int = 30,
         cache_max_entries: int = 2048,
+        last_used_max_entries: int = 2048,
     ):
         self.db = db
         self.last_used_write_interval = last_used_write_interval
+        self.last_used_max_entries = last_used_max_entries
         self._limiter = _FailedLookupLimiter()
         self._cache = _VerificationCache(ttl_seconds=cache_ttl_seconds, max_entries=cache_max_entries)
-        self._last_used_writes: Dict[str, float] = {}
+        # Bounded LRU of the last last_used_at write time per account (monotonic seconds),
+        # so a worker that verifies many distinct accounts cannot leak memory. Bounded like
+        # its siblings _cache and _limiter; eviction only drops the throttle memory, so an
+        # evicted account just gets one extra last_used_at write next time it authenticates.
+        self._last_used_writes: "OrderedDict[str, float]" = OrderedDict()
 
     def invalidate(self, token_hash: str) -> None:
         """Evict a cached verification. Call on revoke so it takes effect immediately on
@@ -309,17 +315,24 @@ class ServiceAccountVerifier:
         return ServiceAccountVerification(status=VerificationStatus.INVALID)
 
     async def _maybe_touch_last_used(self, account: ServiceAccount) -> None:
-        now = time.time()
-        last_write = self._last_used_writes.get(account.id, 0.0)
-        if now - last_write < self.last_used_write_interval:
+        # Throttle on the monotonic clock (immune to wall-clock steps that could otherwise
+        # suppress writes indefinitely); persist the wall-clock time as the actual value.
+        now_monotonic = time.monotonic()
+        last_write = self._last_used_writes.get(account.id)
+        if last_write is not None and now_monotonic - last_write < self.last_used_write_interval:
+            self._last_used_writes.move_to_end(account.id)
             return
-        self._last_used_writes[account.id] = now
+        self._last_used_writes[account.id] = now_monotonic
+        self._last_used_writes.move_to_end(account.id)
+        while len(self._last_used_writes) > self.last_used_max_entries:
+            self._last_used_writes.popitem(last=False)
+        wall_now = int(time.time())
         try:
             if isinstance(self.db, AsyncBaseDb):
-                await self.db.update_service_account(account.id, return_record=False, last_used_at=int(now))
+                await self.db.update_service_account(account.id, return_record=False, last_used_at=wall_now)
             else:
                 await run_in_threadpool(
-                    self.db.update_service_account, account.id, return_record=False, last_used_at=int(now)
+                    self.db.update_service_account, account.id, return_record=False, last_used_at=wall_now
                 )
         except Exception as e:
             log_warning(f"Could not update last_used_at for service account '{account.name}': {e}")

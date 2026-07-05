@@ -9,6 +9,16 @@ from agno.utils.dttm import now_epoch_s, to_epoch_s
 # with a human JWT sub.
 SERVICE_ACCOUNT_PRINCIPAL_PREFIX = "sa:"
 
+# Columns a service-account listing may be sorted by. Shared by every DB backend's
+# get_service_accounts so the whitelist cannot drift between them, and so an arbitrary
+# sort_by can never reach table.c[...] unclamped.
+SERVICE_ACCOUNT_SORTABLE_COLUMNS = frozenset({"created_at", "name", "last_used_at", "expires_at"})
+
+
+def resolve_service_account_sort_column(sort_by: str) -> str:
+    """Clamp a caller-supplied sort_by to a known-safe column, defaulting to created_at."""
+    return sort_by if sort_by in SERVICE_ACCOUNT_SORTABLE_COLUMNS else "created_at"
+
 
 @dataclass
 class ServiceAccount:

@@ -24,10 +24,10 @@ from agno.os.schema import (
 from agno.os.services import runs as run_service
 from agno.os.services import sessions as session_service
 from agno.os.utils import (
-    get_agent_by_id,
     get_db,
-    get_team_by_id,
-    get_workflow_by_id,
+    resolve_agent,
+    resolve_team,
+    resolve_workflow,
 )
 from agno.remote.base import RemoteDb
 from agno.run.agent import RunEvent, RunOutput
@@ -202,6 +202,19 @@ def _scoped_caller_user_id() -> Optional[str]:
     except RuntimeError:
         return None
     return get_scoped_user_id(request)
+
+
+def _scoped_read_user_id(caller_user_id: Optional[str]) -> Optional[str]:
+    """The user_id a session-read tool should filter by.
+
+    Mirrors the REST session routes (``resolve_db_and_scope(fallback_user_id=user_id)``): a
+    scoped, non-admin caller under user isolation is pinned to their own id, while admins and
+    non-isolation deployments honour the client-supplied ``user_id``. This differs from
+    :func:`_resolve_user_id` (used by the run tools for attribution), which always forces the
+    authenticated id -- so an admin can still read another user's sessions over MCP, as on REST.
+    """
+    scoped = _scoped_caller_user_id()
+    return scoped if scoped is not None else caller_user_id
 
 
 @functools.lru_cache(maxsize=1)
@@ -450,26 +463,98 @@ async def _consume_workflow_stream(
     return final
 
 
-def _make_lifecycle_resolver(os: "AgentOS"):
-    """Bind the run-lifecycle component resolver + ownership verifier to an AgentOS.
+def _http_request_or_none() -> Optional[Any]:
+    """The in-flight Starlette request, or None when there is none (e.g. stdio transport)."""
+    from fastmcp.server.dependencies import get_http_request
 
-    Both continue_run and cancel_run must resolve exactly one component and, for a
-    scoped (non-admin) caller, prove the run lives in a session they own -- the same
-    gate the REST cancel/continue endpoints enforce before touching a run.
+    try:
+        return get_http_request()
+    except RuntimeError:
+        return None
+
+
+def _classify_lifecycle_target(
+    agent_id: Optional[str], team_id: Optional[str], workflow_id: Optional[str]
+) -> "tuple[Literal['agents', 'teams', 'workflows'], str]":
+    """Map the exactly-one component id to its (type, id), without resolving it.
+
+    Kept separate from resolution so the scope gate runs before we deep-copy or invoke a
+    factory for the target.
     """
+    provided = [
+        (kind, cid) for kind, cid in (("agents", agent_id), ("teams", team_id), ("workflows", workflow_id)) if cid
+    ]
+    if len(provided) != 1:
+        raise Exception("Provide exactly one of agent_id, team_id, or workflow_id")
+    return provided[0]  # type: ignore[return-value]
 
-    def resolve(
-        agent_id: Optional[str], team_id: Optional[str], workflow_id: Optional[str]
-    ) -> "tuple[Any, Literal['agents', 'teams', 'workflows'], str]":
-        provided = [cid for cid in (agent_id, team_id, workflow_id) if cid]
-        if len(provided) != 1:
-            raise Exception("Provide exactly one of agent_id, team_id, or workflow_id")
-        if agent_id:
-            return get_agent_by_id(agent_id, os.agents), "agents", agent_id
-        if team_id:
-            return get_team_by_id(team_id, os.teams), "teams", team_id
-        assert workflow_id is not None  # exactly-one check above guarantees this
-        return get_workflow_by_id(workflow_id, os.workflows), "workflows", workflow_id
+
+async def _resolve_run_component(
+    os: "AgentOS",
+    kind: "Literal['agents', 'teams', 'workflows']",
+    component_id: str,
+    *,
+    user_id: Optional[str],
+    session_id: Optional[str],
+) -> Any:
+    """Resolve a component for a run/lifecycle tool exactly as the REST routes do.
+
+    Delegates to the shared ``resolve_agent`` / ``resolve_team`` / ``resolve_workflow``
+    helpers so the MCP surface matches REST on all three axes the low-level lookup
+    otherwise dropped:
+
+    - ``create_fresh=True`` (via the resolvers): each run gets a ``deep_copy()`` instead of
+      the shared singleton, so concurrent MCP runs cannot contaminate each other's state.
+    - ``db=os.db, registry=os.registry``: components registered in the DB registry (not the
+      in-memory list) resolve and run, just like over REST.
+    - factory ``RequestContext`` built from the in-flight HTTP request, so ``AgentFactory``
+      entries resolve instead of raising.
+
+    The resolvers raise ``HTTPException``; MCP tools surface plain exceptions, so map it.
+    """
+    from fastapi import HTTPException
+
+    request = _http_request_or_none()
+    try:
+        if kind == "agents":
+            return await resolve_agent(
+                component_id, os.agents, os.db, os.registry, request=request, user_id=user_id, session_id=session_id
+            )
+        if kind == "teams":
+            return await resolve_team(
+                component_id,
+                os.teams,
+                db=os.db,
+                registry=os.registry,
+                request=request,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        return await resolve_workflow(
+            component_id,
+            os.workflows,
+            db=os.db,
+            registry=os.registry,
+            request=request,
+            user_id=user_id,
+            session_id=session_id,
+        )
+    except HTTPException as e:
+        # Keep the id in the not-found message (the resolvers say only "Agent not found"),
+        # matching the pre-v2.7 MCP error text and giving the client the id it passed.
+        if e.status_code == 404:
+            singular = {"agents": "Agent", "teams": "Team", "workflows": "Workflow"}[kind]
+            raise Exception(f"{singular} {component_id} not found")
+        raise Exception(e.detail if isinstance(e.detail, str) else str(e.detail))
+
+
+def _make_run_ownership_verifier(os: "AgentOS"):
+    """Bind the run-lifecycle ownership verifier to an AgentOS.
+
+    continue_run and cancel_run must, for a scoped (non-admin) caller, prove the run lives
+    in a session they own -- the same gate the REST cancel/continue endpoints enforce
+    before touching a run.
+    """
 
     async def verify(
         component: Any,
@@ -497,7 +582,7 @@ def _make_lifecycle_resolver(os: "AgentOS"):
         except session_service.RunOwnershipError as e:
             raise Exception(str(e))
 
-    return resolve, verify
+    return verify
 
 
 def build_mcp_server(
@@ -523,7 +608,7 @@ def build_mcp_server(
     result_mode = mcp_config.result_mode if mcp_config is not None else "trimmed"
 
     # Component resolution + ownership gate shared by continue_run and cancel_run.
-    _resolve_lifecycle_component, _verify_run_ownership = _make_lifecycle_resolver(os)
+    _verify_run_ownership = _make_run_ownership_verifier(os)
 
     @register_builtin_tool(
         name="get_agentos_config",
@@ -538,15 +623,64 @@ def build_mcp_server(
     )  # type: ignore
     async def config() -> Dict[str, Any]:
         _require_tool_scopes("GET", "/config")
+        from agno.db.base import BaseDb
+
+        request = _http_request_or_none()
+        # Filter the roster to the caller's per-resource scopes, exactly as the REST list
+        # routes do -- but only when authorization is enforced (open/dev instances and
+        # unscoped tokens see everything). A caller scoped to one agent must not be able to
+        # enumerate the whole deployment here when it cannot over GET /agents.
+        authorization_enabled = bool(getattr(getattr(request, "state", None), "authorization_enabled", False))
+
+        def _accessible(resources: Any, resource_type: str) -> List[Any]:
+            items = list(resources or [])
+            if authorization_enabled and request is not None and items:
+                from agno.os.auth import filter_resources_by_access
+
+                return filter_resources_by_access(request, items, resource_type)
+            return items
+
+        agents_out = [AgentSummaryResponse.from_agent(a).model_dump() for a in _accessible(os.agents, "agents")]
+        teams_out = [TeamSummaryResponse.from_team(t).model_dump() for t in _accessible(os.teams, "teams")]
+        workflows_out = [
+            WorkflowSummaryResponse.from_workflow(w).model_dump() for w in _accessible(os.workflows, "workflows")
+        ]
+
+        # Surface components registered in the DB registry too, so anything created there is
+        # discoverable -- and therefore runnable -- over MCP, matching the REST list routes.
+        if os.db is not None and isinstance(os.db, BaseDb):
+            from agno.agent.agent import get_agents
+            from agno.team.team import get_teams
+            from agno.workflow.workflow import get_workflows
+
+            registry = os.registry
+            agent_exclude = (registry.get_agent_ids() if registry else None) or None
+            for a in _accessible(
+                get_agents(db=os.db, registry=registry, exclude_component_ids=agent_exclude), "agents"
+            ):
+                try:
+                    agents_out.append(AgentSummaryResponse.from_agent(a).model_dump())
+                except Exception:
+                    logger.exception("Error summarizing DB agent for get_agentos_config")
+            team_exclude = (registry.get_team_ids() if registry else None) or None
+            for t in _accessible(get_teams(db=os.db, registry=registry, exclude_component_ids=team_exclude), "teams"):
+                try:
+                    teams_out.append(TeamSummaryResponse.from_team(t).model_dump())
+                except Exception:
+                    logger.exception("Error summarizing DB team for get_agentos_config")
+            for w in _accessible(get_workflows(db=os.db, registry=registry), "workflows"):
+                try:
+                    workflows_out.append(WorkflowSummaryResponse.from_workflow(w, is_component=True).model_dump())
+                except Exception:
+                    logger.exception("Error summarizing DB workflow for get_agentos_config")
+
         return {
             "os_id": os.id or "AgentOS",
             "description": os.description,
             "databases": [db.id for db_list in os.dbs.values() for db in db_list],
-            "agents": [AgentSummaryResponse.from_agent(a).model_dump() for a in os.agents] if os.agents else [],
-            "teams": [TeamSummaryResponse.from_team(t).model_dump() for t in os.teams] if os.teams else [],
-            "workflows": [WorkflowSummaryResponse.from_workflow(w).model_dump() for w in os.workflows]
-            if os.workflows
-            else [],
+            "agents": agents_out,
+            "teams": teams_out,
+            "workflows": workflows_out,
         }
 
     # ==================== Core Run Tools ====================
@@ -570,10 +704,8 @@ def build_mcp_server(
         session_id: Optional[str] = None,
     ) -> ToolResult:
         _require_tool_scopes("POST", f"/agents/{agent_id}/runs")
-        agent = get_agent_by_id(agent_id, os.agents)
-        if agent is None:
-            raise Exception(f"Agent {agent_id} not found")
         user_id = _resolve_user_id(user_id)
+        agent = await _resolve_run_component(os, "agents", agent_id, user_id=user_id, session_id=session_id)
         run_output = await _run_agentic_component(
             ctx, agent, message, user_id, session_id, label=f"Agent {agent.name or agent_id}"
         )
@@ -596,10 +728,8 @@ def build_mcp_server(
         session_id: Optional[str] = None,
     ) -> ToolResult:
         _require_tool_scopes("POST", f"/teams/{team_id}/runs")
-        team = get_team_by_id(team_id, os.teams)
-        if team is None:
-            raise Exception(f"Team {team_id} not found")
         user_id = _resolve_user_id(user_id)
+        team = await _resolve_run_component(os, "teams", team_id, user_id=user_id, session_id=session_id)
         run_output = await _run_agentic_component(
             ctx, team, message, user_id, session_id, label=f"Team {team.name or team_id}"
         )
@@ -625,10 +755,8 @@ def build_mcp_server(
         from agno.workflow.remote import RemoteWorkflow
 
         _require_tool_scopes("POST", f"/workflows/{workflow_id}/runs")
-        workflow = get_workflow_by_id(workflow_id, os.workflows)
-        if workflow is None:
-            raise Exception(f"Workflow {workflow_id} not found")
         user_id = _resolve_user_id(user_id)
+        workflow = await _resolve_run_component(os, "workflows", workflow_id, user_id=user_id, session_id=session_id)
         if isinstance(workflow, RemoteWorkflow):
             run_output = await workflow.arun(message, user_id=user_id, session_id=session_id)
             return build_run_tool_result(run_output, result_mode)
@@ -668,9 +796,12 @@ def build_mcp_server(
         requirements: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
     ) -> ToolResult:
-        component, component_type, component_id = _resolve_lifecycle_component(agent_id, team_id, workflow_id)
+        component_type, component_id = _classify_lifecycle_target(agent_id, team_id, workflow_id)
         _require_tool_scopes("POST", f"/{component_type}/{component_id}/runs/{run_id}/continue")
         user_id = _resolve_user_id(user_id)
+        component = await _resolve_run_component(
+            os, component_type, component_id, user_id=user_id, session_id=session_id
+        )
         await _verify_run_ownership(component, component_type, component_id, session_id, run_id)
         # A run paused on an admin-required approval must be resolved by an admin, not
         # self-continued by its initiator; same gate the REST /continue route enforces.
@@ -705,8 +836,9 @@ def build_mcp_server(
         team_id: Optional[str] = None,
         workflow_id: Optional[str] = None,
     ) -> str:
-        component, component_type, component_id = _resolve_lifecycle_component(agent_id, team_id, workflow_id)
+        component_type, component_id = _classify_lifecycle_target(agent_id, team_id, workflow_id)
         _require_tool_scopes("POST", f"/{component_type}/{component_id}/runs/{run_id}/cancel")
+        component = await _resolve_run_component(os, component_type, component_id, user_id=None, session_id=session_id)
         await _verify_run_ownership(component, component_type, component_id, session_id, run_id)
         await run_service.cancel_component_run(component, run_id)
         return f"Run {run_id} cancellation requested"
@@ -738,7 +870,7 @@ def build_mcp_server(
         db_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         _require_tool_scopes("GET", "/sessions")
-        user_id = _resolve_user_id(user_id)
+        user_id = _scoped_read_user_id(user_id)
         db = await get_db(os.dbs, db_id)
         session_type_enum = SessionType(session_type)
 
@@ -796,7 +928,7 @@ def build_mcp_server(
         db_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         _require_tool_scopes("GET", f"/sessions/{session_id}/runs")
-        user_id = _resolve_user_id(user_id)
+        user_id = _scoped_read_user_id(user_id)
         db = await get_db(os.dbs, db_id)
         session_type_enum = SessionType(session_type) if session_type else None
 

@@ -25,6 +25,7 @@ from agno.db.schemas.culture import CulturalKnowledge
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
+from agno.db.schemas.service_accounts import resolve_service_account_sort_column
 from agno.db.utils import deserialize_session, deserialize_sessions, json_serializer
 from agno.run.base import RunStatus
 from agno.session import AgentSession, Session, TeamSession, WorkflowSession
@@ -5337,9 +5338,7 @@ class PostgresDb(BaseDb):
                 offset = (page - 1) * limit
 
                 # Validate sorting parameters
-                if sort_by not in {"created_at", "name", "last_used_at", "expires_at"}:
-                    sort_by = "created_at"
-                sort_col = table.c[sort_by]
+                sort_col = table.c[resolve_service_account_sort_column(sort_by)]
                 order_by = sort_col.asc() if sort_order == "asc" else sort_col.desc()
 
                 # Get paginated results

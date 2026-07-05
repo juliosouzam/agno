@@ -46,7 +46,12 @@ from agno.os.schema import (
     ValidationErrorResponse,
     WorkflowSummaryResponse,
 )
-from agno.os.scopes import AgentOSScope, has_required_scopes
+from agno.os.scopes import (
+    AgentOSScope,
+    get_default_scope_mappings,
+    get_required_scopes_for_route,
+    has_required_scopes,
+)
 from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFIX
 from agno.os.service_accounts import VerificationStatus
 from agno.os.settings import AgnoAPISettings
@@ -318,6 +323,12 @@ def get_websocket_router(
         ws_audience = ws_jwt_config.get("audience")
         ws_admin_scope: str = ws_jwt_config.get("admin_scope") or AgentOSScope.ADMIN.value
         ws_user_isolation_enabled: bool = bool(ws_jwt_config.get("user_isolation", False))
+        # Derive the scope required to run a workflow from the shared scope-mapping table
+        # (same source REST and MCP use) instead of hardcoding "workflows:run" here, so a
+        # change to the mapping applies to the WebSocket surface automatically.
+        ws_workflow_run_scopes: List[str] = get_required_scopes_for_route(
+            get_default_scope_mappings(), "POST", "/workflows/_/runs"
+        )
         jwt_auth_enabled = jwt_validator is not None
         # auth_required is True when JWTMiddleware is configured, even if the
         # validator could not be constructed (e.g. bad JWKS path). This prevents
@@ -486,7 +497,7 @@ def get_websocket_router(
                         user_scopes = websocket_user_context.get("scopes", [])
                         if not has_required_scopes(
                             user_scopes,
-                            ["workflows:run"],
+                            ws_workflow_run_scopes,
                             resource_type="workflows",
                             resource_id=workflow_id,
                             admin_scope=ws_admin_scope,
@@ -546,7 +557,7 @@ def get_websocket_router(
                         user_scopes = websocket_user_context.get("scopes", [])
                         if not has_required_scopes(
                             user_scopes,
-                            ["workflows:run"],
+                            ws_workflow_run_scopes,
                             resource_type="workflows",
                             resource_id=workflow_id_for_reconnect,
                             admin_scope=ws_admin_scope,
@@ -577,7 +588,7 @@ def get_websocket_router(
                         user_scopes = websocket_user_context.get("scopes", [])
                         if not has_required_scopes(
                             user_scopes,
-                            ["workflows:run"],
+                            ws_workflow_run_scopes,
                             resource_type="workflows",
                             resource_id=workflow_id,
                             admin_scope=ws_admin_scope,

@@ -171,9 +171,11 @@ async def get_session_runs(
     filtered: List[Dict[str, Any]] = []
     for run in runs:
         created_at = run.get("created_at")
-        if created_after and created_at and created_at < created_after:
+        # `is not None` (not truthiness): a bound of 0 is a real epoch timestamp, and a run
+        # whose created_at is 0 must still be filtered rather than silently kept.
+        if created_after is not None and created_at is not None and created_at < created_after:
             continue
-        if created_before and created_at and created_at > created_before:
+        if created_before is not None and created_at is not None and created_at > created_before:
             continue
         filtered.append(run)
 

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional, Set
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.concurrency import run_in_threadpool
 
 from agno.os.scopes import (
     get_accessible_resource_ids,
@@ -558,7 +559,9 @@ async def run_continuation_blocked_reason(
         if asyncio.iscoroutinefunction(fn):
             result = await fn(run_id=run_id, status="pending", approval_type="required")
         else:
-            result = fn(run_id=run_id, status="pending", approval_type="required")
+            # Sync DB drivers do blocking I/O; keep it off the event loop, matching the
+            # service-account verifier and the service-accounts router.
+            result = await run_in_threadpool(fn, run_id=run_id, status="pending", approval_type="required")
         approvals = result[0] if isinstance(result, tuple) else result
         if approvals:
             return "This run requires admin approval before it can be continued"

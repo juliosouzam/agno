@@ -36,6 +36,47 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
+def _name_variants(server_name: str) -> tuple:
+    """The bare and quoted spellings of a server name that TOML treats as the same key."""
+    return (server_name, '"' + server_name + '"', "'" + server_name + "'")
+
+
+def _owned_header(stripped: str, server_name: str) -> bool:
+    """Whether a table header line belongs to our server: [mcp_servers.<name>] (bare or
+    quoted) and its dotted subtables ([mcp_servers.<name>.foo])."""
+    for variant in _name_variants(server_name):
+        prefix = "[mcp_servers." + variant
+        if stripped.startswith(prefix + "]") or stripped.startswith(prefix + "."):
+            return True
+    return False
+
+
+def _is_inline_entry(stripped: str, server_name: str) -> bool:
+    """Whether a line is an inline ``<name> = { ... }`` table for our server inside a bare
+    ``[mcp_servers]`` table (the form `codex mcp add`'s table syntax does not produce, but a
+    hand-written config can). TOML inline tables are single-line, so one line is enough.
+
+    The value must actually start with ``{`` (an inline table): this is a line-by-line scan
+    with no multiline-string awareness, so requiring the inline-table form keeps a stray
+    ``<name> = ...`` line living inside some *other* key's triple-quoted string from being
+    matched and dropped, which would silently corrupt that string."""
+    if stripped.startswith("#") or "=" not in stripped:
+        return False
+    key, _, value = stripped.partition("=")
+    if key.strip() not in _name_variants(server_name):
+        return False
+    return value.lstrip().startswith("{")
+
+
+def _ci_get(mapping: Dict[str, Any], name: str) -> Any:
+    """Case-insensitive lookup — TOML keys are case-sensitive, but HTTP header names are
+    not, so a hand-written ``authorization`` must be found just like ``Authorization``."""
+    for key, value in mapping.items():
+        if isinstance(key, str) and key.lower() == name.lower():
+            return value
+    return None
+
+
 class CodexAdapter(ClientAdapter):
     key = "codex"
 
@@ -64,7 +105,7 @@ class CodexAdapter(ClientAdapter):
             headers = {}
         return ExistingEntry(
             url=url,
-            token=token_from_authorization(headers.get("Authorization")),
+            token=token_from_authorization(_ci_get(headers, "Authorization")),
             location=str(self.config_path),
         )
 
@@ -114,19 +155,26 @@ class CodexAdapter(ClientAdapter):
 
     @staticmethod
     def _replace_section(text: str, server_name: str, block: str) -> str:
-        """Replace (or append) the [mcp_servers.<name>] section, including dotted subtables.
+        """Replace (or append) our MCP server entry, whatever spelling the existing config uses.
+
+        Handles the three forms TOML treats as ``mcp_servers.<name>``: the standard
+        ``[mcp_servers.<name>]`` header (and its dotted subtables), a quoted header
+        (``[mcp_servers."<name>"]``), and an inline ``<name> = {...}`` key inside a bare
+        ``[mcp_servers]`` table. Missing any of these would append a duplicate definition
+        and the write's re-parse would then reject the file, making the client
+        unconnectable for that layout.
 
         Every table header — [table] and [[array-of-tables]] alike — ends the previous
         section, so content following the managed section is never swallowed. Trailing
         comment/blank lines inside the managed section that lead into the next header
         are preserved, since they usually describe what follows.
         """
-        section_prefix = "[mcp_servers." + server_name
         lines = text.splitlines()
         kept: List[str] = []
         dropped: List[str] = []
         insert_at: Optional[int] = None
-        in_section = False
+        in_section = False  # inside an owned [mcp_servers.<name>...] table
+        in_mcp_servers_table = False  # inside the bare [mcp_servers] table
 
         def flush_trailing_comments() -> None:
             trailing: List[str] = []
@@ -141,18 +189,23 @@ class CodexAdapter(ClientAdapter):
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("["):
-                owns = stripped.startswith(section_prefix + "]") or stripped.startswith(section_prefix + ".")
+                owns = _owned_header(stripped, server_name)
                 if in_section and not owns:
                     flush_trailing_comments()
                 in_section = owns
+                in_mcp_servers_table = stripped == "[mcp_servers]"
                 if owns:
                     if insert_at is None:
                         insert_at = len(kept)
                     continue
             if in_section:
                 dropped.append(line)
-            else:
-                kept.append(line)
+                continue
+            # Drop an inline `<name> = {...}` entry inside a bare [mcp_servers] table; the
+            # fresh block below becomes the single, canonical definition.
+            if in_mcp_servers_table and _is_inline_entry(stripped, server_name):
+                continue
+            kept.append(line)
         if in_section:
             dropped.clear()
 

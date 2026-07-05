@@ -16,6 +16,7 @@ from agno.db.schemas.culture import CulturalKnowledge
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
+from agno.db.schemas.service_accounts import resolve_service_account_sort_column
 from agno.db.sqlite.schemas import get_table_schema_definition
 from agno.db.sqlite.utils import (
     abulk_upsert_metrics,
@@ -4107,16 +4108,17 @@ class AsyncSqliteDb(AsyncBaseDb):
         Re-raises on database errors (instead of returning None) so callers can
         distinguish an unknown token from an unavailable database.
         """
+        table = await self._get_table(table_type="service_accounts")
+        if table is None:
+            # _get_table swallows connectivity errors and returns None, which is
+            # indistinguishable from "table not created yet". Probe the connection so
+            # a real outage propagates (fail closed) instead of reading as an unknown
+            # token; a genuinely absent table returns None. Kept OUTSIDE the try below so
+            # the structure matches the sync and postgres backends (all four fail closed).
+            async with self.async_session_factory() as sess:
+                await sess.execute(text("SELECT 1"))
+            return None
         try:
-            table = await self._get_table(table_type="service_accounts")
-            if table is None:
-                # _get_table swallows connectivity errors and returns None, which is
-                # indistinguishable from "table not created yet". Probe the connection
-                # so a real outage propagates (fail closed) instead of reading as an
-                # unknown token; a genuinely absent table returns None.
-                async with self.async_session_factory() as sess:
-                    await sess.execute(text("SELECT 1"))
-                return None
             async with self.async_session_factory() as sess:
                 result = await sess.execute(select(table).where(table.c.token_hash == token_hash))
                 row = result.fetchone()
@@ -4169,9 +4171,7 @@ class AsyncSqliteDb(AsyncBaseDb):
                 offset = (page - 1) * limit
 
                 # Apply sorting
-                if sort_by not in {"created_at", "name", "last_used_at", "expires_at"}:
-                    sort_by = "created_at"
-                sort_column = table.c[sort_by]
+                sort_column = table.c[resolve_service_account_sort_column(sort_by)]
                 order_by = sort_column.asc() if sort_order == "asc" else sort_column.desc()
 
                 # Get paginated results

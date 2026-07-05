@@ -235,6 +235,67 @@ def test_codex_replaces_dotted_subtables(tmp_path: Path):
     assert "Bearer old" not in adapter.config_path.read_text()
 
 
+def test_codex_replaces_inline_entry_under_mcp_servers_table(tmp_path: Path):
+    """A hand-written inline `agno = {...}` under [mcp_servers] is replaced, not duplicated
+    (which would make the re-parse reject the file and leave Codex unconnectable)."""
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[mcp_servers]\nagno = { url = "http://old:1/mcp" }\nkeep = { url = "https://keep/mcp" }\n'
+    )
+    adapter = CodexAdapter(home=tmp_path)
+    adapter.write("agno", URL, TOKEN)
+
+    parsed = tomllib.loads(adapter.config_path.read_text())  # must parse (no "defined twice")
+    assert parsed["mcp_servers"]["agno"]["url"] == URL
+    assert parsed["mcp_servers"]["agno"]["http_headers"]["Authorization"] == "Bearer " + TOKEN
+    assert parsed["mcp_servers"]["keep"]["url"] == "https://keep/mcp"
+
+
+def test_codex_write_preserves_multiline_string_containing_key_like_line(tmp_path: Path):
+    """A sibling key's triple-quoted value whose interior line reads like `agno = ...` must
+    NOT be treated as an inline entry and dropped (only real `agno = {...}` inline tables are)."""
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[mcp_servers]\ndescription = """\nUsage:\nagno = your primary server\n"""\n'
+    )
+    adapter = CodexAdapter(home=tmp_path)
+    adapter.write("agno", URL, TOKEN)
+
+    parsed = tomllib.loads(adapter.config_path.read_text())
+    assert "agno = your primary server" in parsed["mcp_servers"]["description"]
+    assert parsed["mcp_servers"]["agno"]["url"] == URL
+
+
+def test_codex_replaces_quoted_header(tmp_path: Path):
+    """A quoted table header [mcp_servers."agno"] is recognised as ours and replaced."""
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[mcp_servers."agno"]\nurl = "http://old:1/mcp"\n')
+    adapter = CodexAdapter(home=tmp_path)
+    adapter.write("agno", URL, TOKEN)
+
+    parsed = tomllib.loads(adapter.config_path.read_text())
+    assert parsed["mcp_servers"]["agno"]["url"] == URL
+    assert "http://old:1/mcp" not in adapter.config_path.read_text()
+
+
+def test_codex_read_existing_case_insensitive_authorization(tmp_path: Path):
+    """A lowercase `authorization` header key still yields the token (HTTP header names are
+    case-insensitive), so connect does not needlessly rotate a working entry."""
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[mcp_servers.agno]\nurl = "' + URL + '"\nhttp_headers = { authorization = "Bearer ' + TOKEN + '" }\n'
+    )
+    adapter = CodexAdapter(home=tmp_path)
+    entry = adapter.read_existing("agno")
+
+    assert entry is not None
+    assert entry.token == TOKEN
+
+
 def test_codex_read_existing_roundtrip(tmp_path: Path):
     adapter = CodexAdapter(home=tmp_path)
     adapter.write("agno", URL, TOKEN)

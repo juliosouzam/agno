@@ -26,6 +26,28 @@ def _agent() -> Agent:
     return Agent(id="demo-agent", name="Demo Agent")
 
 
+@pytest.fixture(autouse=True)
+def _resolve_by_identity(monkeypatch):
+    """Resolve run/lifecycle tools to the in-memory (stubbed) component instance.
+
+    Production ``_resolve_run_component`` deep-copies (create_fresh) and consults the DB
+    registry, which would discard the ``.arun`` / ``.acontinue_run`` / ``.acancel_run``
+    stubs these tests set on the instance. The scope-gate tests are unaffected (the gate
+    runs before resolution, and a missing id still raises "<Type> <id> not found"). Real
+    resolution behaviour is covered by test_mcp_resolution.py.
+    """
+
+    async def _resolve(os, kind, component_id, *, user_id, session_id):
+        pool = {"agents": os.agents, "teams": os.teams, "workflows": os.workflows}.get(kind) or []
+        for component in pool:
+            if getattr(component, "id", None) == component_id:
+                return component
+        singular = {"agents": "Agent", "teams": "Team", "workflows": "Workflow"}[kind]
+        raise Exception(f"{singular} {component_id} not found")
+
+    monkeypatch.setattr(mcp_mod, "_resolve_run_component", _resolve)
+
+
 # ==================== Tool annotations ====================
 
 
@@ -153,14 +175,13 @@ async def test_cancel_run_requests_cancellation_on_the_named_component():
     assert "cancellation requested" in result.content[0].text
 
 
-async def test_continue_run_rejects_remote_component(monkeypatch):
+async def test_continue_run_rejects_remote_component():
     """Remote components can't carry resolved requirements downstream; continue must fail
     clearly (like the REST 400) rather than crash."""
     from agno.agent.remote import RemoteAgent
 
     remote = RemoteAgent(base_url="http://example.invalid", agent_id="remote-agent")
-    monkeypatch.setattr(mcp_mod, "get_agent_by_id", lambda cid, agents: remote)
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True)
+    os = AgentOS(agents=[remote], enable_mcp_server=True)
     async with Client(build_mcp_server(os)) as client:
         result = await client.call_tool(
             "continue_run",

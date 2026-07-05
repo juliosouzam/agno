@@ -25,6 +25,7 @@ from agno.db.schemas.culture import CulturalKnowledge
 from agno.db.schemas.evals import EvalFilterType, EvalRunRecord, EvalType
 from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.schemas.memory import UserMemory
+from agno.db.schemas.service_accounts import resolve_service_account_sort_column
 from agno.db.utils import deserialize_session, deserialize_sessions, json_serializer
 from agno.run.base import RunStatus
 from agno.session import AgentSession, Session, TeamSession, WorkflowSession
@@ -3985,9 +3986,7 @@ class AsyncPostgresDb(AsyncBaseDb):
                 offset = (page - 1) * limit
 
                 # Get paginated results
-                if sort_by not in {"created_at", "name", "last_used_at", "expires_at"}:
-                    sort_by = "created_at"
-                sort_column = table.c[sort_by]
+                sort_column = table.c[resolve_service_account_sort_column(sort_by)]
                 order_by = sort_column.asc() if sort_order == "asc" else sort_column.desc()
                 stmt = base_query.order_by(order_by).limit(limit).offset(offset)
                 result = await sess.execute(stmt)
