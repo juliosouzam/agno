@@ -12,7 +12,7 @@ from nacl.signing import SigningKey
 
 from agno.agent import Agent
 from agno.os.interfaces.discord.interactions import DiscordInteractions
-from agno.os.interfaces.discord.router import attach_routes
+from agno.os.interfaces.discord.interactions_router import attach_routes
 
 SIGNING_KEY = SigningKey.generate()
 PUBLIC_KEY = SIGNING_KEY.verify_key.encode().hex()
@@ -70,7 +70,7 @@ def _ask_payload(extra_options=None) -> dict:
 
 def test_default_ask_is_public():
     client = _client()
-    with patch("agno.os.interfaces.discord.router.asyncio.create_task") as create_task:
+    with patch("agno.os.interfaces.discord.interactions_router.asyncio.create_task") as create_task:
         resp = _signed_post(client, _ask_payload())
     assert resp.status_code == 200
     assert resp.json() == {"type": 5}
@@ -79,7 +79,7 @@ def test_default_ask_is_public():
 
 def test_ephemeral_option_sets_flag():
     client = _client()
-    with patch("agno.os.interfaces.discord.router.asyncio.create_task") as create_task:
+    with patch("agno.os.interfaces.discord.interactions_router.asyncio.create_task") as create_task:
         resp = _signed_post(client, _ask_payload([{"name": "ephemeral", "value": True}]))
     assert resp.json() == {"type": 5, "data": {"flags": EPHEMERAL_FLAG}}
     create_task.call_args[0][0].close()
@@ -87,7 +87,7 @@ def test_ephemeral_option_sets_flag():
 
 def test_interface_default_ephemeral():
     client = _client(ephemeral=True)
-    with patch("agno.os.interfaces.discord.router.asyncio.create_task") as create_task:
+    with patch("agno.os.interfaces.discord.interactions_router.asyncio.create_task") as create_task:
         resp = _signed_post(client, _ask_payload())
     assert resp.json() == {"type": 5, "data": {"flags": EPHEMERAL_FLAG}}
     create_task.call_args[0][0].close()
@@ -95,7 +95,7 @@ def test_interface_default_ephemeral():
 
 def test_option_overrides_interface_default_back_to_public():
     client = _client(ephemeral=True)
-    with patch("agno.os.interfaces.discord.router.asyncio.create_task") as create_task:
+    with patch("agno.os.interfaces.discord.interactions_router.asyncio.create_task") as create_task:
         resp = _signed_post(client, _ask_payload([{"name": "ephemeral", "value": False}]))
     assert resp.json() == {"type": 5}
     create_task.call_args[0][0].close()

@@ -6,8 +6,8 @@ from fastapi.routing import APIRouter
 
 from agno.agent import Agent, RemoteAgent
 from agno.os.interfaces.base import BaseInterface
+from agno.os.interfaces.discord.interactions_router import attach_routes
 from agno.os.interfaces.discord.pipeline import DISCORD_API
-from agno.os.interfaces.discord.router import attach_routes
 from agno.team import RemoteTeam, Team
 from agno.utils.log import log_info, log_warning
 from agno.workflow import RemoteWorkflow, Workflow
