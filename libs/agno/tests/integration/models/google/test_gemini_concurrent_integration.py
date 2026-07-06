@@ -14,7 +14,13 @@ from agno.models.message import Message
 from agno.run.agent import RunErrorEvent
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-pytestmark = pytest.mark.skipif(not GOOGLE_API_KEY, reason="GOOGLE_API_KEY not set")
+pytestmark = [
+    pytest.mark.skipif(not GOOGLE_API_KEY, reason="GOOGLE_API_KEY not set"),
+    # The same shared-client TLS corruption the xfail-marked tests document can
+    # also wedge a stream read forever; bound each test so a hang becomes a
+    # timeout failure (absorbed by the xfails) instead of stalling the CI job.
+    pytest.mark.timeout(600),
+]
 
 PROMPT = "Say 'hello' and nothing else. Be very brief."
 NUM_WORKERS = 8

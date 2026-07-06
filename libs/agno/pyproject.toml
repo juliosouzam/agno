@@ -388,6 +388,9 @@ integration-tests = [
     # Implements @pytest.mark.flaky(reruns=N); without it the mark is a
     # silent no-op and model-nondeterminism retries never happen.
     "pytest-rerunfailures",
+    # Implements @pytest.mark.timeout(N): converts hung provider streams into
+    # test failures instead of wedging a CI job until the 6-hour job timeout.
+    "pytest-timeout",
 ]
 
 # Dependencies for demo application
