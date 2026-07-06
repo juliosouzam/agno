@@ -385,9 +385,9 @@ integration-tests = [
     "Pillow",
     "fastmcp",
     "PyJWT",
-    # Implements @pytest.mark.flaky(max_runs=N); without it the mark is a
+    # Implements @pytest.mark.flaky(reruns=N); without it the mark is a
     # silent no-op and model-nondeterminism retries never happen.
-    "flaky",
+    "pytest-rerunfailures",
 ]
 
 # Dependencies for demo application
