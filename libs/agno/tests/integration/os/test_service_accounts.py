@@ -218,6 +218,93 @@ class TestServiceAccountLifecycleWithJWT:
         response = jwt_client.get("/service-accounts", headers={"Authorization": f"Bearer {plain_jwt}"})
         assert response.status_code == 403
 
+    def test_mint_rate_limiter_caps_non_admin_members(self, test_agent, sqlite_db):
+        """A scoped member with service_accounts:write cannot mint unbounded tokens.
+
+        Guards against a member (or a buggy script) spamming the mint endpoint. The
+        limit applies per-user, admin callers bypass, and failed mints (e.g. 409 on a
+        duplicate name) do NOT consume the caller's budget.
+        """
+        settings = AgnoAPISettings(service_account_mint_max=3, service_account_mint_window_seconds=3600)
+        agent_os = AgentOS(agents=[test_agent], db=sqlite_db, settings=settings)
+        app = agent_os.get_app()
+        app.add_middleware(
+            JWTMiddleware, verification_keys=[JWT_SECRET], algorithm="HS256", authorization=True
+        )
+        client = TestClient(app)
+
+        member_jwt = _make_jwt(
+            ["agents:run", "service_accounts:write", "service_accounts:read"], sub="bob"
+        )
+
+        # First three mints succeed. Only request agents:run (the one scope Bob holds
+        # from his JWT) so the subset rule is satisfied.
+        for i in range(3):
+            r = client.post(
+                "/service-accounts",
+                headers={"Authorization": f"Bearer {member_jwt}"},
+                json={"name": f"bob-pat-{i}", "scopes": ["agents:run"]},
+            )
+            assert r.status_code == 201, r.text
+
+        # Fourth mint is rate-limited with a Retry-After header.
+        rate_limited = client.post(
+            "/service-accounts",
+            headers={"Authorization": f"Bearer {member_jwt}"},
+            json={"name": "bob-pat-3", "scopes": ["agents:run"]},
+        )
+        assert rate_limited.status_code == 429
+        assert "Retry-After" in rate_limited.headers
+        assert int(rate_limited.headers["Retry-After"]) > 0
+
+        # Admin scope bypasses the limiter entirely.
+        admin_jwt = _make_jwt(["agent_os:admin"], sub="alice")
+        for i in range(5):
+            r = client.post(
+                "/service-accounts",
+                headers={"Authorization": f"Bearer {admin_jwt}"},
+                json={"name": f"alice-pat-{i}"},
+            )
+            assert r.status_code == 201, r.text
+
+    def test_mint_rate_limiter_does_not_bill_failed_mints(self, test_agent, sqlite_db):
+        """A duplicate-name 409 must not consume the caller's mint budget."""
+        settings = AgnoAPISettings(service_account_mint_max=2, service_account_mint_window_seconds=3600)
+        agent_os = AgentOS(agents=[test_agent], db=sqlite_db, settings=settings)
+        app = agent_os.get_app()
+        app.add_middleware(
+            JWTMiddleware, verification_keys=[JWT_SECRET], algorithm="HS256", authorization=True
+        )
+        client = TestClient(app)
+
+        member_jwt = _make_jwt(
+            ["agents:run", "service_accounts:write", "service_accounts:read"], sub="bob"
+        )
+
+        # First mint succeeds.
+        first = client.post(
+            "/service-accounts",
+            headers={"Authorization": f"Bearer {member_jwt}"},
+            json={"name": "dup", "scopes": ["agents:run"]},
+        )
+        assert first.status_code == 201
+
+        # Duplicate name -> 409, budget unchanged.
+        dup = client.post(
+            "/service-accounts",
+            headers={"Authorization": f"Bearer {member_jwt}"},
+            json={"name": "dup", "scopes": ["agents:run"]},
+        )
+        assert dup.status_code == 409
+
+        # Still under the cap: one more successful mint is allowed.
+        second = client.post(
+            "/service-accounts",
+            headers={"Authorization": f"Bearer {member_jwt}"},
+            json={"name": "other", "scopes": ["agents:run"]},
+        )
+        assert second.status_code == 201, second.text
+
     def test_admin_pat_can_manage_service_accounts_end_to_end(self, jwt_client):
         """A PAT minted with agent_os:admin scope must be able to mint, list, and revoke.
 

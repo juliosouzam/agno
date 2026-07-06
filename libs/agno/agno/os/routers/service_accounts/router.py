@@ -163,6 +163,31 @@ def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
         scopes = list(body.scopes) if body.scopes is not None else list(DEFAULT_SERVICE_ACCOUNT_SCOPES)
         _validate_requested_scopes(request, body, scopes)
 
+        # Per-user mint rate limit: guards against a scoped member (or a buggy script)
+        # generating unbounded tokens. Admin callers bypass -- an operator may need to
+        # bulk-provision. The limiter is opt-in via AgnoAPISettings.service_account_mint_max
+        # and lives on app.state (may be None if disabled or not yet installed). We check
+        # here and record after the DB write succeeds, so failed/duplicate mints do not
+        # consume the caller's budget.
+        mint_limiter = getattr(request.app.state, "service_account_mint_limiter", None)
+        mint_key: Optional[str] = None
+        if mint_limiter is not None:
+            admin_scope = _get_admin_scope(request)
+            caller_scopes = getattr(request.state, "scopes", None) or []
+            effective_admin_scope = admin_scope or AgentOSScope.ADMIN.value
+            is_admin = effective_admin_scope in caller_scopes
+            if not is_admin:
+                mint_key = getattr(request.state, "user_id", None) or (
+                    request.client.host if request.client else "unknown"
+                )
+                if mint_limiter.is_limited(mint_key):
+                    retry_after = mint_limiter.seconds_until_available(mint_key)
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Service-account mint rate limit exceeded. Wait and retry.",
+                        headers={"Retry-After": str(retry_after)},
+                    )
+
         existing = await _db_call("get_service_account_by_name", body.name)
         if existing is not None:
             raise HTTPException(
@@ -200,6 +225,10 @@ def get_service_accounts_router(os_db: Any, settings: Any) -> APIRouter:
                 )
             log_error(f"Could not create service account: {exc}")
             raise HTTPException(status_code=500, detail="Could not create service account")
+
+        # Only meter successful mints -- a 409/500 does not consume the caller's budget.
+        if mint_limiter is not None and mint_key is not None:
+            mint_limiter.record_mint(mint_key)
 
         metadata = ServiceAccountResponse.from_dict(account.to_dict())
         return ServiceAccountCreateResponse(**metadata.model_dump(), token=plaintext_token)

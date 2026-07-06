@@ -1093,9 +1093,13 @@ class AgentOS:
             @fastapi_app.exception_handler(HTTPException)
             async def http_exception_handler(_, exc: HTTPException) -> JSONResponse:
                 log_error(f"HTTP exception: {exc.status_code} {exc.detail}")
+                # Preserve caller-set headers (Retry-After on 429, WWW-Authenticate on 401,
+                # Location on 3xx redirects, etc.). Discarding them silently broke every
+                # endpoint that raises HTTPException(headers=...) previously.
                 return JSONResponse(
                     status_code=exc.status_code,
                     content={"detail": str(exc.detail)},
+                    headers=exc.headers,
                 )
 
             @fastapi_app.exception_handler(HTTPStatusError)
@@ -1136,6 +1140,17 @@ class AgentOS:
         service_account_verifier = self._get_service_account_verifier()
         if service_account_verifier is not None:
             fastapi_app.state.service_account_verifier = service_account_verifier
+
+        # Per-user mint rate limiter, shared across mint requests. Only installed when the
+        # configured max is positive; setting service_account_mint_max=0 disables it.
+        mint_max = getattr(self.settings, "service_account_mint_max", 0) if self.settings else 0
+        if mint_max > 0:
+            from agno.os.service_accounts import MintRateLimiter
+
+            fastapi_app.state.service_account_mint_limiter = MintRateLimiter(
+                max_mints=mint_max,
+                window_seconds=getattr(self.settings, "service_account_mint_window_seconds", 3600),
+            )
 
         # Install the single auth layer whenever any credential is configured. It
         # covers the REST routes and the mounted /mcp app together (one middleware on

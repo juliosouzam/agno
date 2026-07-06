@@ -183,6 +183,56 @@ class _FailedLookupLimiter:
             self._failures.popitem(last=False)
 
 
+class MintRateLimiter:
+    """Sliding-window limiter for service-account MINT requests, keyed by minter identity.
+
+    Guards against a member with ``service_accounts:write`` scope generating an unbounded
+    number of tokens (accidentally through a script bug, or deliberately). Admin callers
+    bypass; every other caller is metered per-user against ``max_mints`` in ``window_seconds``.
+
+    In-process and per-worker: with N uvicorn workers the effective budget is N times
+    larger. That is fine for the intended use case — legit devs need a handful of tokens
+    per hour, malicious spam still runs into the cap on any single worker before it
+    materially fills the DB.
+    """
+
+    def __init__(self, max_mints: int = 10, window_seconds: int = 3600, max_entries: int = 1024):
+        self.max_mints = max_mints
+        self.window_seconds = window_seconds
+        self.max_entries = max_entries
+        self._mints: "OrderedDict[str, List[float]]" = OrderedDict()
+
+    def _prune(self, key: str) -> List[float]:
+        timestamps = self._mints.get(key) or []
+        cutoff = time.monotonic() - self.window_seconds
+        fresh = [t for t in timestamps if t > cutoff]
+        if fresh:
+            self._mints[key] = fresh
+        else:
+            self._mints.pop(key, None)
+        return fresh
+
+    def is_limited(self, key: str) -> bool:
+        return len(self._prune(key)) >= self.max_mints
+
+    def record_mint(self, key: str) -> None:
+        fresh = self._prune(key)
+        fresh.append(time.monotonic())
+        self._mints[key] = fresh
+        self._mints.move_to_end(key)
+        while len(self._mints) > self.max_entries:
+            self._mints.popitem(last=False)
+
+    def seconds_until_available(self, key: str) -> int:
+        """Suggest a Retry-After value: seconds until the oldest fresh mint ages out."""
+        fresh = self._prune(key)
+        if len(fresh) < self.max_mints:
+            return 0
+        oldest = min(fresh)
+        remaining = self.window_seconds - (time.monotonic() - oldest)
+        return max(1, int(remaining))
+
+
 class _VerificationCache:
     """Bounded, TTL'd LRU of successful verifications, keyed by token hash.
 

@@ -31,6 +31,17 @@ class AgnoAPISettings(BaseSettings):
         default=30, description="TTL (seconds) for the in-process service-account verification cache; 0 disables it"
     )
 
+    # Per-user cap on service-account MINT requests. Guards against a scoped member
+    # generating unbounded tokens; admin callers bypass. In-process and per-worker,
+    # so with N workers the effective budget is N times larger. Set max_mints to 0
+    # to disable the mint limiter entirely.
+    service_account_mint_max: int = Field(
+        default=10, description="Max service-account mints per user per window; 0 disables the mint limiter"
+    )
+    service_account_mint_window_seconds: int = Field(
+        default=3600, description="Rolling window (seconds) over which service_account_mint_max applies"
+    )
+
     # Cors origin list to allow requests from.
     # This list is set using the set_cors_origin_list validator
     cors_origin_list: Optional[List[str]] = Field(default=None, validate_default=True)
