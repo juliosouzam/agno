@@ -218,6 +218,41 @@ class TestServiceAccountLifecycleWithJWT:
         response = jwt_client.get("/service-accounts", headers={"Authorization": f"Bearer {plain_jwt}"})
         assert response.status_code == 403
 
+    def test_admin_pat_can_manage_service_accounts_end_to_end(self, jwt_client):
+        """A PAT minted with agent_os:admin scope must be able to mint, list, and revoke.
+
+        The admin scope is the union of every RBAC action -- if a PAT holding it is 403'd on
+        any of the three service-account operations, the admin bypass is inconsistent across
+        endpoints. Regression: an admin PAT could POST + GET service-accounts but was 403'd
+        on DELETE, forcing operators to grant the more granular service_accounts:delete on
+        top of admin.
+        """
+        # An admin JWT mints an admin PAT.
+        admin_jwt = _make_jwt(["agent_os:admin"])
+        admin_pat = _mint(
+            jwt_client,
+            admin_jwt,
+            name="admin-pat",
+            scopes=["agent_os:admin"],
+            allow_privileged_scopes=True,
+        ).json()["token"]
+
+        # The admin PAT can list.
+        listing = jwt_client.get("/service-accounts", headers={"Authorization": f"Bearer {admin_pat}"})
+        assert listing.status_code == 200, listing.text
+
+        # The admin PAT can mint a further account without needing to spell out
+        # service_accounts:write (the admin bypass covers it).
+        minted = _mint(jwt_client, admin_pat, name="minted-by-admin-pat")
+        assert minted.status_code == 201, minted.text
+        minted_id = minted.json()["id"]
+
+        # The admin PAT can revoke without needing service_accounts:delete.
+        revoke = jwt_client.delete(
+            f"/service-accounts/{minted_id}", headers={"Authorization": f"Bearer {admin_pat}"}
+        )
+        assert revoke.status_code == 204, revoke.text
+
 
 class TestInternalTokenRegression:
     """The internal scheduler token must behave identically after the RBAC refactor."""
