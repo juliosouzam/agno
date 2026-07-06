@@ -384,7 +384,10 @@ integration-tests = [
     "sqlalchemy",
     "Pillow",
     "fastmcp",
-    "PyJWT"
+    "PyJWT",
+    # Implements @pytest.mark.flaky(max_runs=N); without it the mark is a
+    # silent no-op and model-nondeterminism retries never happen.
+    "flaky",
 ]
 
 # Dependencies for demo application
