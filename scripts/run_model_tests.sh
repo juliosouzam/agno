@@ -78,6 +78,8 @@ print_info "Installing pytest packages..."
 pip install \
     pytest \
     pytest-asyncio \
+    pytest-rerunfailures \
+    pytest-timeout \
     requests
 
 # Change to agno directory

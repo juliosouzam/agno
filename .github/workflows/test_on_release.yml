@@ -19,6 +19,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job in this matrix drives live model APIs: a single blanket retry
+# absorbs one-shot model-nondeterminism (a model skipping a tool call, a
+# provider-side tool_use_failed) while anything deterministically broken
+# still fails twice and stays red. Requires pytest-rerunfailures in every
+# job env that runs pytest.
+env:
+  PYTEST_ADDOPTS: "--reruns 1"
+
 jobs:
   # Run tests for OpenAI
   test-openai:
@@ -1073,7 +1081,7 @@ jobs:
           VIRTUAL_ENV=.venv uv venv --python 3.12
           VIRTUAL_ENV=.venv uv pip install agno
           VIRTUAL_ENV=.venv uv pip install -r ./libs/agno/requirements.txt
-          VIRTUAL_ENV=.venv uv pip install openai chromadb sqlalchemy pytest pytest-asyncio pytest-cov pytest-mock
+          VIRTUAL_ENV=.venv uv pip install openai chromadb sqlalchemy pytest pytest-asyncio pytest-cov pytest-mock pytest-rerunfailures pytest-timeout
       - name: Run Basic Clean Test
         working-directory: .
         env:
@@ -1138,7 +1146,7 @@ jobs:
           VIRTUAL_ENV=.venv uv venv --python 3.12
           VIRTUAL_ENV=.venv uv pip install agno
           VIRTUAL_ENV=.venv uv pip install -r ./libs/agno/requirements.txt
-          VIRTUAL_ENV=.venv uv pip install openai chromadb sqlalchemy fastapi pytest pytest-asyncio pytest-cov pytest-mock
+          VIRTUAL_ENV=.venv uv pip install openai chromadb sqlalchemy fastapi pytest pytest-asyncio pytest-cov pytest-mock pytest-rerunfailures pytest-timeout
       - name: Run Basic Clean Test
         working-directory: .
         env:
