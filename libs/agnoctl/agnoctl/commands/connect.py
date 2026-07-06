@@ -6,14 +6,17 @@ the client will actually use, with a real MCP tools/list call -> report. Re-runs
 safe: entries that already verify are skipped, broken or stale ones are rotated.
 """
 
+import ipaddress
 import sys
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import typer
 
 from agnoctl.clients import CLIENT_ALIASES, build_adapters
 from agnoctl.clients.base import ClientAdapter
 from agnoctl.commands._common import (
+    _is_loopback_host,
     handle_cli_error,
     parse_expires,
     require_secure_url,
@@ -34,66 +37,114 @@ EXIT_PARTIAL = 3
 
 ROTATE_HINT = "Re-run with --rotate to revoke and re-mint it, or --skip-existing to leave it untouched."
 
-# ChatGPT is not a ClientAdapter: it has no local config to write and nothing agnoctl
-# can verify (the connector is added later, by a human, in ChatGPT's cloud UI). It is
-# handled out of band as printed setup instructions, opt-in via --clients only.
-CHATGPT_ALIASES = {"chatgpt", "gpt", "openai"}
+# The hosted chat apps (Claude, ChatGPT) are not ClientAdapters: they have no local
+# config to write and nothing agnoctl can verify (the connector is added later, by a
+# human, in the app's own UI). They are handled out of band as printed setup
+# instructions: opt-in via --clients, and included automatically when the AgentOS is on
+# a public URL the apps' clouds can actually reach.
+CHAT_APP_ALIASES = {
+    "claude-ai": "claude-ai",
+    "claudeai": "claude-ai",
+    "claude.ai": "claude-ai",
+    "chatgpt": "chatgpt",
+    "gpt": "chatgpt",
+    "openai": "chatgpt",
+}
+# One registry entry per chat app: (UI name, where-to-add-it instructions). Adding an
+# app here is the whole job -- CHAT_APPS and the instruction text derive from it.
+CHAT_APPS_SPEC = {
+    "claude-ai": (
+        "Claude",
+        "In claude.ai or the Claude desktop app: Settings -> Connectors -> Add custom connector, "
+        "paste the MCP URL below, and follow the prompts (custom connectors need a paid plan).",
+    ),
+    "chatgpt": (
+        "ChatGPT",
+        "In ChatGPT: Settings -> Connectors -> Add custom connector, paste the MCP URL below, and follow "
+        "the prompts (custom connectors need a paid plan; enable Developer Mode for full tool access).",
+    ),
+}
+CHAT_APPS = tuple(CHAT_APPS_SPEC)
 
 
-def _split_chatgpt(clients: Optional[str]) -> "tuple[Optional[str], bool]":
-    """Peel a ChatGPT request out of --clients; returns (remaining clients, want_chatgpt)."""
+def _split_chat_apps(clients: Optional[str]) -> "tuple[Optional[str], List[str]]":
+    """Peel chat-app requests out of --clients; returns (remaining clients, wanted apps)."""
     if not clients:
-        return clients, False
+        return clients, []
     tokens = [t.strip() for t in clients.split(",") if t.strip()]
-    remaining = [t for t in tokens if t.lower() not in CHATGPT_ALIASES]
-    want_chatgpt = any(t.lower() in CHATGPT_ALIASES for t in tokens)
-    return (",".join(remaining) if remaining else None), want_chatgpt
+    remaining = [t for t in tokens if t.lower() not in CHAT_APP_ALIASES]
+    wanted: List[str] = []
+    for token in tokens:
+        app = CHAT_APP_ALIASES.get(token.lower())
+        if app is not None and app not in wanted:
+            wanted.append(app)
+    return (",".join(remaining) if remaining else None), wanted
 
 
-def _chatgpt_instructions(os_info: OSInfo, server_name: str) -> Dict[str, Any]:
-    """A manual-setup result for ChatGPT: honest steps, never a verified connection."""
-    mcp_url = os_info.mcp_url
-    lowered = os_info.base_url.lower()
-    is_public = mcp_url.lower().startswith("https://") and not any(
-        h in lowered for h in ("localhost", "127.0.0.1", "0.0.0.0")
-    )
+def _reachable_from_cloud(os_info: OSInfo) -> bool:
+    """True when the hosted chat apps can plausibly reach this AgentOS: public HTTPS.
+
+    Judged on the parsed hostname, not a substring scan of the URL, so tunnel domains
+    like *.localhost.run count as cloud-reachable while loopback, RFC1918/link-local
+    addresses, and container-internal hosts do not.
+    """
+    if not os_info.mcp_url.lower().startswith("https://"):
+        return False
+    host = urlsplit(os_info.base_url).hostname or ""
+    if _is_loopback_host(host) or host.lower() == "host.docker.internal":
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a named host on HTTPS: assume public
+    return not (ip.is_private or ip.is_link_local)
+
+
+def _chat_app_instructions(app: str, os_info: OSInfo) -> Dict[str, Any]:
+    """A manual-setup result for a hosted chat app: honest steps, never a verified connection."""
+    ui_name, where = CHAT_APPS_SPEC[app]
     note = None
-    if not is_public:
+    if not _reachable_from_cloud(os_info):
         note = (
-            "ChatGPT adds connectors from its own cloud and cannot reach a local AgentOS at "
+            ui_name
+            + " adds connectors from its own cloud and cannot reach a local AgentOS at "
             + os_info.base_url
             + "; deploy it behind a public HTTPS URL (or a tunnel) before adding it."
         )
     return {
-        "client": "chatgpt",
+        "client": app,
         "status": "manual",
         "error": None,
-        "url": mcp_url,
+        "url": os_info.mcp_url,
         "instructions": [
-            "ChatGPT reaches MCP servers from its cloud, so the AgentOS must be on a public HTTPS URL.",
-            "ChatGPT's Connectors UI authenticates with OAuth, not bearer tokens, so a token-protected "
+            ui_name + " reaches MCP servers from its cloud, so the AgentOS must be on a public HTTPS URL.",
+            ui_name + "'s Connectors UI authenticates with OAuth, not bearer tokens, so a token-protected "
             "AgentOS cannot be added from the UI yet; use a public or OAuth-enabled AgentOS.",
-            "In ChatGPT: Settings -> Connectors -> Add custom connector, paste the MCP URL below, and follow "
-            "the prompts (custom connectors need a paid plan; enable Developer Mode for full tool access).",
+            where,
         ],
         "note": note,
     }
 
 
-def _resolve_clients(clients: Optional[str], adapters: Dict[str, ClientAdapter]) -> List[ClientAdapter]:
+def _resolve_clients(
+    clients: Optional[str], adapters: Dict[str, ClientAdapter], required: bool = True
+) -> List[ClientAdapter]:
     if clients:
         selected: List[ClientAdapter] = []
         for raw in clients.split(","):
             key = CLIENT_ALIASES.get(raw.strip().lower())
             if key is None:
-                supported = ", ".join(sorted(set(CLIENT_ALIASES.keys())))
+                supported = ", ".join(sorted(set(CLIENT_ALIASES.keys()) | set(CHAT_APP_ALIASES.keys())))
                 raise CLIError("Unknown client: " + raw.strip(), hint="Supported clients: " + supported)
             adapter = adapters[key]
             if adapter not in selected:
                 selected.append(adapter)
         return selected
     detected = [adapter for adapter in adapters.values() if adapter.detect()]
-    if not detected:
+    if not detected and required:
+        # ``required=False`` when the run has something else to report (the chat-app
+        # auto-surface on a deployed AgentOS) -- a headless deploy box with no local
+        # clients is that feature's primary home, so it must not die here.
         raise CLIError(
             "No supported clients detected on this machine.",
             hint="Install Claude Code, Claude Desktop, Codex, or Cursor, or pass --clients explicitly.",
@@ -154,8 +205,9 @@ def connect(
         None,
         "--clients",
         help=(
-            "Comma-separated clients (claude-code,claude-desktop,codex,cursor; chatgpt prints manual "
-            "setup steps). Default: detected."
+            "Comma-separated clients (claude-code,claude-desktop,codex,cursor; claude-ai and chatgpt "
+            "print manual setup steps). Default: detected, plus claude-ai/chatgpt steps when the "
+            "AgentOS is on a public URL."
         ),
     ),
     name: Optional[str] = typer.Option(
@@ -228,12 +280,22 @@ def _connect(
         )
     if not json_mode:
         version = " (agno " + os_info.version + ")" if os_info.version else ""
-        print_info("AgentOS at " + os_info.base_url + version + ", MCP at " + os_info.mcp_url)
+        source = " (from AGENTOS_URL)" if os_info.url_source == "env" else ""
+        print_info("AgentOS at " + os_info.base_url + version + source + ", MCP at " + os_info.mcp_url)
 
     adapters = build_adapters(project=project)
-    clients_remaining, want_chatgpt = _split_chatgpt(clients)
-    # Auto-detect only when no --clients was given; a chatgpt-only request selects no adapters.
-    selected = _resolve_clients(clients_remaining, adapters) if clients is None or clients_remaining else []
+    clients_remaining, wanted_apps = _split_chat_apps(clients)
+    # Auto-surface the hosted chat apps only when the run wasn't scoped by --clients AND
+    # the deployed OS is one they can actually add: public HTTPS and no token gate (their
+    # Connectors UIs authenticate with OAuth, not bearer tokens). Explicitly requested
+    # chat apps are honored regardless -- their instructions carry the caveats.
+    auto_surface_apps = clients is None and os_info.auth_mode == "none" and _reachable_from_cloud(os_info)
+    # Auto-detect only when no --clients was given; a chat-app-only request selects no adapters.
+    selected = (
+        _resolve_clients(clients_remaining, adapters, required=not auto_surface_apps)
+        if clients is None or clients_remaining
+        else []
+    )
 
     minting = os_info.auth_mode not in ("none",) and bool(selected)
     # When we mint, the admin token is attached to base_url and the minted PATs are written
@@ -310,8 +372,13 @@ def _connect(
         if api is not None:
             api.close()
 
-    if want_chatgpt:
-        results.append(_chatgpt_instructions(os_info, server_name))
+    # Spot a deployed AgentOS: when discovery lands on a public, token-free URL (typically
+    # AGENTOS_URL set to the production domain), the hosted chat apps can use it too --
+    # surface their setup steps without requiring --clients.
+    if auto_surface_apps:
+        wanted_apps = list(CHAT_APPS)
+    for app in wanted_apps:
+        results.append(_chat_app_instructions(app, os_info))
 
     _report(os_info, results, server_name, open_mcp_warning, json_mode)
 
@@ -466,12 +533,16 @@ def _report(
     open_mcp_warning: Optional[str],
     json_mode: bool,
 ) -> None:
-    # "manual" (ChatGPT instructions) is not a failure: agnoctl did all it can.
+    # "manual" (chat-app instructions) is not a failure: agnoctl did all it can. But it
+    # must not mask one either -- when every real adapter failed, appended manual
+    # entries cannot soften total failure into "partial".
     ok_statuses = ("connected", "already-connected", "manual")
     ok_count = sum(1 for r in results if r["status"] in ok_statuses)
+    real_results = [r for r in results if r["status"] != "manual"]
+    real_ok = sum(1 for r in real_results if r["status"] in ok_statuses)
     if ok_count == len(results):
         exit_code = EXIT_OK
-    elif ok_count == 0:
+    elif real_results and real_ok == 0:
         exit_code = EXIT_FAILURE
     else:
         exit_code = EXIT_PARTIAL
@@ -500,7 +571,8 @@ def _report(
         elif r["status"] == "skipped":
             print_warning("  skipped        " + label + "  (" + str(r.get("error") or "") + ")")
         elif r["status"] == "manual":
-            print_warning("  action needed  " + label + "  (set up in the ChatGPT UI)")
+            ui_name = CHAT_APPS_SPEC[label][0] if label in CHAT_APPS_SPEC else label
+            print_warning("  action needed  " + label + "  (set up in the " + ui_name + " UI)")
             for step in r.get("instructions", []):
                 print_info("                 - " + step)
             if r.get("url"):

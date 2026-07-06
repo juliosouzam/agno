@@ -47,12 +47,14 @@ class ServiceAccount:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServiceAccount":
+        # Servers send scopes as parsed RBAC objects ({raw, namespace, ...}) or as
+        # plain strings; keep the raw string either way.
         return cls(
             id=data["id"],
             name=data["name"],
             principal=data.get("principal") or "sa:" + data["name"],
             token_prefix=data.get("token_prefix") or "",
-            scopes=data.get("scopes") or [],
+            scopes=[s if isinstance(s, str) else s.get("raw", "") for s in data.get("scopes") or []],
             created_at=data.get("created_at"),
             expires_at=data.get("expires_at"),
             last_used_at=data.get("last_used_at"),
@@ -81,6 +83,16 @@ def _error_detail(response: httpx.Response) -> str:
         detail = response.json().get("detail")
         if isinstance(detail, str) and detail:
             return detail
+        # FastAPI validation errors (422) ship a list of error objects. Surfacing the
+        # first message beats an opaque "HTTP 422" -- e.g. a payload-shape skew between
+        # this CLI and an older/newer server is otherwise undiagnosable.
+        if isinstance(detail, list) and detail and isinstance(detail[0], dict):
+            msg = detail[0].get("msg")
+            loc = detail[0].get("loc")
+            if isinstance(msg, str) and msg:
+                if isinstance(loc, list) and loc:
+                    return msg + " (at " + ".".join(str(part) for part in loc) + ")"
+                return msg
     except Exception:
         pass
     return "HTTP " + str(response.status_code)
@@ -168,7 +180,9 @@ class AgentOSAPI:
     ) -> ServiceAccount:
         body: Dict[str, Any] = {"name": name}
         if scopes:
-            body["scopes"] = scopes
+            # The API takes the RBAC write shape ({scope, effect} objects); the CLI
+            # keeps its flags as plain scope strings and converts here.
+            body["scopes"] = [{"scope": scope, "effect": "allow"} for scope in scopes]
         if never_expires:
             body["never_expires"] = True
         elif expires_in_days is not None:

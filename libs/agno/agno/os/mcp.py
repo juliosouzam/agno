@@ -31,7 +31,7 @@ from agno.os.utils import (
     resolve_team,
     resolve_workflow,
 )
-from agno.remote.base import RemoteDb
+from agno.remote.base import BaseRemote, RemoteDb
 from agno.run.agent import RunEvent, RunOutput
 from agno.run.team import TeamRunEvent, TeamRunOutput
 from agno.run.workflow import WorkflowRunEvent, WorkflowRunOutput
@@ -380,8 +380,8 @@ def _detached_trace_context() -> Iterator[None]:
     No-op when OpenTelemetry is not installed.
     """
     try:
-        from opentelemetry import context as otel_context
-        from opentelemetry import trace as otel_trace
+        from opentelemetry import context as otel_context  # type: ignore
+        from opentelemetry import trace as otel_trace  # type: ignore
     except ImportError:
         yield
         return
@@ -617,6 +617,15 @@ def _make_run_ownership_verifier(os: "AgentOS"):
         scoped_user_id = _scoped_caller_user_id()
         if scoped_user_id is None:
             return
+        if isinstance(component, BaseRemote):
+            # Remote components keep their sessions on the remote OS: there is no local
+            # session to prove ownership against (BaseRemote has no aget_session), and
+            # the forwarded call would not carry this caller's identity for the remote
+            # to check either. Fail closed rather than let a scoped caller act on
+            # another user's run; admins (scoped_user_id None) pass through above.
+            raise Exception(
+                "Run ownership cannot be verified for remote components; an administrator can act on this run."
+            )
         if not session_id:
             raise Exception("session_id is required to act on this run")
         try:
