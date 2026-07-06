@@ -385,12 +385,13 @@ async def test_get_sessions(mcp_client: MCPTestClient, db_id: str, test_user_id:
 
 
 @pytest.mark.asyncio
-async def test_get_session_runs_after_run(mcp_client: MCPTestClient, test_user_id: str):
+async def test_get_session_runs_after_run(mcp_client: MCPTestClient, db_id: str, test_user_id: str):
     """Run an agent into a fresh session, then read the conversation back.
 
-    Exercises the v2.7 read-only session path: run tools create sessions implicitly,
-    get_session_runs auto-detects the session type (no session_type passed) and
-    db_id is optional on a single-database AgentOS.
+    Exercises the v2.7 read-only session path: run tools create sessions implicitly
+    and get_session_runs auto-detects the session type (no session_type passed).
+    The gateway registers a second (remote) database, so db_id is passed the way
+    an operator would after discovering it via get_agentos_config.
     """
     session_id = str(uuid4())
     await mcp_client.call_tool(
@@ -403,16 +404,16 @@ async def test_get_session_runs_after_run(mcp_client: MCPTestClient, test_user_i
         },
     )
 
-    result = await mcp_client.call_tool("get_session_runs", {"session_id": session_id})
+    result = await mcp_client.call_tool("get_session_runs", {"session_id": session_id, "db_id": db_id})
     runs = result if isinstance(result, list) else [result]
     assert len(runs) >= 1
 
 
 @pytest.mark.asyncio
-async def test_get_session_runs_not_found(mcp_client: MCPTestClient):
+async def test_get_session_runs_not_found(mcp_client: MCPTestClient, db_id: str):
     """Reading history of a non-existent session returns a tool error."""
     with pytest.raises(Exception) as exc_info:
-        await mcp_client.call_tool("get_session_runs", {"session_id": "non-existent-session"})
+        await mcp_client.call_tool("get_session_runs", {"session_id": "non-existent-session", "db_id": db_id})
     assert "not found" in str(exc_info.value).lower()
 
 
