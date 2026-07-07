@@ -18,8 +18,7 @@ class BaseInterface(ABC):
     prefix: str
     tags: List[str]
 
-    # When True, interface handles its own auth (e.g. webhook signatures for Slack/Telegram)
-    # and is excluded from central AuthMiddleware
+    # If True, interface handles its own auth (e.g. Slack/Telegram webhook signatures) and is excluded from AuthMiddleware
     authenticates_own_requests: bool = False
 
     router: APIRouter

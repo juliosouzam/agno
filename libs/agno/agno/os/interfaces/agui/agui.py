@@ -24,6 +24,15 @@ class AGUI(BaseInterface):
         prefix: str = "",
         tags: Optional[List[str]] = None,
     ):
+        """
+        Initialize the AGUI interface.
+
+        Args:
+            agent: The agent to expose via AG-UI
+            team: The team to expose via AG-UI
+            prefix: Custom prefix for the router (e.g., "/agui/v1", "/chat/public")
+            tags: Custom tags for the router (e.g., ["AGUI", "Chat"], defaults to ["AGUI"])
+        """
         self.agent = agent
         self.team = team
         self.prefix = prefix

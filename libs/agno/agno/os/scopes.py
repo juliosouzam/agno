@@ -587,39 +587,21 @@ def get_required_scopes_for_route(scope_mappings: Dict[str, List[str]], method: 
 
 
 def get_resource_context_from_path(path: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Extract the resource type and resource ID from a request path.
+    """Extract (resource_type, resource_id) from a path like /agents/my-agent/runs."""
+    # Anchor to the first path segment to avoid misclassifying paths like
+    # /knowledge/agents/sources as "agents" resources. Only /agents, /teams,
+    # /workflows (and /a2a/{family}) own the resource type.
+    type_match = re.match(r"^/(?:a2a/)?(agents|teams|workflows)(?:/|$)", path)
+    if not type_match:
+        return None, None
 
-    Returns:
-        Tuple of (resource_type, resource_id). Either may be None.
+    resource_type = type_match.group(1)
 
-    Examples:
-        >>> get_resource_context_from_path("/agents/my-agent/runs")
-        ('agents', 'my-agent')
-        >>> get_resource_context_from_path("/a2a/agents/my-agent/v1/message:send")
-        ('agents', 'my-agent')
-        >>> get_resource_context_from_path("/api/v2/agents/my-agent/v1/message:send")
-        ('agents', 'my-agent')
-        >>> get_resource_context_from_path("/sessions")
-        (None, None)
-        >>> get_resource_context_from_path("/knowledge/content/agents-guide")
-        (None, None)
-    """
-    # Find agents/teams/workflows as a COMPLETE path segment (between slashes), not a
-    # substring. This handles any prefix (REST root, /a2a/, custom A2A prefixes like
-    # /api/v2/) while rejecting paths that merely contain the word (e.g.
-    # /knowledge/content/agents-guide should NOT match as an "agents" resource).
-    match = re.search(r"/(agents|teams|workflows)/([^/]+)", path)
-    if match:
-        return match.group(1), match.group(2)
+    id_match = re.match(rf"^/(?:a2a/)?{resource_type}/([^/]+)", path)
+    if id_match:
+        return resource_type, id_match.group(1)
 
-    # Check for listing endpoints (no resource ID): /agents, /teams, /workflows
-    # Also handles prefixed paths like /a2a/agents or /api/v2/agents
-    type_match = re.search(r"/(agents|teams|workflows)(?:/|$)", path)
-    if type_match:
-        return type_match.group(1), None
-
-    return None, None
+    return resource_type, None
 
 
 @dataclass
