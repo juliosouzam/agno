@@ -44,10 +44,16 @@ from agno.os.auth import check_resource_access
 from agno.os.interfaces.a2a.utils import (
     map_a2a_request_to_run_input,
     map_run_output_to_a2a_task,
+    session_id_or_new,
     stream_a2a_response_with_error_handling,
 )
 from agno.os.middleware.user_scope import get_scoped_user_id, resolve_run_user_id, verify_run_in_session
-from agno.os.utils import get_agent_by_id, get_request_kwargs, get_team_by_id, get_workflow_by_id
+from agno.os.utils import (
+    get_agent_by_id,
+    get_request_kwargs,
+    get_team_by_id,
+    get_workflow_by_id,
+)
 from agno.run.base import RunStatus
 from agno.team import RemoteTeam, Team
 from agno.utils.log import log_error
@@ -350,7 +356,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
@@ -506,7 +515,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
@@ -599,7 +611,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
@@ -739,7 +754,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
@@ -834,7 +852,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
@@ -883,7 +904,10 @@ def attach_routes(
             return version_error
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
@@ -968,7 +992,10 @@ def attach_routes(
         _enforce_dynamic_dispatch_scope(request, entity, agent_id)
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
@@ -1039,7 +1066,10 @@ def attach_routes(
         _enforce_dynamic_dispatch_scope(request, entity, agent_id)
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
-        context_id = request_body.get("params", {}).get("message", {}).get("contextId")
+        # contextId is optional on first contact: mint the session here (never forward
+        # None to arun -- see session_id_or_new) and return it to the client via the
+        # Task / stream events so the conversation can be continued.
+        context_id = session_id_or_new(request_body.get("params", {}).get("message", {}).get("contextId"))
         user_id = _resolve_a2a_user_id(request, request_body)
 
         try:

@@ -252,6 +252,92 @@ def test_direct_tasks_get_requires_context_id(agent, client):
     assert resp.status_code == 400
 
 
+# --- session minting (contextId is optional on first contact) --------------------------
+
+
+def _message_params_without_context(text: str = "hi") -> dict:
+    return {
+        "message": {
+            "messageId": "msg-1",
+            "role": "ROLE_USER",
+            "parts": [{"text": text}],
+        }
+    }
+
+
+def _echo_session_arun(**kwargs):
+    """arun stub that binds the run output to whatever session it was given."""
+
+    async def _run(**inner):
+        return RunOutput(run_id="run-1", session_id=inner["session_id"], content="ok", status=RunStatus.completed)
+
+    return _run(**kwargs)
+
+
+def test_omitted_context_id_mints_distinct_sessions_per_call(agent, client):
+    """Sessionless A2A runs must never share the sticky per-instance session."""
+    seen_sessions = []
+
+    with patch.object(agent, "arun", side_effect=_echo_session_arun):
+        for _ in range(2):
+            resp = client.post(
+                f"/a2a/agents/{AGENT_ID}/v1/message:send",
+                json=_rpc("SendMessage", _message_params_without_context()),
+            )
+            seen_sessions.append(resp.json()["result"]["task"]["contextId"])
+
+    first, second = seen_sessions
+    assert first and second, "minted contextId must be returned to the client"
+    assert first != second, "each sessionless call must get its own session"
+
+
+def test_omitted_context_id_never_forwards_none_to_arun(agent, client):
+    with patch.object(agent, "arun", side_effect=_echo_session_arun) as mock_arun:
+        client.post(
+            f"/a2a/agents/{AGENT_ID}/v1/message:send",
+            json=_rpc("SendMessage", _message_params_without_context()),
+        )
+    session_id = mock_arun.call_args.kwargs["session_id"]
+    assert isinstance(session_id, str) and session_id != ""
+
+
+def test_explicit_context_id_is_reused(agent, client):
+    with patch.object(agent, "arun", side_effect=_echo_session_arun) as mock_arun:
+        for _ in range(2):
+            resp = client.post(
+                f"/a2a/agents/{AGENT_ID}/v1/message:send",
+                json=_rpc("SendMessage", _message_params()),
+            )
+            assert mock_arun.call_args.kwargs["session_id"] == "ctx-1"
+            assert resp.json()["result"]["task"]["contextId"] == "ctx-1"
+
+
+def test_legacy_send_route_also_mints(agent, client):
+    params = _message_params_without_context()
+    params["message"]["agentId"] = AGENT_ID
+
+    with patch.object(agent, "arun", side_effect=_echo_session_arun) as mock_arun:
+        resp = client.post("/a2a/message/send", json=_rpc("message/send", params))
+
+    session_id = mock_arun.call_args.kwargs["session_id"]
+    assert isinstance(session_id, str) and session_id != ""
+    assert resp.json()["result"]["task"]["contextId"] == session_id
+
+
+def test_streaming_without_context_id_mints(agent, client):
+    async def event_stream(**kwargs):
+        yield RunOutput(run_id="run-1", session_id=kwargs["session_id"], content="ok", status=RunStatus.completed)
+
+    with patch.object(agent, "arun", side_effect=lambda **kwargs: event_stream(**kwargs)) as mock_arun:
+        resp = client.post(
+            f"/a2a/agents/{AGENT_ID}/v1/message:stream",
+            json=_rpc("SendStreamingMessage", _message_params_without_context()),
+        )
+    assert resp.status_code == 200
+    session_id = mock_arun.call_args.kwargs["session_id"]
+    assert isinstance(session_id, str) and session_id != ""
+
+
 # --- agent card ----------------------------------------------------------------------
 
 

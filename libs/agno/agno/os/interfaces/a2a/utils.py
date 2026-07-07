@@ -81,6 +81,27 @@ from agno.run.base import RunStatus
 from agno.utils.log import log_error
 
 
+# --- session -------------------------------------------------------------------
+
+
+def session_id_or_new(context_id: Optional[str]) -> str:
+    """Return the caller's A2A contextId, or mint a fresh session id when it is omitted or empty.
+
+    A2A's ``contextId`` is optional on first contact — the server is expected to assign the
+    session and return it to the client. The router must not forward ``session_id=None`` (or
+    ``""``) to ``arun``: a component reused across calls (a shared ``AgentProtocol``/
+    ``RemoteAgent``/``RemoteTeam``, a remote workflow, or any instance not deep-copied per
+    call) would fall back to the sticky per-instance session that ``initialize_session``
+    caches on it, collapsing every "sessionless" run into one ever-growing conversation and
+    leaking history between unrelated requests. The REST run routes mint a uuid per run for
+    exactly this reason. An explicit contextId is always honoured, so continuing a
+    conversation still works.
+    """
+    if context_id is None or context_id == "":
+        return str(uuid4())
+    return context_id
+
+
 # --- proto <-> wire helpers ----------------------------------------------------
 
 

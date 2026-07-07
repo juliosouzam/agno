@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from agno.os.interfaces.a2a.utils import (
     map_a2a_request_to_run_input,
     map_run_output_to_a2a_task,
+    session_id_or_new,
     stream_a2a_response,
     stream_a2a_response_with_error_handling,
 )
@@ -181,3 +182,24 @@ async def test_stream_error_does_not_leak_exception_text():
     assert "secret" not in wire_text
     assert "10.0.0.5" not in wire_text
     assert "internal server error" in wire_text
+
+
+# --- session_id_or_new (contextId is optional on first contact) ------------------
+
+
+def test_explicit_context_id_is_honoured():
+    assert session_id_or_new("ctx-123") == "ctx-123"
+
+
+def test_none_context_mints_a_fresh_session():
+    minted = session_id_or_new(None)
+    assert isinstance(minted, str) and len(minted) > 0
+
+
+def test_empty_context_mints_a_fresh_session():
+    minted = session_id_or_new("")
+    assert isinstance(minted, str) and len(minted) > 0
+
+
+def test_sessionless_calls_get_distinct_sessions():
+    assert session_id_or_new(None) != session_id_or_new(None)
