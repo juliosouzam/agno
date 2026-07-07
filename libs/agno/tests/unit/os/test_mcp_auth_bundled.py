@@ -205,7 +205,7 @@ async def test_discovery_and_challenge(tmp_path):
 
 async def test_wrong_secret_rejected_then_throttled(tmp_path):
     db = _db(tmp_path)
-    provider = _provider(db, max_login_failures_per_ip=2)
+    provider = _provider(db, max_login_failures_per_ip=3)
     async with _http_client(_os(provider, db=db)) as client:
         registration = await _register(client)
         client_id = registration.json()["client_id"]
@@ -215,16 +215,36 @@ async def test_wrong_secret_rejected_then_throttled(tmp_path):
         assert first.status_code == 200
         assert "Wrong connect secret" in first.text
 
-        # Fresh CSRF from the re-rendered page each time.
-        csrf = re.search(r'name="csrf" value="([^"]+)"', first.text).group(1)
-        second = await _approve(client, txn, csrf, secret="wrong")
-        csrf = re.search(r'name="csrf" value="([^"]+)"', second.text).group(1)
-        throttled = await _approve(client, txn, csrf, secret="wrong")
-        assert throttled.status_code == 429
+        # Keep sending wrong secrets (fresh CSRF from each re-render) until throttled.
+        status = 200
+        for _ in range(5):
+            match = re.search(r'name="csrf" value="([^"]+)"', first.text)
+            csrf = match.group(1) if match else csrf
+            first = await _approve(client, txn, csrf, secret="wrong")
+            status = first.status_code
+            if status == 429:
+                break
+        assert status == 429
 
-        # The throttle also blocks a now-correct attempt from the same address.
-        still_throttled = await _approve(client, txn, csrf, secret=_SECRET)
-        assert still_throttled.status_code == 429
+
+async def test_correct_secret_is_never_throttled(tmp_path):
+    """The limiter shapes only the FAILURE response: a flood of wrong-secret attempts
+    (the DCR/authorize endpoints are unauthenticated) must not lock out a correct login."""
+    db = _db(tmp_path)
+    # A global limiter of 1 is saturated by a single wrong attempt from any source.
+    provider = _provider(db, max_login_failures_global=1)
+    async with _http_client(_os(provider, db=db)) as client:
+        reg_a = await _register(client)
+        _, txn_a, csrf_a, _ = await _start_authorization(client, reg_a.json()["client_id"])
+        saturate = await _approve(client, txn_a, csrf_a, secret="wrong")
+        assert saturate.status_code in (200, 429)
+
+        # A fresh, legitimate connection with the correct secret still succeeds.
+        reg_b = await _register(client)
+        _, txn_b, csrf_b, _ = await _start_authorization(client, reg_b.json()["client_id"])
+        approved = await _approve(client, txn_b, csrf_b, secret=_SECRET)
+    assert approved.status_code == 302
+    assert "code=" in approved.headers["location"]
 
 
 async def test_csrf_mismatch_rejected(tmp_path):
@@ -436,3 +456,149 @@ def test_from_env_requires_connect_secret(tmp_path, monkeypatch):
     monkeypatch.delenv("MCP_CONNECT_SECRET", raising=False)
     with pytest.raises(ValueError, match="MCP_CONNECT_SECRET"):
         AgentOSBundledAuth.from_env(db=_db(tmp_path))
+
+
+def test_async_db_rejected_at_construction(tmp_path):
+    """An async db must fail clearly at construction, not with an opaque 500 on the first
+    request (the sync store paths cannot drive an AsyncEngine)."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from agno.db.sqlite.async_sqlite import AsyncSqliteDb
+
+    engine = create_async_engine("sqlite+aiosqlite:///" + str(tmp_path / "async.db"))
+    db = AsyncSqliteDb(db_engine=engine)
+    with pytest.raises(ValueError, match="async databases"):
+        _provider(db)
+
+
+# ==================== RFC 8252 loopback redirect (Claude Code / mcp-remote) ====================
+
+
+async def test_loopback_redirect_port_may_vary(tmp_path):
+    """A CLI client registers a loopback callback, then authorizes from a different
+    ephemeral port on a later run -- the second port must be accepted (RFC 8252)."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        registration = await client.post(
+            "/register",
+            json={
+                "client_name": "Claude Code",
+                "redirect_uris": ["http://127.0.0.1:51111/callback"],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+        client_id = registration.json()["client_id"]
+
+        _, challenge = _pkce_pair()
+        # Same client_id, a DIFFERENT loopback port.
+        authorization = await client.get(
+            "/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": "http://127.0.0.1:60222/callback",
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "s",
+            },
+            follow_redirects=False,
+        )
+    assert authorization.status_code in (302, 307), authorization.text
+    assert CONSENT_PATH in authorization.headers["location"]
+
+
+# ==================== DCR table cap (anti-flood, not a lifetime limit) ====================
+
+
+async def test_client_cap_bounds_pending_not_lifetime(tmp_path):
+    """The cap bounds PENDING (unconsummated) registrations only, so a run of legitimate
+    consumed connections never wedges /register for new clients."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db, max_clients=3), db=db)) as client:
+        # Four full, consented connections -- each consumes its client row.
+        for _ in range(4):
+            tokens, _ = await _full_flow(client)
+            assert tokens["access_token"]
+        # A fresh registration still succeeds despite max_clients=3, because consumed
+        # rows do not count against the pending cap.
+        registration = await _register(client)
+    assert registration.status_code == 201
+
+
+# ==================== Refresh across access-token expiry (forced short TTL) ====================
+
+
+async def test_refresh_survives_access_token_expiry_across_replicas(tmp_path):
+    """plan Phase 2 proof: with a forced-short access TTL, a connector keeps working
+    across expiry via refresh -- observed on a SECOND provider instance (shared DB +
+    stateless verify), with the old refresh token rejected there."""
+    import asyncio
+
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db, access_token_ttl=1), db=db)) as client:
+        tokens, client_id = await _full_flow(client)
+
+    await asyncio.sleep(1.2)  # let the access token expire
+
+    replica = _os(_provider(db, access_token_ttl=1), db=db)
+    async with _http_client(replica) as client:
+        expired = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}"}
+        )
+        assert expired.status_code == 401  # stateless expiry check on the second replica
+
+        refreshed = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id},
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        new_access = refreshed.json()["access_token"]
+
+        # The old refresh token is rejected on the second replica (rotation is shared).
+        replay = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id},
+        )
+        assert replay.status_code in (400, 401)
+
+        # The freshly refreshed access token runs MCP requests.
+        ok = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {new_access}"}
+        )
+        assert ok.status_code == 200
+
+
+# ==================== Signing-key rotation overlap ====================
+
+
+async def test_signing_key_rotation_overlap(tmp_path):
+    """Adding a new signing key (env-primary) keeps tokens signed by the persisted key
+    verifiable during the overlap, so rotation is graceful rather than a hard cut."""
+    db = _db(tmp_path)
+    # First instance: no env key, so it generates+persists a db key and signs with it.
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        tokens, _ = await _full_flow(client)
+
+    # Rotation: a new env-primary key is added. The persisted key is still active, so the
+    # old token keeps verifying (overlap); new tokens are signed by the env key.
+    rotated = _os(_provider(db, signing_key_material="freshly-rotated-in-key-material"), db=db)
+    async with _http_client(rotated) as client:
+        old_still_valid = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}"}
+        )
+    assert old_still_valid.status_code == 200
+
+
+# ==================== Reserved principal ====================
+
+
+def test_oauth_principal_is_reserved():
+    """A deployment JWT must not be able to claim an oauth: principal the bundled AS
+    assigns to its connected clients."""
+    from agno.os.middleware.jwt import is_reserved_principal
+
+    assert is_reserved_principal("oauth:claude-ai") is True
+    assert is_reserved_principal("sa:bot") is True
+    assert is_reserved_principal("regular-user") is False

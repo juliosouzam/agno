@@ -33,9 +33,14 @@ Security properties, deliberate and load-bearing:
 - **The consent page** renders only for a valid pending authorization transaction,
   compares the secret in constant time, double-submits a CSRF token, denies framing,
   and rate-limits failures per-IP and globally with failure logging.
-- **Revocation levers:** rotating the signing key invalidates all outstanding access
-  tokens; deleting a refresh-token row stops renewal. Rotating the connect secret
-  gates future logins only -- it revokes nothing already issued.
+- **Revocation levers:** rotating the signing key invalidates the access tokens it
+  signed; deleting a refresh-token row stops renewal. Rotating the connect secret gates
+  future logins only -- it revokes nothing already issued.
+- **Signing key:** env-primary (``AGENTOS_MCP_SIGNING_KEY``). Set it in production so the
+  token trust root is env-managed; when unset, a key is generated and persisted in the
+  same database (survives redeploy, shared across replicas) -- convenient, but then a
+  database read yields the signing material. Keys support a rotation overlap: the newest
+  signs, any active key verifies.
 """
 
 import hashlib
@@ -43,8 +48,9 @@ import hmac
 import html
 import json
 import secrets
+import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from agno.utils.log import log_debug, log_info, log_warning
 
@@ -85,7 +91,7 @@ DEFAULT_ACCESS_TOKEN_TTL = 60 * 60  # 1 hour
 DEFAULT_REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60  # 30 days, rotated on every use
 DEFAULT_AUTH_CODE_TTL = 5 * 60  # single-use, 5 minutes
 DEFAULT_TRANSACTION_TTL = 10 * 60  # login page validity window
-DEFAULT_MAX_CLIENTS = 1000  # DCR table cap ( /register is an unauthenticated write path)
+DEFAULT_MAX_CLIENTS = 1000  # cap on PENDING (unconsummated) DCR registrations
 DEFAULT_UNCONSUMED_CLIENT_TTL = 24 * 60 * 60  # unconsummated registrations expire
 
 # The login/consent surface, served by this provider inside the MCP sub-app (and so
@@ -105,6 +111,24 @@ def _hash(value: str) -> str:
 def _constant_time_equals(a: str, b: str) -> bool:
     # Compare digests, not the raw strings, so length is not observable.
     return hmac.compare_digest(_hash(a), _hash(b))
+
+
+class _LoopbackTolerantClient(OAuthClientInformationFull):
+    """A DCR client that permits a registered loopback redirect URI to vary its port.
+
+    RFC 8252: native CLI clients (Claude Code, mcp-remote) register a client_id, then on
+    a later authorization bind a fresh ephemeral callback port. Exact-match validation
+    would reject the second run with "redirect_uri not registered". Non-loopback URIs
+    (claude.ai, ChatGPT) keep exact matching.
+    """
+
+    def validate_redirect_uri(self, redirect_uri: Any) -> Any:
+        if redirect_uri is not None and self.redirect_uris:
+            from fastmcp.server.auth.oauth_proxy.models import _matches_registered_redirect_uri
+
+            if _matches_registered_redirect_uri(redirect_uri, self.redirect_uris):
+                return redirect_uri
+        return super().validate_redirect_uri(redirect_uri)
 
 
 class AgentOSBundledAuth(OAuthProvider):
@@ -145,6 +169,7 @@ class AgentOSBundledAuth(OAuthProvider):
         max_login_failures_per_ip: int = 10,
         max_login_failures_global: int = 100,
         enable_cimd: bool = True,
+        consumed_client_retention: int = DEFAULT_REFRESH_TOKEN_TTL * 2,
     ):
         super().__init__(
             base_url=base_url,
@@ -167,8 +192,14 @@ class AgentOSBundledAuth(OAuthProvider):
         self._signing_key_material = signing_key_material
         self._server_name = server_name
         self._max_clients = max_clients
-        self._issuer: Optional[JWTIssuer] = None
+        self._consumed_client_retention = consumed_client_retention
+        # Verifiers, newest first: the current key issues, and any of the persisted
+        # keys can verify -- so rotation is add-new-key, let old tokens drain, then
+        # remove the old key (a graceful dual-key overlap rather than a hard cut).
+        self._issuers: List[Tuple[str, JWTIssuer]] = []
         self._tables_ready = False
+        # Guards lazy table creation + key load against concurrent first requests.
+        self._ready_lock = threading.Lock()
 
         from agno.os.service_accounts import _FailedLookupLimiter
 
@@ -220,7 +251,17 @@ class AgentOSBundledAuth(OAuthProvider):
         if engine is None:
             raise ValueError(
                 f"AgentOSBundledAuth requires a SQLAlchemy-backed database (PostgresDb in production); "
-                f"got {type(db).__name__}. Async databases are not supported yet -- pass the sync db."
+                f"got {type(db).__name__}."
+            )
+        # Async adapters (AsyncPostgresDb / AsyncSqliteDb) expose a db_engine too, but it
+        # is an AsyncEngine the synchronous store paths cannot drive. Fail clearly at
+        # construction rather than with an opaque 500 on the first request.
+        from sqlalchemy.ext.asyncio import AsyncEngine
+
+        if isinstance(engine, AsyncEngine):
+            raise ValueError(
+                f"AgentOSBundledAuth does not support async databases yet ({type(db).__name__}); "
+                "pass a synchronous PostgresDb (production) or SqliteDb (development)."
             )
         if engine.dialect.name == "sqlite":
             log_warning(
@@ -232,7 +273,11 @@ class AgentOSBundledAuth(OAuthProvider):
     def _define_tables(self) -> None:
         from sqlalchemy import BigInteger, Column, MetaData, String, Table, Text
 
-        self._metadata = MetaData()
+        # Pin the OAuth tables to the same schema as the rest of the agno tables, so a
+        # deployment with a non-default/locked-down schema (e.g. a role without CREATE on
+        # public) creates them where it expects. db_schema is None for SQLite.
+        db_schema = getattr(self._db, "db_schema", None)
+        self._metadata = MetaData(schema=db_schema)
         self._clients_table = Table(
             "agno_mcp_oauth_clients",
             self._metadata,
@@ -273,50 +318,89 @@ class AgentOSBundledAuth(OAuthProvider):
         )
 
     def _ensure_ready(self) -> None:
-        """Create the namespaced tables on first use and load/derive the signing key."""
+        """Create the namespaced tables on first use and load the signing key(s).
+
+        Locked so concurrent first requests do not both run create_all (a TOCTOU that
+        would 500 the loser) or double-load the keys. Idempotent after the first call.
+        """
         if self._tables_ready:
             return
-        self._define_tables()
-        self._metadata.create_all(self._engine, checkfirst=True)
-        self._issuer = JWTIssuer(
-            issuer=str(self.base_url).rstrip("/"),
-            audience=str(self._get_resource_url(self._mcp_path or "/mcp")),
-            signing_key=self._load_signing_key(),
-        )
-        self._tables_ready = True
+        with self._ready_lock:
+            if self._tables_ready:
+                return
+            self._define_tables()
+            self._metadata.create_all(self._engine, checkfirst=True)
+            self._issuers = self._load_issuers()
+            self._tables_ready = True
 
-    def _load_signing_key(self) -> bytes:
-        """Env-primary signing key; otherwise generated once and persisted in the db.
-
-        The persisted key is what makes tokens survive a redeploy and verify on every
-        replica. Deleting the row (or changing AGENTOS_MCP_SIGNING_KEY) rotates the key
-        and invalidates all outstanding access tokens -- the revocation kill switch.
-        """
+    def _build_issuer(self, material: str, kid: str) -> Tuple[str, "JWTIssuer"]:
         salt = str(self.base_url).rstrip("/")
-        if self._signing_key_material:
-            return derive_jwt_key(high_entropy_material=self._signing_key_material, salt=salt)
+        issuer = JWTIssuer(
+            issuer=salt,
+            audience=str(self._get_resource_url(self._mcp_path or "/mcp")),
+            signing_key=derive_jwt_key(high_entropy_material=material, salt=salt),
+        )
+        return kid, issuer
 
+    def _load_issuers(self) -> List[Tuple[str, "JWTIssuer"]]:
+        """The signing key(s): newest first. The newest issues; any verifies.
+
+        Env-primary: AGENTOS_MCP_SIGNING_KEY is always the current issuer. Persisted
+        keys in ``agno_mcp_oauth_keys`` provide the rotation overlap -- add a new row (or
+        set the env key), let tokens signed by the old key drain within their TTL, then
+        delete the old row. Rotating away from a key invalidates the access tokens it
+        signed (the revocation lever); deleting all keys is a full reset.
+
+        When neither env nor a persisted key exists, one is generated and persisted so
+        tokens survive a redeploy and verify across replicas.
+        """
         from sqlalchemy import insert, select
         from sqlalchemy.exc import IntegrityError
 
+        issuers: List[Tuple[str, JWTIssuer]] = []
+        if self._signing_key_material:
+            issuers.append(self._build_issuer(self._signing_key_material, "env"))
+
         with self._engine.connect() as conn:
-            row = conn.execute(select(self._keys_table.c.secret).order_by(self._keys_table.c.created_at)).first()
-            if row is None:
+            rows = conn.execute(
+                select(self._keys_table.c.kid, self._keys_table.c.secret).order_by(self._keys_table.c.created_at.desc())
+            ).all()
+            if not rows and not issuers:
                 material = secrets.token_urlsafe(48)
                 try:
                     conn.execute(
                         insert(self._keys_table).values(kid="default", secret=material, created_at=int(time.time()))
                     )
                     conn.commit()
-                    log_info("Generated and persisted the bundled MCP OAuth signing key")
+                    log_info(
+                        "Generated and persisted the bundled MCP OAuth signing key. For production, set "
+                        "AGENTOS_MCP_SIGNING_KEY so the token trust root is env-managed, not stored in the database."
+                    )
+                    rows = [("default", material)]
                 except IntegrityError:
-                    # Another replica won the race; use its key.
                     conn.rollback()
-                    row = conn.execute(select(self._keys_table.c.secret)).first()
-                    material = row[0] if row is not None else material
-            else:
-                material = row[0]
-        return derive_jwt_key(high_entropy_material=material, salt=salt)
+                    rows = conn.execute(
+                        select(self._keys_table.c.kid, self._keys_table.c.secret).order_by(
+                            self._keys_table.c.created_at.desc()
+                        )
+                    ).all()
+            for kid, material in rows:
+                issuers.append(self._build_issuer(material, kid))
+        return issuers
+
+    @property
+    def _issuer(self) -> "JWTIssuer":
+        """The current issuer -- the one that signs newly minted tokens."""
+        return self._issuers[0][1]
+
+    def _verify_any(self, token: str, expected_token_use: str) -> Optional[Dict[str, Any]]:
+        """Verify against any active signing key (the dual-key rotation overlap)."""
+        for _, issuer in self._issuers:
+            try:
+                return issuer.verify_token(token, expected_token_use=expected_token_use)
+            except Exception:
+                continue
+        return None
 
     async def _run(self, fn: Any, *args: Any) -> Any:
         """Run a sync DB operation without blocking the event loop."""
@@ -343,7 +427,10 @@ class AgentOSBundledAuth(OAuthProvider):
             ).first()
         if row is None:
             return None
-        return OAuthClientInformationFull.model_validate(json.loads(row[0]))
+        # Return a client whose redirect-URI validation allows a registered loopback
+        # host to vary its port (RFC 8252) -- Claude Code / mcp-remote persist their
+        # client_id and bind a fresh ephemeral callback port on a later auth run.
+        return _LoopbackTolerantClient.model_validate(json.loads(row[0]))
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         # Public clients only: connector clients (claude.ai, ChatGPT, Claude Code,
@@ -367,20 +454,38 @@ class AgentOSBundledAuth(OAuthProvider):
         self._ensure_ready()
         now = int(time.time())
         with self._engine.connect() as conn:
-            # /register is an unauthenticated write path: expire unconsummated
-            # registrations and cap the table so it cannot be flooded.
+            # /register is an unauthenticated write path. Expire unconsummated
+            # registrations (the flood vector), and age out consumed rows well past the
+            # refresh-token TTL (a consumed client with a live refresh token must keep
+            # resolving, so retention comfortably exceeds it).
             conn.execute(
                 delete(self._clients_table).where(
                     self._clients_table.c.consumed_at.is_(None),
                     self._clients_table.c.created_at < now - DEFAULT_UNCONSUMED_CLIENT_TTL,
                 )
             )
-            count = conn.execute(select(func.count()).select_from(self._clients_table)).scalar() or 0
+            conn.execute(
+                delete(self._clients_table).where(
+                    self._clients_table.c.consumed_at.isnot(None),
+                    self._clients_table.c.consumed_at < now - self._consumed_client_retention,
+                )
+            )
+            # The cap is anti-flood: it bounds UNCONSUMED registrations only, so a run of
+            # legitimate (deployer-approved, consumed) connections can never wedge
+            # /register for new clients.
+            count = (
+                conn.execute(
+                    select(func.count())
+                    .select_from(self._clients_table)
+                    .where(self._clients_table.c.consumed_at.is_(None))
+                ).scalar()
+                or 0
+            )
             if count >= self._max_clients:
                 conn.commit()
                 raise RegistrationError(
                     error="invalid_client_metadata",
-                    error_description="Client registration limit reached on this server.",
+                    error_description="Too many pending client registrations on this server; try again later.",
                 )
             conn.execute(
                 insert(self._clients_table).values(
@@ -619,19 +724,28 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
                 headers=self._consent_headers(),
             )
 
+        # Verify first, throttle only the FAILURE. A correct secret is never blocked --
+        # so a flood of wrong-secret attempts (the DCR + /authorize endpoints are
+        # unauthenticated, so anyone can drive the consent POST) cannot lock the deployer
+        # out of approving a connection. Mirrors ServiceAccountVerifier's limiter.
         client_key = request.client.host if request.client else "unknown"
-        if self._ip_limiter.is_limited(client_key) or self._global_limiter.is_limited("global"):
-            log_warning(f"MCP consent login throttled for {client_key}: too many failed attempts")
-            return HTMLResponse(
-                "<h1>Too many failed attempts. Try again later.</h1>",
-                status_code=429,
-                headers=self._consent_headers(),
-            )
-        if not _constant_time_equals(str(form.get("secret", "")), self._connect_secret):
+        if _constant_time_equals(str(form.get("secret", "")), self._connect_secret):
+            secret_ok = True
+        else:
+            secret_ok = False
             self._ip_limiter.record_failure(client_key)
             self._global_limiter.record_failure("global")
             log_warning(f"MCP consent login failed from {client_key} (wrong connect secret)")
+
+        if not secret_ok:
             client_name = await self._display_name(payload["client_id"])
+            if self._ip_limiter.is_limited(client_key) or self._global_limiter.is_limited("global"):
+                log_warning(f"MCP consent login throttled for {client_key}: too many failed attempts")
+                return HTMLResponse(
+                    "<h1>Too many failed attempts. Try again later.</h1>",
+                    status_code=429,
+                    headers=self._consent_headers(),
+                )
             return self._render_consent_page(txn_id, payload, client_name, error="Wrong connect secret.")
 
         consumed = await self._run(self._consume_transaction_sync, txn_id)
@@ -737,7 +851,6 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
 
     async def _issue_tokens(self, client_id: str, scopes: List[str]) -> OAuthToken:
         await self._run(self._ensure_ready)
-        assert self._issuer is not None
         access_token = self._issuer.issue_access_token(
             client_id=client_id, scopes=scopes, jti=secrets.token_hex(16), expires_in=self._access_token_ttl
         )
@@ -774,10 +887,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> Optional[RefreshToken]:
         await self._run(self._ensure_ready)
-        assert self._issuer is not None
-        try:
-            self._issuer.verify_token(refresh_token, expected_token_use="refresh")
-        except Exception:
+        if self._verify_any(refresh_token, "refresh") is None:
             return None
         row = await self._run(self._load_refresh_sync, refresh_token)
         if row is None:
@@ -827,12 +937,14 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         return result.rowcount == 1
 
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
-        """Stateless verification: signature + expiry + issuer + audience, no DB hit."""
+        """Stateless verification: signature + expiry + issuer + audience, no DB hit.
+
+        Tries every active signing key, so tokens signed by a still-valid previous key
+        keep verifying during a rotation overlap.
+        """
         await self._run(self._ensure_ready)
-        assert self._issuer is not None
-        try:
-            payload = self._issuer.verify_token(token, expected_token_use="access")
-        except Exception:
+        payload = self._verify_any(token, "access")
+        if payload is None:
             return None
         client_id = payload.get("client_id", "")
         scopes = str(payload.get("scope", "")).split()

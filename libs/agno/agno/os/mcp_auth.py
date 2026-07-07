@@ -222,9 +222,17 @@ def _first_postgres_db(os: "AgentOS") -> Optional[Any]:
     except ImportError:
         return None
     candidates: List[Any] = []
+    # os.db (the AgentOS-level db) is set at construction, before database
+    # auto-discovery populates os.dbs -- so it is the reliable source at
+    # mcp_auth resolution time. os.dbs is a fallback for agent-attached dbs and
+    # maps id -> list[db], so its values are flattened.
     if getattr(os, "db", None) is not None:
         candidates.append(os.db)
-    candidates.extend((getattr(os, "dbs", None) or {}).values())
+    for value in (getattr(os, "dbs", None) or {}).values():
+        if isinstance(value, (list, tuple, set)):
+            candidates.extend(value)
+        else:
+            candidates.append(value)
     for db in candidates:
         if isinstance(db, PostgresDb):
             return db
