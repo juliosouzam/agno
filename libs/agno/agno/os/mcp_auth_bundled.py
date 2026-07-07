@@ -25,16 +25,22 @@ Security properties, deliberate and load-bearing:
   confidential registration is rejected rather than storing a client secret.
 - **Hash-at-rest.** Authorization codes and refresh tokens are stored SHA-256-hashed
   (matching the service-account PAT model); a database read yields nothing replayable.
-- **Server-decided scopes.** The grant is a fixed, deployer-configured scope set;
-  client-requested scopes can never expand it.
+- **Server-decided scopes.** The grant is a fixed, deployer-configured scope set,
+  stamped onto the auth code at mint time -- client-requested DCR/authorize scopes are
+  overwritten, not merely validated, so they can never expand it.
+- **Public clients only.** DCR normalizes an omitted client-auth method to ``none`` and
+  rejects an explicit confidential method, so no client secret is ever minted or stored;
+  possession is proven by PKCE.
 - **Single-use, short-lived codes; refresh rotation on every use.** Code exchange and
   refresh rotation are atomic DELETE-then-act, so a replayed code/refresh token fails
   on every replica.
-- **The consent page** renders only for a valid pending authorization transaction,
-  compares the secret in constant time, double-submits a CSRF token, denies framing,
-  and rate-limits failures per-IP and globally with failure logging.
-- **Revocation levers:** rotating the signing key invalidates the access tokens it
-  signed; deleting a refresh-token row stops renewal. Rotating the connect secret gates
+- **The consent page** is served only over HTTPS (or loopback for dev), renders only for
+  a valid pending authorization transaction, compares the secret in constant time,
+  double-submits a Secure CSRF cookie, denies framing, and rate-limits failures per-IP
+  and globally (verify-first, so a wrong-secret flood never blocks a correct login).
+- **Revocation levers:** rotating the signing key invalidates every token it signed --
+  access *and* refresh (both are JWTs under the same key) -- forcing re-consent; deleting
+  a refresh-token row stops renewal for that client. Rotating the connect secret gates
   future logins only -- it revokes nothing already issued.
 - **Signing key:** env-primary (``AGENTOS_MCP_SIGNING_KEY``). Set it in production so the
   token trust root is env-managed; when unset, a key is generated and persisted in the
@@ -92,6 +98,7 @@ DEFAULT_REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60  # 30 days, rotated on every use
 DEFAULT_AUTH_CODE_TTL = 5 * 60  # single-use, 5 minutes
 DEFAULT_TRANSACTION_TTL = 10 * 60  # login page validity window
 DEFAULT_MAX_CLIENTS = 1000  # cap on PENDING (unconsummated) DCR registrations
+DEFAULT_MAX_PENDING_TRANSACTIONS = 2000  # cap on pending /authorize transactions
 # Unconsummated registrations expire fast: a real connector completes register -> consent
 # within minutes, so a short TTL shrinks the window an unauthenticated /register flood
 # could fill the pending cap and delay new-client onboarding.
@@ -196,6 +203,7 @@ class AgentOSBundledAuth(OAuthProvider):
         self._signing_key_material = signing_key_material
         self._server_name = server_name
         self._max_clients = max_clients
+        self._max_pending_transactions = DEFAULT_MAX_PENDING_TRANSACTIONS
         # Verifiers, newest first: the current key issues, and any of the persisted
         # keys can verify -- so rotation is add-new-key, let old tokens drain, then
         # remove the old key (a graceful dual-key overlap rather than a hard cut).
@@ -538,12 +546,26 @@ class AgentOSBundledAuth(OAuthProvider):
         return f"{str(self.base_url).rstrip('/')}{CONSENT_PATH}?txn={txn_id}"
 
     def _store_transaction_sync(self, txn_id: str, client_id: str, payload: Dict[str, Any]) -> None:
-        from sqlalchemy import delete, insert
+        from sqlalchemy import delete, func, insert, select
 
         self._ensure_ready()
         now = int(time.time())
         with self._engine.connect() as conn:
             conn.execute(delete(self._transactions_table).where(self._transactions_table.c.expires_at < now))
+            # Bound the table: /authorize is reachable unauthenticated after one DCR
+            # registration, so cap pending transactions and evict the oldest to make room
+            # rather than let a flood grow the table by rate x TTL. Legit new authorizes
+            # always succeed; an evicted stale transaction just restarts from the client.
+            count = conn.execute(select(func.count()).select_from(self._transactions_table)).scalar() or 0
+            overflow = count - (self._max_pending_transactions - 1)
+            if overflow > 0:
+                oldest = (
+                    select(self._transactions_table.c.txn_id)
+                    .order_by(self._transactions_table.c.expires_at.asc())
+                    .limit(overflow)
+                    .scalar_subquery()
+                )
+                conn.execute(delete(self._transactions_table).where(self._transactions_table.c.txn_id.in_(oldest)))
             conn.execute(
                 insert(self._transactions_table).values(
                     txn_id=txn_id,
@@ -606,35 +628,91 @@ class AgentOSBundledAuth(OAuthProvider):
         from starlette.routing import Route
 
         routes = super().get_routes(mcp_path)
-        if self._cimd_manager is not None:
-            # Swap the token endpoint's authenticator for one that also accepts
-            # private_key_jwt assertions from CIMD clients (RFC 7523); standard
-            # methods (none/PKCE) delegate to the SDK unchanged.
-            from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator, TokenHandler
-            from mcp.server.auth.routes import cors_middleware
+        from mcp.server.auth.routes import cors_middleware
+        from starlette.routing import Route as StarletteRoute
 
-            rebuilt: List[Route] = []
-            for route in routes:
-                if isinstance(route, Route) and route.path == "/token" and route.methods and "POST" in route.methods:
-                    authenticator = PrivateKeyJWTClientAuthenticator(
-                        provider=self,
-                        cimd_manager=self._cimd_manager,
-                        token_endpoint_url=f"{str(self.base_url).rstrip('/')}/token",
+        rebuilt: List[Route] = []
+        for route in routes:
+            is_post = isinstance(route, StarletteRoute) and route.methods and "POST" in route.methods
+            if is_post and route.path == "/register":
+                # Normalize DCR registrations to public clients: the SDK handler defaults
+                # an OMITTED token_endpoint_auth_method to client_secret_post and mints a
+                # secret before the provider sees it, which would reject any DCR connector
+                # (Claude Code, mcp-remote) that does not send "none" verbatim. Force
+                # "none" for an omitted method; reject only an explicit confidential one.
+                rebuilt.append(
+                    Route(
+                        "/register",
+                        endpoint=cors_middleware(self._register_public, ["POST", "OPTIONS"]),
+                        methods=["POST", "OPTIONS"],
                     )
-                    handler = TokenHandler(provider=self, client_authenticator=authenticator)
-                    rebuilt.append(
-                        Route(
-                            "/token",
-                            endpoint=cors_middleware(handler.handle, ["POST", "OPTIONS"]),
-                            methods=["POST", "OPTIONS"],
-                        )
+                )
+            elif is_post and route.path == "/token" and self._cimd_manager is not None:
+                # Swap the token endpoint's authenticator for one that also accepts
+                # private_key_jwt assertions from CIMD clients (RFC 7523); standard
+                # methods (none/PKCE) delegate to the SDK unchanged.
+                from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator, TokenHandler
+
+                authenticator = PrivateKeyJWTClientAuthenticator(
+                    provider=self,
+                    cimd_manager=self._cimd_manager,
+                    token_endpoint_url=f"{str(self.base_url).rstrip('/')}/token",
+                )
+                handler = TokenHandler(provider=self, client_authenticator=authenticator)
+                rebuilt.append(
+                    Route(
+                        "/token",
+                        endpoint=cors_middleware(handler.handle, ["POST", "OPTIONS"]),
+                        methods=["POST", "OPTIONS"],
                     )
-                else:
-                    rebuilt.append(route)
-            routes = rebuilt
+                )
+            else:
+                rebuilt.append(route)
+        routes = rebuilt
         routes.append(Route(CONSENT_PATH, endpoint=self._consent_get, methods=["GET"]))
         routes.append(Route(CONSENT_PATH, endpoint=self._consent_post, methods=["POST"]))
         return routes
+
+    async def _register_public(self, request: "Request") -> Any:
+        """DCR that treats an omitted client-auth method as a public (PKCE) client.
+
+        Rejects only a client that EXPLICITLY asks for a confidential method (so no
+        client secret is ever minted or stored), then delegates the remaining RFC 7591
+        validation and storage to the SDK's ``RegistrationHandler`` with the method
+        pinned to ``none``.
+        """
+        from mcp.server.auth.handlers.register import RegistrationErrorResponse, RegistrationHandler
+        from mcp.server.auth.json_response import PydanticJSONResponse
+        from starlette.requests import Request as StarletteRequest
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict):
+            method = body.get("token_endpoint_auth_method")
+            if method is not None and method != "none":
+                return PydanticJSONResponse(
+                    content=RegistrationErrorResponse(
+                        error="invalid_client_metadata",
+                        error_description=(
+                            "This authorization server supports public clients only: register with "
+                            'token_endpoint_auth_method "none" and use PKCE.'
+                        ),
+                    ),
+                    status_code=400,
+                )
+            body["token_endpoint_auth_method"] = "none"
+
+        raw = json.dumps(body).encode()
+
+        async def receive() -> Dict[str, Any]:
+            return {"type": "http.request", "body": raw, "more_body": False}
+
+        normalized = StarletteRequest(request.scope, receive)
+        options = self.client_registration_options or ClientRegistrationOptions(enabled=True)
+        handler = RegistrationHandler(provider=self, options=options)
+        return await handler.handle(normalized)
 
     def _consent_headers(self) -> Dict[str, str]:
         return {
@@ -659,8 +737,21 @@ class AgentOSBundledAuth(OAuthProvider):
                 return client_id
         return await self._run(self._client_display_name_sync, client_id)
 
+    @staticmethod
+    def _request_is_secure(request: "Request") -> bool:
+        """HTTPS, or a loopback host (local development over http)."""
+        if request.url.scheme == "https":
+            return True
+        host = (request.url.hostname or "").lower()
+        return host in ("localhost", "127.0.0.1", "::1")
+
     def _render_consent_page(
-        self, txn_id: str, payload: Dict[str, Any], client_name: str, error: Optional[str] = None
+        self,
+        txn_id: str,
+        payload: Dict[str, Any],
+        client_name: str,
+        error: Optional[str] = None,
+        secure_cookie: bool = True,
     ) -> Any:
         from starlette.responses import HTMLResponse
 
@@ -695,13 +786,31 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
 </form></div></body></html>"""
         response = HTMLResponse(body, headers=self._consent_headers())
         response.set_cookie(
-            _CSRF_COOKIE, csrf_token, max_age=DEFAULT_TRANSACTION_TTL, httponly=True, samesite="lax", path=CONSENT_PATH
+            _CSRF_COOKIE,
+            csrf_token,
+            max_age=DEFAULT_TRANSACTION_TTL,
+            httponly=True,
+            samesite="lax",
+            secure=secure_cookie,
+            path=CONSENT_PATH,
         )
         return response
+
+    def _insecure_response(self) -> Any:
+        from starlette.responses import HTMLResponse
+
+        # The page carries the deployer secret: never serve it over plaintext HTTP.
+        return HTMLResponse(
+            "<h1>This connection must be made over HTTPS.</h1>",
+            status_code=400,
+            headers=self._consent_headers(),
+        )
 
     async def _consent_get(self, request: "Request") -> Any:
         from starlette.responses import HTMLResponse
 
+        if not self._request_is_secure(request):
+            return self._insecure_response()
         txn_id = request.query_params.get("txn", "")
         payload = await self._run(self._load_transaction_sync, txn_id)
         if payload is None:
@@ -712,11 +821,14 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
                 headers=self._consent_headers(),
             )
         client_name = await self._display_name(payload["client_id"])
-        return self._render_consent_page(txn_id, payload, client_name)
+        return self._render_consent_page(txn_id, payload, client_name, secure_cookie=request.url.scheme == "https")
 
     async def _consent_post(self, request: "Request") -> Any:
         from starlette.responses import HTMLResponse, RedirectResponse
 
+        if not self._request_is_secure(request):
+            return self._insecure_response()
+        secure_cookie = request.url.scheme == "https"
         form = await request.form()
         txn_id = str(form.get("txn", ""))
         payload = await self._run(self._load_transaction_sync, txn_id)
@@ -765,7 +877,9 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
                     status_code=429,
                     headers=self._consent_headers(),
                 )
-            return self._render_consent_page(txn_id, payload, client_name, error="Wrong connect secret.")
+            return self._render_consent_page(
+                txn_id, payload, client_name, error="Wrong connect secret.", secure_cookie=secure_cookie
+            )
 
         consumed = await self._run(self._consume_transaction_sync, txn_id)
         if consumed is None:

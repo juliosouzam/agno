@@ -442,10 +442,12 @@ async def test_invalid_jwt_rejected_with_mcp_auth():
     assert response.status_code == 401
 
 
-async def test_jwt_claiming_reserved_principal_rejected():
-    """Parity with the parent middleware: a JWT must not impersonate a service account."""
+@pytest.mark.parametrize("reserved_sub", ["sa:deploy", "oauth:evil", "__scheduler__"])
+async def test_jwt_claiming_reserved_principal_rejected(reserved_sub):
+    """Parity with the parent middleware: a JWT must not impersonate any server-assigned
+    principal (service account, MCP-OAuth client, or the scheduler)."""
     async with _http_client(_jwt_os()) as client:
-        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(sub="sa:deploy")))
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(sub=reserved_sub)))
     assert response.status_code == 401
 
 
@@ -523,6 +525,37 @@ def test_scope_gate_stays_open_without_mcp_auth(monkeypatch):
 
     monkeypatch.setattr(deps, "get_http_request", lambda: _fake_http_request({}, mcp_auth_enabled=False))
     mcp_mod._require_tool_scopes("GET", "/config")
+
+
+async def test_continue_run_gate_fails_closed_when_bridge_absent(monkeypatch):
+    """The run-continuation (HITL) gate is what stops a run's initiator self-approving an
+    admin-required pause over MCP. Under mcp_auth, a verified request with no bridged
+    identity must fail closed there too, not just at the scope gate."""
+    import fastmcp.server.dependencies as deps
+
+    from agno.os import mcp as mcp_mod
+
+    monkeypatch.setattr(deps, "get_http_request", lambda: _fake_http_request({}, mcp_auth_enabled=True))
+    with pytest.raises(Exception, match="identity bridge did not"):
+        await mcp_mod._enforce_run_continuation_allowed(db=None, run_id="run-1")
+
+
+async def test_continue_run_gate_allows_authenticated_rbac_off(monkeypatch):
+    """A bridged RBAC-off caller proceeds past the fail-closed guard (it only fires when
+    the bridge did not run)."""
+    import fastmcp.server.dependencies as deps
+
+    from agno.os import auth as auth_mod
+    from agno.os import mcp as mcp_mod
+
+    async def _no_block(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(auth_mod, "run_continuation_blocked_reason", _no_block)
+    state = {"authenticated": True, "user_id": "alice", "scopes": [], "authorization_enabled": False}
+    monkeypatch.setattr(deps, "get_http_request", lambda: _fake_http_request(state, mcp_auth_enabled=True))
+    # No exception: the guard does not fire for an authenticated caller.
+    await mcp_mod._enforce_run_continuation_allowed(db=None, run_id="run-1")
 
 
 def test_scope_gate_enforces_bridged_identity(monkeypatch):

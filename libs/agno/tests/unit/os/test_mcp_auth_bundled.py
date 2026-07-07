@@ -22,8 +22,10 @@ pytest.importorskip("fastmcp")
 
 import base64  # noqa: E402
 import hashlib  # noqa: E402
+import json  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 from urllib.parse import parse_qs, urlparse  # noqa: E402
 
@@ -70,12 +72,15 @@ def _provider(db, **kwargs) -> AgentOSBundledAuth:
     return AgentOSBundledAuth(db=db, **kwargs)
 
 
-def _os(provider, db=None) -> AgentOS:
+def _os(provider, db=None, security_key=None) -> AgentOS:
+    from agno.os.settings import AgnoAPISettings
+
     return AgentOS(
         agents=[_agent()],
         db=db,
         enable_mcp_server=True,
         mcp_auth=provider,
+        settings=AgnoAPISettings(os_security_key=security_key),
         mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
     )
 
@@ -186,6 +191,8 @@ async def test_full_flow_connects_and_runs_mcp(tmp_path):
     assert response.status_code == 200
     assert tokens["token_type"].lower() == "bearer"
     assert tokens["refresh_token"]
+    # Access tokens are short-lived (spec: <= 1h) so a leaked one has a bounded window.
+    assert 0 < tokens["expires_in"] <= 3600
 
 
 async def test_discovery_and_challenge(tmp_path):
@@ -198,6 +205,36 @@ async def test_discovery_and_challenge(tmp_path):
     assert metadata.json()["issuer"].rstrip("/") == "http://localhost"
     assert challenge.status_code == 401
     assert "resource_metadata=" in challenge.headers.get("www-authenticate", "")
+
+
+async def test_full_flow_behind_active_parent_auth_middleware(tmp_path):
+    """The spec's #1 failure mode: with a parent security key installed, the bundled AS's
+    own routes (/register, /authorize, /token, the consent page) must be exempt from the
+    parent AuthMiddleware -- otherwise a JWT/security-key deploy 401s the OAuth flow
+    before the provider runs. Drive the whole flow and assert provider-level statuses."""
+    db = _db(tmp_path)
+    provider = _provider(db)
+    os = _os(provider, db=db, security_key="parent-key")
+
+    # The provider's routes are in the mechanically-derived AuthMiddleware exemption set.
+    from agno.os.mcp_auth import mcp_auth_route_paths
+
+    paths = mcp_auth_route_paths(os._get_mcp_auth_provider())
+    assert CONSENT_PATH in paths
+    for provider_path in ("/register", "/authorize", "/token"):
+        assert provider_path in paths
+
+    async with _http_client(os) as client:
+        # A REST route still requires the key (the exemptions are scoped, not blanket).
+        assert (await client.get("/agents")).status_code == 401
+        # The whole OAuth flow completes with provider-level statuses, never a parent 401.
+        tokens, _ = await _full_flow(client)
+        assert tokens["access_token"]
+        # And the issued token runs MCP requests through the same secured app.
+        response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}"}
+        )
+    assert response.status_code == 200
 
 
 # ==================== The consent gate ====================
@@ -291,6 +328,124 @@ async def test_confidential_client_registration_rejected(tmp_path):
         response = await _register(client, auth_method="client_secret_post")
     assert response.status_code == 400
     assert "public clients" in response.text
+
+
+async def test_dcr_client_omitting_auth_method_onboards_as_public(tmp_path):
+    """A DCR connector (Claude Code / mcp-remote) that omits token_endpoint_auth_method
+    must onboard as a public client -- the SDK defaults an omitted method to
+    client_secret_post + mints a secret, which would otherwise 400 the whole flow."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        registration = await client.post(
+            "/register",
+            json={
+                "client_name": "Claude Code",
+                "redirect_uris": ["http://127.0.0.1:51111/callback"],
+                # NOTE: no token_endpoint_auth_method (a legal RFC 7591 omission).
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+        assert registration.status_code == 201, registration.text
+        info = registration.json()
+        # Registered as public: no client secret minted or returned.
+        assert info["token_endpoint_auth_method"] == "none"
+        assert not info.get("client_secret")
+
+        # And the full PKCE flow works end to end (no client secret required at /token).
+        client_id = info["client_id"]
+        verifier, challenge = _pkce_pair()
+        authorization = await client.get(
+            "/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": "http://127.0.0.1:51111/callback",
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "s",
+            },
+            follow_redirects=False,
+        )
+        page = await client.get(authorization.headers["location"])
+        txn = re.search(r'name="txn" value="([^"]+)"', page.text).group(1)
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+        approved = await _approve(client, txn, csrf)
+        code = parse_qs(urlparse(approved.headers["location"]).query)["code"][0]
+        token_response = await client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "http://127.0.0.1:51111/callback",
+                "client_id": client_id,
+                "code_verifier": verifier,
+            },
+        )
+    assert token_response.status_code == 200, token_response.text
+
+
+async def test_pending_transactions_are_capped(tmp_path):
+    """/authorize is reachable unauthenticated after one DCR registration; the pending
+    transactions table is bounded (oldest evicted) rather than growing by rate x TTL."""
+    db = _db(tmp_path)
+    provider = _provider(db)
+    provider._max_pending_transactions = 3
+    from sqlalchemy import func, select
+
+    async with _http_client(_os(provider, db=db)) as client:
+        registration = await _register(client)
+        client_id = registration.json()["client_id"]
+        for _ in range(6):
+            await _start_authorization(client, client_id)
+
+    with db.db_engine.connect() as conn:
+        count = conn.execute(select(func.count()).select_from(provider._transactions_table)).scalar()
+    assert count <= 3
+
+
+# ==================== HTTPS / consent-cookie hardening ====================
+
+
+async def test_consent_rejected_over_plaintext_http(tmp_path):
+    """The consent page carries the deployer secret: a non-localhost HTTP request is
+    refused (only HTTPS, or a loopback host for local dev, is allowed)."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        registration = await _register(client)
+        client_id = registration.json()["client_id"]
+        _, challenge = _pkce_pair()
+        authorization = await client.get(
+            "/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": _REDIRECT_URI,
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "s",
+            },
+            follow_redirects=False,
+        )
+        # Drive the consent GET with a non-localhost Host over http.
+        response = await client.get(authorization.headers["location"], headers={"Host": "my-os.example.com"})
+    assert response.status_code == 400
+    assert "HTTPS" in response.text
+
+
+def test_consent_cookie_is_secure_over_https(tmp_path):
+    """The CSRF cookie is marked Secure when the request is HTTPS."""
+    from types import SimpleNamespace
+
+    from starlette.datastructures import URL
+
+    provider = _provider(_db(tmp_path))
+    request = SimpleNamespace(url=URL("https://my-os.example.com/mcp-auth/consent"))
+    payload = {"client_id": "c", "redirect_uri": _REDIRECT_URI, "state": "s"}
+    response = provider._render_consent_page("txn", payload, "c", secure_cookie=provider._request_is_secure(request))
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "Secure" in set_cookie
+    assert "HttpOnly" in set_cookie
 
 
 # ==================== Token lifecycle ====================
@@ -415,6 +570,45 @@ async def test_nothing_replayable_stored_in_db(tmp_path):
                 assert code not in row_text
                 assert tokens["refresh_token"] not in row_text
                 assert tokens["access_token"] not in row_text
+        # The stored client is public: its metadata carries no client_secret.
+        for row in conn.execute(text("SELECT client_metadata FROM agno_mcp_oauth_clients")):
+            metadata = json.loads(row[0])
+            assert not metadata.get("client_secret")
+            assert metadata.get("token_endpoint_auth_method") == "none"
+
+
+async def test_unconsummated_registration_is_pruned(tmp_path):
+    """A pending (never-consented) DCR registration is aged out, so an abandoned or
+    flood registration does not accumulate. Verified by backdating created_at past the
+    unconsummated TTL and triggering the prune with a fresh /register."""
+    from sqlalchemy import func, select, update
+
+    db = _db(tmp_path)
+    provider = _provider(db)
+    async with _http_client(_os(provider, db=db)) as client:
+        stale = await _register(client)
+        stale_id = stale.json()["client_id"]
+        # Backdate the pending row well past the unconsummated TTL.
+        from agno.os.mcp_auth_bundled import DEFAULT_UNCONSUMED_CLIENT_TTL
+
+        old = int(time.time()) - DEFAULT_UNCONSUMED_CLIENT_TTL - 60
+        with db.db_engine.connect() as conn:
+            conn.execute(
+                update(provider._clients_table)
+                .where(provider._clients_table.c.client_id == stale_id)
+                .values(created_at=old)
+            )
+            conn.commit()
+        # A fresh registration triggers the prune.
+        await _register(client)
+
+    with db.db_engine.connect() as conn:
+        remaining = conn.execute(
+            select(func.count())
+            .select_from(provider._clients_table)
+            .where(provider._clients_table.c.client_id == stale_id)
+        ).scalar()
+    assert remaining == 0
 
 
 async def test_env_signing_key_is_primary(tmp_path, monkeypatch):
