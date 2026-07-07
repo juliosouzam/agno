@@ -24,15 +24,6 @@ class AGUI(BaseInterface):
         prefix: str = "",
         tags: Optional[List[str]] = None,
     ):
-        """
-        Initialize the AGUI interface.
-
-        Args:
-            agent: The agent to expose via AG-UI
-            team: The team to expose via AG-UI
-            prefix: Custom prefix for the router (e.g., "/agui/v1", "/chat/public")
-            tags: Custom tags for the router (e.g., ["AGUI", "Chat"], defaults to ["AGUI"])
-        """
         self.agent = agent
         self.team = team
         self.prefix = prefix
@@ -49,9 +40,6 @@ class AGUI(BaseInterface):
         return self.router
 
     def get_scope_mappings(self) -> dict:
-        # POST {prefix}/agui executes the bound entity; gate it on that family's run scope.
-        # Agent-wins precedence MUST match the router's dispatch (`entity = agent or team`
-        # in attach_routes) — if these disagree, the wrong family's tokens gate the route.
-        # /status is a static availability probe (no data) and stays public.
+        # Agent-wins precedence must match router dispatch (entity = agent or team)
         family = "agents" if self.agent is not None else "teams"
         return {f"POST {self.prefix}/agui": [f"{family}:run"]}

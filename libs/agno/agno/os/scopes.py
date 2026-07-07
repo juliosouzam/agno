@@ -414,40 +414,6 @@ def get_accessible_resource_ids(
     return accessible_ids
 
 
-def get_a2a_scope_mappings(prefix: str = "/a2a") -> Dict[str, List[str]]:
-    """Scope requirements for the A2A interface routes mounted under ``prefix``.
-
-    A2A's mount prefix is operator-configurable (``A2A(prefix=...)``), so these are
-    parameterised by prefix rather than hardcoded to ``/a2a``. ``get_default_scope_mappings``
-    includes the default-prefix entries; app startup additionally merges the entries for
-    each mounted A2A interface's *actual* prefix (see ``AgentOS._add_auth_middleware``), so a
-    custom prefix is gated too instead of falling through to the unmapped-route default-allow.
-
-    message:send / message:stream and tasks:cancel execute or mutate a run -> ``:run``;
-    the agent-card and tasks:get are read-only -> ``:read``. The deprecated dynamic-dispatch
-    endpoints resolve the target family at runtime, so they carry a coarse ``agents:run``
-    route gate and re-check the resolved family's run scope inside the handler.
-    """
-    p = prefix.rstrip("/")
-    return {
-        f"GET {p}/agents/*/.well-known/agent-card.json": ["agents:read"],
-        f"POST {p}/agents/*/v1/message:send": ["agents:run"],
-        f"POST {p}/agents/*/v1/message:stream": ["agents:run"],
-        f"POST {p}/agents/*/v1/tasks:get": ["agents:read"],
-        f"POST {p}/agents/*/v1/tasks:cancel": ["agents:run"],
-        f"GET {p}/teams/*/.well-known/agent-card.json": ["teams:read"],
-        f"POST {p}/teams/*/v1/message:send": ["teams:run"],
-        f"POST {p}/teams/*/v1/message:stream": ["teams:run"],
-        f"POST {p}/teams/*/v1/tasks:get": ["teams:read"],
-        f"POST {p}/teams/*/v1/tasks:cancel": ["teams:run"],
-        f"GET {p}/workflows/*/.well-known/agent-card.json": ["workflows:read"],
-        f"POST {p}/workflows/*/v1/message:send": ["workflows:run"],
-        f"POST {p}/workflows/*/v1/message:stream": ["workflows:run"],
-        f"POST {p}/message/send": ["agents:run"],
-        f"POST {p}/message/stream": ["agents:run"],
-    }
-
-
 def get_default_scope_mappings() -> Dict[str, List[str]]:
     """
     Get default scope mappings for AgentOS endpoints.
@@ -579,10 +545,6 @@ def get_default_scope_mappings() -> Dict[str, List[str]]:
         "DELETE /components/*/configs/*": ["components:delete"],
         "POST /components/*/configs/*/set-current": ["components:write"],
     }
-    # A2A interface routes under the default prefix. App startup additionally merges
-    # entries for any A2A interface mounted under a custom prefix (see
-    # AgentOS._add_auth_middleware) so a non-default prefix is gated too.
-    mappings.update(get_a2a_scope_mappings("/a2a"))
     return mappings
 
 
@@ -634,28 +596,30 @@ def get_resource_context_from_path(path: str) -> Tuple[Optional[str], Optional[s
     Examples:
         >>> get_resource_context_from_path("/agents/my-agent/runs")
         ('agents', 'my-agent')
+        >>> get_resource_context_from_path("/a2a/agents/my-agent/v1/message:send")
+        ('agents', 'my-agent')
+        >>> get_resource_context_from_path("/api/v2/agents/my-agent/v1/message:send")
+        ('agents', 'my-agent')
         >>> get_resource_context_from_path("/sessions")
         (None, None)
+        >>> get_resource_context_from_path("/knowledge/content/agents-guide")
+        (None, None)
     """
-    # Anchor to the FIRST path segment. A substring test ("/agents" in path) would
-    # mis-classify any path that merely contains the word -- e.g. GET
-    # /knowledge/content/agents-onboarding would be typed as an "agents" resource and
-    # then slip through the GET-listing escape hatch below into a foreign family. Only
-    # /agents, /teams, /workflows (and their sub-paths) own the resource type.
-    resource_type = None
-    # Optional /a2a prefix so per-resource scopes (agents:<id>:run) authorize the
-    # A2A surface the same way they do REST.
-    type_match = re.match(r"^/(?:a2a/)?(agents|teams|workflows)(?:/|$)", path)
+    # Find agents/teams/workflows as a COMPLETE path segment (between slashes), not a
+    # substring. This handles any prefix (REST root, /a2a/, custom A2A prefixes like
+    # /api/v2/) while rejecting paths that merely contain the word (e.g.
+    # /knowledge/content/agents-guide should NOT match as an "agents" resource).
+    match = re.search(r"/(agents|teams|workflows)/([^/]+)", path)
+    if match:
+        return match.group(1), match.group(2)
+
+    # Check for listing endpoints (no resource ID): /agents, /teams, /workflows
+    # Also handles prefixed paths like /a2a/agents or /api/v2/agents
+    type_match = re.search(r"/(agents|teams|workflows)(?:/|$)", path)
     if type_match:
-        resource_type = type_match.group(1)
+        return type_match.group(1), None
 
-    resource_id = None
-    if resource_type:
-        match = re.match(rf"^/(?:a2a/)?{resource_type}/([^/]+)", path)
-        if match:
-            resource_id = match.group(1)
-
-    return resource_type, resource_id
+    return None, None
 
 
 @dataclass

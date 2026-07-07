@@ -254,15 +254,21 @@ class TestA2AIdentity:
 def test_every_a2a_route_has_a_scope_mapping():
     """Regression guard for the root cause of B1: the unmapped-route default is *allow*,
     so any A2A route added without a scope-map entry would silently ship ungated.
+
+    A2A scope mappings live in the interface (A2A.get_scope_mappings()), not in the
+    central get_default_scope_mappings(). This test verifies that the A2A interface
+    declares scope mappings for all its routes.
     """
-    from agno.os.scopes import get_default_scope_mappings, get_required_scopes_for_route
+    from agno.os.interfaces.a2a.scopes import get_a2a_scope_mappings
+    from agno.os.scopes import get_required_scopes_for_route
 
     agent = Agent(id=AGENT_ID, name="Authz Agent", db=InMemoryDb())
     team = Team(id="authz-team", name="Authz Team", members=[agent], db=InMemoryDb())
     workflow = Workflow(id="authz-wf", name="Authz WF", steps=[Step(name="s", agent=agent)], db=InMemoryDb())
     agent_os = AgentOS(id="a2a-guard-os", agents=[agent], teams=[team], workflows=[workflow], a2a_interface=True)
 
-    mappings = get_default_scope_mappings()
+    # A2A interface scope mappings for the default /a2a prefix
+    mappings = get_a2a_scope_mappings("/a2a")
     unmapped = []
     for route in agent_os.get_routes():
         path = getattr(route, "path", "")
