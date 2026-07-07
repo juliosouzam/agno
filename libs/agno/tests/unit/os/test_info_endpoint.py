@@ -47,13 +47,13 @@ class TestInfoEndpointMcpDiscovery:
     def test_mcp_disabled_by_default(self):
         client = _build_client()
         body = client.get("/info").json()
-        assert body["mcp"] == {"enabled": False, "path": None}
+        assert body["mcp"] == {"enabled": False, "path": None, "oauth": None}
 
     def test_mcp_enabled_reports_path(self):
         pytest.importorskip("fastmcp")
         client = _build_client(enable_mcp_server=True)
         body = client.get("/info").json()
-        assert body["mcp"] == {"enabled": True, "path": "/mcp"}
+        assert body["mcp"] == {"enabled": True, "path": "/mcp", "oauth": None}
 
 
 class TestInfoEndpointAuthMode:

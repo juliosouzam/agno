@@ -243,6 +243,7 @@ class AgentOS:
         lifespan: Optional[Any] = None,
         enable_mcp_server: bool = False,
         mcp_config: Optional[MCPServerConfig] = None,
+        mcp_auth: Optional[Any] = None,
         base_app: Optional[FastAPI] = None,
         on_route_conflict: Literal["preserve_agentos", "preserve_base_app", "error"] = "preserve_agentos",
         tracing: bool = False,
@@ -281,6 +282,14 @@ class AgentOS:
                 ``tools=[...]`` and/or scope the built-in tools via ``enable_builtin_tools`` /
                 ``include_tags`` / ``exclude_tags``. Ignored when ``enable_mcp_server`` is False.
                 When omitted, the MCP server exposes all built-in tools (unchanged behavior).
+            mcp_auth: Optional fastmcp ``AuthProvider`` that owns authentication for the MCP
+                endpoint (OAuth for connector clients like claude.ai and ChatGPT). When set,
+                fastmcp serves the provider's discovery/OAuth routes and the 401 challenge on
+                the MCP surface, agno bridges the verified identity into the tool layer, and
+                the provider is composed with the service-account verifier and the existing
+                JWT config so ``agno_pat_`` and agno-JWT bearers keep working. Requires
+                ``enable_mcp_server=True``. When unset, the existing PAT/JWT path is
+                unchanged.
             base_app: Optional base FastAPI app to use for the AgentOS. All routes and middleware will be added to this app.
             on_route_conflict: What to do when a route conflict is detected in case a custom base_app is provided.
             auto_provision_dbs: Whether to automatically provision databases
@@ -338,6 +347,11 @@ class AgentOS:
 
         self.enable_mcp_server = enable_mcp_server
         self.mcp_config = mcp_config
+        self.mcp_auth = mcp_auth
+        # Resolved lazily (and once): the MultiAuth-wrapped provider handed to FastMCP.
+        self._resolved_mcp_auth: Optional[Any] = None
+        if self.mcp_auth is not None and not self.enable_mcp_server:
+            raise ValueError("AgentOS(mcp_auth=...) requires enable_mcp_server=True.")
         self.lifespan = lifespan
 
         self.registry = registry
@@ -1183,6 +1197,21 @@ class AgentOS:
             )
         return self._service_account_verifier
 
+    def _get_mcp_auth_provider(self) -> Optional[Any]:
+        """The resolved fastmcp auth provider for the MCP endpoint, or None.
+
+        Resolution (type checks, ``MultiAuth`` composition with the service-account
+        verifier) happens once: ``get_mcp_server`` and the auth-middleware exemptions
+        must see the same instance.
+        """
+        if self.mcp_auth is None:
+            return None
+        if self._resolved_mcp_auth is None:
+            from agno.os.mcp_auth import resolve_mcp_auth
+
+            self._resolved_mcp_auth = resolve_mcp_auth(self)
+        return self._resolved_mcp_auth
+
     def _add_auth_middleware(self, fastapi_app: FastAPI, security_key: Optional[str]) -> None:
         """Install the single AgentOS auth layer on the parent app.
 
@@ -1253,14 +1282,27 @@ class AgentOS:
         # too. Passing excluded_route_paths replaces the middleware defaults, so the
         # defaults are repeated here.
         excluded_route_paths: Optional[List[str]] = None
+        interface_prefixes: List[str] = []
         if self.interfaces:
             interface_prefixes = [
                 f"{interface.prefix}/*"
                 for interface in self.interfaces
                 if getattr(interface, "authenticates_own_requests", False) and getattr(interface, "prefix", None)
             ]
-            if interface_prefixes:
-                excluded_route_paths = [
+        # With mcp_auth set, the fastmcp provider owns authentication for the whole MCP
+        # surface: the MCP path itself (the provider's RequireAuthMiddleware emits the
+        # RFC 9728 challenge) and its OAuth/discovery routes, which browsers and connector
+        # backends hit with no agno bearer. Exact paths only, derived from the provider --
+        # a hand-typed wildcard here would silently un-authenticate unrelated routes.
+        mcp_auth_paths: List[str] = []
+        mcp_auth_provider = self._get_mcp_auth_provider()
+        if mcp_auth_provider is not None:
+            from agno.os.mcp_auth import mcp_auth_route_paths
+
+            mcp_auth_paths = mcp_auth_route_paths(mcp_auth_provider)
+        if interface_prefixes or mcp_auth_paths:
+            excluded_route_paths = (
+                [
                     "/",
                     "/health",
                     "/info",
@@ -1268,7 +1310,10 @@ class AgentOS:
                     "/redoc",
                     "/openapi.json",
                     "/docs/oauth2-redirect",
-                ] + interface_prefixes
+                ]
+                + interface_prefixes
+                + mcp_auth_paths
+            )
 
         middleware_kwargs["excluded_route_paths"] = excluded_route_paths
 
