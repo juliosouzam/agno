@@ -179,9 +179,15 @@ def test_mcp_auth_requires_enable_mcp_server():
         AgentOS(agents=[_agent()], mcp_auth=_oauth_provider())
 
 
-def test_mcp_auth_bundled_string_not_available_yet():
+def test_mcp_auth_bundled_requires_postgres():
     os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="bundled")
-    with pytest.raises(ValueError, match="bundled"):
+    with pytest.raises(ValueError, match="Postgres"):
+        os.get_app()
+
+
+def test_mcp_auth_unknown_string_rejected():
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="authkit")
+    with pytest.raises(ValueError, match="Unknown mcp_auth"):
         os.get_app()
 
 

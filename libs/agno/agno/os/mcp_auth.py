@@ -197,6 +197,40 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     )
 
 
+def _resolve_bundled(os: "AgentOS") -> AuthProvider:
+    """Resolve ``mcp_auth="bundled"``: the built-in AS on the deployment's Postgres db.
+
+    Configuration comes from the environment (``AGENTOS_PUBLIC_URL``,
+    ``MCP_CONNECT_SECRET``, optional ``AGENTOS_MCP_SIGNING_KEY``) so a template deploy
+    enables it with env vars alone.
+    """
+    from agno.os.mcp_auth_bundled import AgentOSBundledAuth
+
+    db = _first_postgres_db(os)
+    if db is None:
+        raise ValueError(
+            'mcp_auth="bundled" requires a Postgres database on the AgentOS (the bundled authorization '
+            "server stores clients, codes, and refresh-token state there). Pass db=PostgresDb(...), or "
+            "construct AgentOSBundledAuth(db=...) explicitly -- it accepts SqliteDb for development."
+        )
+    return AgentOSBundledAuth.from_env(db=db, server_name=getattr(os, "name", None))
+
+
+def _first_postgres_db(os: "AgentOS") -> Optional[Any]:
+    try:
+        from agno.db.postgres import PostgresDb
+    except ImportError:
+        return None
+    candidates: List[Any] = []
+    if getattr(os, "db", None) is not None:
+        candidates.append(os.db)
+    candidates.extend((getattr(os, "dbs", None) or {}).values())
+    for db in candidates:
+        if isinstance(db, PostgresDb):
+            return db
+    return None
+
+
 def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     """Resolve ``AgentOS.mcp_auth`` into the provider handed to ``FastMCP(auth=...)``.
 
@@ -209,10 +243,12 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     if raw is None:
         return None
     if isinstance(raw, str):
-        raise ValueError(
-            f'mcp_auth="{raw}" is not available yet: the bundled authorization server ships in a later phase. '
-            "Pass a fastmcp AuthProvider instance instead (e.g. AuthKitProvider, or any OAuthProvider subclass)."
-        )
+        if raw != "bundled":
+            raise ValueError(
+                f'Unknown mcp_auth value {raw!r}: use "bundled" for the built-in authorization server, '
+                "or pass a fastmcp AuthProvider instance (e.g. AuthKitProvider)."
+            )
+        raw = _resolve_bundled(os)
     if not isinstance(raw, AuthProvider):
         raise TypeError(
             f"mcp_auth must be a fastmcp AuthProvider, got {type(raw).__name__!r}. "

@@ -1,0 +1,858 @@
+"""The Bundled Authorization Server for the AgentOS MCP endpoint (Tier 1 of mcp_auth).
+
+``AgentOSBundledAuth`` makes a self-deployed AgentOS its own OAuth 2.1 authorization
+server, so claude.ai / ChatGPT / Claude Code connect by pasting the ``/mcp`` URL with
+zero external accounts -- and the endpoint is never open: every authorization requires
+the deployer's connect secret on a login+consent page, over HTTPS.
+
+What the SDK/fastmcp provide vs what lives here:
+
+- The protocol layer is SDK-provided through ``OAuthProvider``: the HTTP endpoints
+  (``/authorize``, ``/token``, ``/register``, ``/revoke``, discovery metadata), PKCE
+  S256 enforcement, redirect-URI exact-match, and MCP-compliant error codes. Signed
+  JWT access/refresh tokens come from fastmcp's ``JWTIssuer`` (HS256) -- verification
+  is stateless, so any replica sharing the signing key can verify without a DB hit.
+- This module implements the nine token-store methods on the AgentOS database
+  (clients / authorization codes / refresh-token state in namespaced tables, created
+  on first use like every other agno table), the login+consent page (the single
+  deployer-secret gate -- fastmcp has no login building block), and the server-decided
+  scope grant.
+
+Security properties, deliberate and load-bearing:
+
+- **Public clients only.** Connector clients (claude.ai, ChatGPT, Claude Code,
+  mcp-remote) all register as public clients and prove possession via PKCE; a
+  confidential registration is rejected rather than storing a client secret.
+- **Hash-at-rest.** Authorization codes and refresh tokens are stored SHA-256-hashed
+  (matching the service-account PAT model); a database read yields nothing replayable.
+- **Server-decided scopes.** The grant is a fixed, deployer-configured scope set;
+  client-requested scopes can never expand it.
+- **Single-use, short-lived codes; refresh rotation on every use.** Code exchange and
+  refresh rotation are atomic DELETE-then-act, so a replayed code/refresh token fails
+  on every replica.
+- **The consent page** renders only for a valid pending authorization transaction,
+  compares the secret in constant time, double-submits a CSRF token, denies framing,
+  and rate-limits failures per-IP and globally with failure logging.
+- **Revocation levers:** rotating the signing key invalidates all outstanding access
+  tokens; deleting a refresh-token row stops renewal. Rotating the connect secret
+  gates future logins only -- it revokes nothing already issued.
+"""
+
+import hashlib
+import hmac
+import html
+import json
+import secrets
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from agno.utils.log import log_debug, log_info, log_warning
+
+try:
+    from fastmcp.server.auth import AccessToken
+    from fastmcp.server.auth.auth import ClientRegistrationOptions, OAuthProvider, RevocationOptions
+    from fastmcp.server.auth.jwt_issuer import JWTIssuer, derive_jwt_key
+    from mcp.server.auth.provider import (
+        AuthorizationCode,
+        AuthorizationParams,
+        RefreshToken,
+        RegistrationError,
+        TokenError,
+        construct_redirect_uri,
+    )
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+except ImportError as e:  # pragma: no cover - exercised only without the extra installed
+    raise ImportError(
+        "`fastmcp>=3.4.3` is required for the bundled MCP authorization server. "
+        "Please install it using `pip install 'fastmcp>=3.4.3'`."
+    ) from e
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
+    from starlette.routing import Route
+
+# Server-decided grant for the single deployer principal: run + read, mirroring the
+# default service-account scopes. Anything broader (admin) requires explicit config.
+DEFAULT_GRANT_SCOPES: List[str] = [
+    "agents:run",
+    "teams:run",
+    "workflows:run",
+    "sessions:read",
+    "config:read",
+]
+
+DEFAULT_ACCESS_TOKEN_TTL = 60 * 60  # 1 hour
+DEFAULT_REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60  # 30 days, rotated on every use
+DEFAULT_AUTH_CODE_TTL = 5 * 60  # single-use, 5 minutes
+DEFAULT_TRANSACTION_TTL = 10 * 60  # login page validity window
+DEFAULT_MAX_CLIENTS = 1000  # DCR table cap ( /register is an unauthenticated write path)
+DEFAULT_UNCONSUMED_CLIENT_TTL = 24 * 60 * 60  # unconsummated registrations expire
+
+# The login/consent surface, served by this provider inside the MCP sub-app (and so
+# automatically exempted from the parent AuthMiddleware with the other provider routes).
+CONSENT_PATH = "/mcp-auth/consent"
+
+_CSRF_COOKIE = "agno_mcp_consent"
+
+# user_id namespace for OAuth-connected clients; distinct from sa:<name> and JWT subs.
+_PRINCIPAL_PREFIX = "oauth:"
+
+
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _constant_time_equals(a: str, b: str) -> bool:
+    # Compare digests, not the raw strings, so length is not observable.
+    return hmac.compare_digest(_hash(a), _hash(b))
+
+
+class AgentOSBundledAuth(OAuthProvider):
+    """A self-hosted OAuth 2.1 authorization server backed by the AgentOS database.
+
+    Args:
+        base_url: The deployment's public origin (e.g. ``https://my-os.up.railway.app``).
+            Every advertised metadata URL derives from it -- it must be exact.
+        db: The AgentOS database (``PostgresDb`` in production; ``SqliteDb`` is accepted
+            for development with a warning). Stores clients, pending authorizations,
+            single-use code hashes, and refresh-token state.
+        connect_secret: The deployer secret typed on the consent page. Use a dedicated
+            secret (``MCP_CONNECT_SECRET``), not a root credential.
+        scopes: The server-decided grant for every connected client (default: the
+            run+read connector set). Client-requested scopes can never expand this.
+        access_token_ttl / refresh_token_ttl / auth_code_ttl: Token lifetimes in
+            seconds. Refresh tokens rotate on every use.
+        signing_key_material: High-entropy material for the HS256 signing key
+            (``AGENTOS_MCP_SIGNING_KEY``). When omitted, a key is generated once and
+            persisted in the database so it survives redeploys and is shared across
+            replicas. Rotating the key invalidates all outstanding access tokens.
+        server_name: Display name on the consent page (defaults to the AgentOS name).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        db: Any,
+        connect_secret: str,
+        scopes: Optional[List[str]] = None,
+        access_token_ttl: int = DEFAULT_ACCESS_TOKEN_TTL,
+        refresh_token_ttl: int = DEFAULT_REFRESH_TOKEN_TTL,
+        auth_code_ttl: int = DEFAULT_AUTH_CODE_TTL,
+        signing_key_material: Optional[str] = None,
+        server_name: Optional[str] = None,
+        max_clients: int = DEFAULT_MAX_CLIENTS,
+        max_login_failures_per_ip: int = 10,
+        max_login_failures_global: int = 100,
+        enable_cimd: bool = True,
+    ):
+        super().__init__(
+            base_url=base_url,
+            client_registration_options=ClientRegistrationOptions(enabled=True),
+            revocation_options=RevocationOptions(enabled=True),
+        )
+        if not connect_secret:
+            raise ValueError(
+                "AgentOSBundledAuth requires a connect secret: set MCP_CONNECT_SECRET (or pass "
+                "connect_secret=). It is the login credential on the consent page -- use a "
+                "dedicated secret, not a root credential."
+            )
+        self._db = db
+        self._engine = self._resolve_engine(db)
+        self._connect_secret = connect_secret
+        self._grant_scopes = list(scopes) if scopes is not None else list(DEFAULT_GRANT_SCOPES)
+        self._access_token_ttl = access_token_ttl
+        self._refresh_token_ttl = refresh_token_ttl
+        self._auth_code_ttl = auth_code_ttl
+        self._signing_key_material = signing_key_material
+        self._server_name = server_name
+        self._max_clients = max_clients
+        self._issuer: Optional[JWTIssuer] = None
+        self._tables_ready = False
+
+        from agno.os.service_accounts import _FailedLookupLimiter
+
+        self._ip_limiter = _FailedLookupLimiter(max_failures=max_login_failures_per_ip, window_seconds=60)
+        self._global_limiter = _FailedLookupLimiter(max_failures=max_login_failures_global, window_seconds=60)
+
+        # CIMD (Client ID Metadata Documents): URL client ids resolved by fetching the
+        # client's published metadata -- ChatGPT's preferred registration mechanism and
+        # the recommended one since the 2025-11-25 MCP revision. DCR stays on for
+        # clients that register instead (claude.ai, Claude Code, mcp-remote).
+        self._cimd_manager: Optional[Any] = None
+        if enable_cimd:
+            from fastmcp.server.auth.cimd import CIMDClientManager
+
+            self._cimd_manager = CIMDClientManager(enable_cimd=True, default_scope=" ".join(self._grant_scopes))
+
+    @classmethod
+    def from_env(cls, db: Any, server_name: Optional[str] = None) -> "AgentOSBundledAuth":
+        """Build from the deployment environment: ``AGENTOS_PUBLIC_URL`` (the public
+        origin), ``MCP_CONNECT_SECRET`` (the login secret), and optionally
+        ``AGENTOS_MCP_SIGNING_KEY`` (env-primary signing key material)."""
+        from os import getenv
+
+        base_url = getenv("AGENTOS_PUBLIC_URL")
+        if not base_url:
+            raise ValueError(
+                'mcp_auth="bundled" requires AGENTOS_PUBLIC_URL: the deployment\'s public origin '
+                "(e.g. https://my-os.up.railway.app). Every advertised OAuth metadata URL derives from it."
+            )
+        connect_secret = getenv("MCP_CONNECT_SECRET")
+        if not connect_secret:
+            raise ValueError(
+                'mcp_auth="bundled" requires MCP_CONNECT_SECRET: the deployer secret typed on the '
+                "consent page when a client connects. Generate a strong one, e.g. `openssl rand -base64 32`."
+            )
+        return cls(
+            base_url=base_url,
+            db=db,
+            connect_secret=connect_secret,
+            signing_key_material=getenv("AGENTOS_MCP_SIGNING_KEY"),
+            server_name=server_name,
+        )
+
+    # ==================== Storage ====================
+
+    @staticmethod
+    def _resolve_engine(db: Any) -> Any:
+        engine = getattr(db, "db_engine", None)
+        if engine is None:
+            raise ValueError(
+                f"AgentOSBundledAuth requires a SQLAlchemy-backed database (PostgresDb in production); "
+                f"got {type(db).__name__}. Async databases are not supported yet -- pass the sync db."
+            )
+        if engine.dialect.name == "sqlite":
+            log_warning(
+                "AgentOSBundledAuth is running on SQLite -- fine for development, but production "
+                "deployments should use PostgresDb (restart-safe and shared across replicas)."
+            )
+        return engine
+
+    def _define_tables(self) -> None:
+        from sqlalchemy import BigInteger, Column, MetaData, String, Table, Text
+
+        self._metadata = MetaData()
+        self._clients_table = Table(
+            "agno_mcp_oauth_clients",
+            self._metadata,
+            Column("client_id", String(255), primary_key=True),
+            Column("client_metadata", Text, nullable=False),
+            Column("created_at", BigInteger, nullable=False),
+            Column("consumed_at", BigInteger, nullable=True),
+        )
+        self._transactions_table = Table(
+            "agno_mcp_oauth_transactions",
+            self._metadata,
+            Column("txn_id", String(64), primary_key=True),
+            Column("client_id", String(255), nullable=False),
+            Column("params", Text, nullable=False),
+            Column("expires_at", BigInteger, nullable=False),
+        )
+        self._codes_table = Table(
+            "agno_mcp_oauth_codes",
+            self._metadata,
+            Column("code_hash", String(64), primary_key=True),
+            Column("payload", Text, nullable=False),
+            Column("expires_at", BigInteger, nullable=False),
+        )
+        self._refresh_table = Table(
+            "agno_mcp_oauth_refresh_tokens",
+            self._metadata,
+            Column("token_hash", String(64), primary_key=True),
+            Column("client_id", String(255), nullable=False),
+            Column("scopes", Text, nullable=False),
+            Column("expires_at", BigInteger, nullable=False),
+        )
+        self._keys_table = Table(
+            "agno_mcp_oauth_keys",
+            self._metadata,
+            Column("kid", String(64), primary_key=True),
+            Column("secret", Text, nullable=False),
+            Column("created_at", BigInteger, nullable=False),
+        )
+
+    def _ensure_ready(self) -> None:
+        """Create the namespaced tables on first use and load/derive the signing key."""
+        if self._tables_ready:
+            return
+        self._define_tables()
+        self._metadata.create_all(self._engine, checkfirst=True)
+        self._issuer = JWTIssuer(
+            issuer=str(self.base_url).rstrip("/"),
+            audience=str(self._get_resource_url(self._mcp_path or "/mcp")),
+            signing_key=self._load_signing_key(),
+        )
+        self._tables_ready = True
+
+    def _load_signing_key(self) -> bytes:
+        """Env-primary signing key; otherwise generated once and persisted in the db.
+
+        The persisted key is what makes tokens survive a redeploy and verify on every
+        replica. Deleting the row (or changing AGENTOS_MCP_SIGNING_KEY) rotates the key
+        and invalidates all outstanding access tokens -- the revocation kill switch.
+        """
+        salt = str(self.base_url).rstrip("/")
+        if self._signing_key_material:
+            return derive_jwt_key(high_entropy_material=self._signing_key_material, salt=salt)
+
+        from sqlalchemy import insert, select
+        from sqlalchemy.exc import IntegrityError
+
+        with self._engine.connect() as conn:
+            row = conn.execute(select(self._keys_table.c.secret).order_by(self._keys_table.c.created_at)).first()
+            if row is None:
+                material = secrets.token_urlsafe(48)
+                try:
+                    conn.execute(
+                        insert(self._keys_table).values(kid="default", secret=material, created_at=int(time.time()))
+                    )
+                    conn.commit()
+                    log_info("Generated and persisted the bundled MCP OAuth signing key")
+                except IntegrityError:
+                    # Another replica won the race; use its key.
+                    conn.rollback()
+                    row = conn.execute(select(self._keys_table.c.secret)).first()
+                    material = row[0] if row is not None else material
+            else:
+                material = row[0]
+        return derive_jwt_key(high_entropy_material=material, salt=salt)
+
+    async def _run(self, fn: Any, *args: Any) -> Any:
+        """Run a sync DB operation without blocking the event loop."""
+        from starlette.concurrency import run_in_threadpool
+
+        return await run_in_threadpool(fn, *args)
+
+    # ==================== Client store (DCR) ====================
+
+    async def get_client(self, client_id: str) -> Optional[OAuthClientInformationFull]:
+        # CIMD clients identify by URL and publish their own metadata -- nothing is
+        # stored; the manager fetches and validates the document.
+        if self._cimd_manager is not None and self._cimd_manager.is_cimd_client_id(client_id):
+            return await self._cimd_manager.get_client(client_id)
+        return await self._run(self._get_client_sync, client_id)
+
+    def _get_client_sync(self, client_id: str) -> Optional[OAuthClientInformationFull]:
+        from sqlalchemy import select
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(self._clients_table.c.client_metadata).where(self._clients_table.c.client_id == client_id)
+            ).first()
+        if row is None:
+            return None
+        return OAuthClientInformationFull.model_validate(json.loads(row[0]))
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        # Public clients only: connector clients (claude.ai, ChatGPT, Claude Code,
+        # mcp-remote) prove possession via PKCE. Refusing confidential registrations
+        # means no client secret is ever stored.
+        if client_info.token_endpoint_auth_method != "none":
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description=(
+                    "This authorization server supports public clients only: register with "
+                    'token_endpoint_auth_method "none" and use PKCE.'
+                ),
+            )
+        if client_info.client_id is None:
+            raise RegistrationError(error="invalid_client_metadata", error_description="client_id is required")
+        await self._run(self._register_client_sync, client_info)
+
+    def _register_client_sync(self, client_info: OAuthClientInformationFull) -> None:
+        from sqlalchemy import delete, func, insert, select
+
+        self._ensure_ready()
+        now = int(time.time())
+        with self._engine.connect() as conn:
+            # /register is an unauthenticated write path: expire unconsummated
+            # registrations and cap the table so it cannot be flooded.
+            conn.execute(
+                delete(self._clients_table).where(
+                    self._clients_table.c.consumed_at.is_(None),
+                    self._clients_table.c.created_at < now - DEFAULT_UNCONSUMED_CLIENT_TTL,
+                )
+            )
+            count = conn.execute(select(func.count()).select_from(self._clients_table)).scalar() or 0
+            if count >= self._max_clients:
+                conn.commit()
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration limit reached on this server.",
+                )
+            conn.execute(
+                insert(self._clients_table).values(
+                    client_id=client_info.client_id,
+                    client_metadata=client_info.model_dump_json(),
+                    created_at=now,
+                    consumed_at=None,
+                )
+            )
+            conn.commit()
+        log_debug(f"Registered MCP OAuth client {client_info.client_id}")
+
+    # ==================== Authorization (the consent gate) ====================
+
+    async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        """Store a pending authorization and send the browser to the consent page.
+
+        Nothing is granted here: the code is minted only after the deployer secret is
+        verified on the consent POST. The transaction pins everything the grant will
+        use (client, redirect URI, PKCE challenge) so the consent POST cannot alter it.
+        """
+        txn_id = secrets.token_urlsafe(32)
+        payload = {
+            "client_id": client.client_id,
+            "redirect_uri": str(params.redirect_uri),
+            "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
+            "code_challenge": params.code_challenge,
+            "state": params.state,
+            "resource": params.resource,
+        }
+        await self._run(self._store_transaction_sync, txn_id, client.client_id, payload)
+        return f"{str(self.base_url).rstrip('/')}{CONSENT_PATH}?txn={txn_id}"
+
+    def _store_transaction_sync(self, txn_id: str, client_id: str, payload: Dict[str, Any]) -> None:
+        from sqlalchemy import delete, insert
+
+        self._ensure_ready()
+        now = int(time.time())
+        with self._engine.connect() as conn:
+            conn.execute(delete(self._transactions_table).where(self._transactions_table.c.expires_at < now))
+            conn.execute(
+                insert(self._transactions_table).values(
+                    txn_id=txn_id,
+                    client_id=client_id,
+                    params=json.dumps(payload),
+                    expires_at=now + DEFAULT_TRANSACTION_TTL,
+                )
+            )
+            conn.commit()
+
+    def _load_transaction_sync(self, txn_id: str) -> Optional[Dict[str, Any]]:
+        from sqlalchemy import select
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(self._transactions_table.c.params, self._transactions_table.c.expires_at).where(
+                    self._transactions_table.c.txn_id == txn_id
+                )
+            ).first()
+        if row is None or row[1] < int(time.time()):
+            return None
+        return json.loads(row[0])
+
+    def _consume_transaction_sync(self, txn_id: str) -> Optional[Dict[str, Any]]:
+        """Atomically claim the transaction: the DELETE succeeds on exactly one replica."""
+        from sqlalchemy import delete, select
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(self._transactions_table.c.params, self._transactions_table.c.expires_at).where(
+                    self._transactions_table.c.txn_id == txn_id
+                )
+            ).first()
+            if row is None or row[1] < int(time.time()):
+                conn.commit()
+                return None
+            result = conn.execute(delete(self._transactions_table).where(self._transactions_table.c.txn_id == txn_id))
+            conn.commit()
+        if result.rowcount != 1:
+            return None
+        return json.loads(row[0])
+
+    def _mark_client_consumed_sync(self, client_id: str) -> None:
+        from sqlalchemy import update
+
+        with self._engine.connect() as conn:
+            conn.execute(
+                update(self._clients_table)
+                .where(self._clients_table.c.client_id == client_id, self._clients_table.c.consumed_at.is_(None))
+                .values(consumed_at=int(time.time()))
+            )
+            conn.commit()
+
+    # ==================== The consent page ====================
+
+    def get_routes(self, mcp_path: Optional[str] = None) -> "List[Route]":
+        from starlette.routing import Route
+
+        routes = super().get_routes(mcp_path)
+        if self._cimd_manager is not None:
+            # Swap the token endpoint's authenticator for one that also accepts
+            # private_key_jwt assertions from CIMD clients (RFC 7523); standard
+            # methods (none/PKCE) delegate to the SDK unchanged.
+            from fastmcp.server.auth.auth import PrivateKeyJWTClientAuthenticator, TokenHandler
+            from mcp.server.auth.routes import cors_middleware
+
+            rebuilt: List[Route] = []
+            for route in routes:
+                if isinstance(route, Route) and route.path == "/token" and route.methods and "POST" in route.methods:
+                    authenticator = PrivateKeyJWTClientAuthenticator(
+                        provider=self,
+                        cimd_manager=self._cimd_manager,
+                        token_endpoint_url=f"{str(self.base_url).rstrip('/')}/token",
+                    )
+                    handler = TokenHandler(provider=self, client_authenticator=authenticator)
+                    rebuilt.append(
+                        Route(
+                            "/token",
+                            endpoint=cors_middleware(handler.handle, ["POST", "OPTIONS"]),
+                            methods=["POST", "OPTIONS"],
+                        )
+                    )
+                else:
+                    rebuilt.append(route)
+            routes = rebuilt
+        routes.append(Route(CONSENT_PATH, endpoint=self._consent_get, methods=["GET"]))
+        routes.append(Route(CONSENT_PATH, endpoint=self._consent_post, methods=["POST"]))
+        return routes
+
+    def _consent_headers(self) -> Dict[str, str]:
+        return {
+            # The page carries a secret input: never framed, never cached.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            "X-Frame-Options": "DENY",
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        }
+
+    def _client_display_name_sync(self, client_id: str) -> str:
+        client = self._get_client_sync(client_id)
+        return (getattr(client, "client_name", None) or client_id) if client else client_id
+
+    async def _display_name(self, client_id: str) -> str:
+        if self._cimd_manager is not None and self._cimd_manager.is_cimd_client_id(client_id):
+            try:
+                client = await self._cimd_manager.get_client(client_id)
+                if client is not None:
+                    return getattr(client, "client_name", None) or client_id
+            except Exception:
+                return client_id
+        return await self._run(self._client_display_name_sync, client_id)
+
+    def _render_consent_page(
+        self, txn_id: str, payload: Dict[str, Any], client_name: str, error: Optional[str] = None
+    ) -> Any:
+        from starlette.responses import HTMLResponse
+
+        csrf_token = secrets.token_urlsafe(24)
+        scopes_html = "".join(f"<li><code>{html.escape(s)}</code></li>" for s in self._grant_scopes)
+        error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+        server_name = html.escape(self._server_name or "AgentOS")
+        body = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Connect to {server_name}</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding-top: 8vh; }}
+.card {{ background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 2rem; max-width: 26rem; }}
+h1 {{ font-size: 1.15rem; }} code {{ background: #f0f0f0; padding: 1px 5px; border-radius: 4px; }}
+.uri {{ background: #fff8e1; border-radius: 6px; padding: .5rem; word-break: break-all; font-size: .85rem; }}
+input[type=password] {{ width: 100%; padding: .5rem; margin: .75rem 0; box-sizing: border-box; }}
+button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer; }}
+.approve {{ background: #111; color: #fff; }} .deny {{ background: #eee; }}
+.error {{ color: #b00020; }}
+</style></head><body><div class="card">
+<h1>Connect <strong>{html.escape(str(client_name))}</strong> to {server_name}</h1>
+<p>The application is requesting access with:</p>
+<ul>{scopes_html}</ul>
+<p>Credentials will be sent to:</p>
+<div class="uri">{html.escape(payload["redirect_uri"])}</div>
+{error_html}
+<form method="post" action="{CONSENT_PATH}">
+<input type="hidden" name="txn" value="{html.escape(txn_id)}">
+<input type="hidden" name="csrf" value="{html.escape(csrf_token)}">
+<label>Connect secret<input type="password" name="secret" autocomplete="off" autofocus></label>
+<button class="approve" type="submit" name="action" value="approve">Approve</button>
+<button class="deny" type="submit" name="action" value="deny">Deny</button>
+</form></div></body></html>"""
+        response = HTMLResponse(body, headers=self._consent_headers())
+        response.set_cookie(
+            _CSRF_COOKIE, csrf_token, max_age=DEFAULT_TRANSACTION_TTL, httponly=True, samesite="lax", path=CONSENT_PATH
+        )
+        return response
+
+    async def _consent_get(self, request: "Request") -> Any:
+        from starlette.responses import HTMLResponse
+
+        txn_id = request.query_params.get("txn", "")
+        payload = await self._run(self._load_transaction_sync, txn_id)
+        if payload is None:
+            # Only a valid pending authorization renders the secret form.
+            return HTMLResponse(
+                "<h1>Authorization request not found or expired.</h1>Restart the connection from your client.",
+                status_code=404,
+                headers=self._consent_headers(),
+            )
+        client_name = await self._display_name(payload["client_id"])
+        return self._render_consent_page(txn_id, payload, client_name)
+
+    async def _consent_post(self, request: "Request") -> Any:
+        from starlette.responses import HTMLResponse, RedirectResponse
+
+        form = await request.form()
+        txn_id = str(form.get("txn", ""))
+        payload = await self._run(self._load_transaction_sync, txn_id)
+        if payload is None:
+            return HTMLResponse(
+                "<h1>Authorization request not found or expired.</h1>",
+                status_code=404,
+                headers=self._consent_headers(),
+            )
+
+        # CSRF double-submit: the form field must match the cookie set with the page.
+        csrf_form = str(form.get("csrf", ""))
+        csrf_cookie = request.cookies.get(_CSRF_COOKIE, "")
+        if not csrf_form or not csrf_cookie or not _constant_time_equals(csrf_form, csrf_cookie):
+            log_warning("MCP consent POST rejected: CSRF token mismatch")
+            return HTMLResponse("<h1>Invalid request.</h1>", status_code=400, headers=self._consent_headers())
+
+        redirect_uri = payload["redirect_uri"]
+        state = payload.get("state")
+        if str(form.get("action", "")) != "approve":
+            return RedirectResponse(
+                construct_redirect_uri(redirect_uri, error="access_denied", state=state),
+                status_code=302,
+                headers=self._consent_headers(),
+            )
+
+        client_key = request.client.host if request.client else "unknown"
+        if self._ip_limiter.is_limited(client_key) or self._global_limiter.is_limited("global"):
+            log_warning(f"MCP consent login throttled for {client_key}: too many failed attempts")
+            return HTMLResponse(
+                "<h1>Too many failed attempts. Try again later.</h1>",
+                status_code=429,
+                headers=self._consent_headers(),
+            )
+        if not _constant_time_equals(str(form.get("secret", "")), self._connect_secret):
+            self._ip_limiter.record_failure(client_key)
+            self._global_limiter.record_failure("global")
+            log_warning(f"MCP consent login failed from {client_key} (wrong connect secret)")
+            client_name = await self._display_name(payload["client_id"])
+            return self._render_consent_page(txn_id, payload, client_name, error="Wrong connect secret.")
+
+        consumed = await self._run(self._consume_transaction_sync, txn_id)
+        if consumed is None:
+            return HTMLResponse(
+                "<h1>Authorization request not found or expired.</h1>",
+                status_code=404,
+                headers=self._consent_headers(),
+            )
+
+        code = secrets.token_urlsafe(32)
+        await self._run(self._store_code_sync, code, consumed)
+        await self._run(self._mark_client_consumed_sync, consumed["client_id"])
+        log_info(f"MCP consent approved for client {consumed['client_id']}")
+        return RedirectResponse(
+            construct_redirect_uri(redirect_uri, code=code, state=state),
+            status_code=302,
+            headers=self._consent_headers(),
+        )
+
+    # ==================== Authorization codes ====================
+
+    def _store_code_sync(self, code: str, txn_payload: Dict[str, Any]) -> None:
+        from sqlalchemy import delete, insert
+
+        self._ensure_ready()
+        now = int(time.time())
+        payload = {
+            "client_id": txn_payload["client_id"],
+            "redirect_uri": txn_payload["redirect_uri"],
+            "redirect_uri_provided_explicitly": txn_payload["redirect_uri_provided_explicitly"],
+            "code_challenge": txn_payload["code_challenge"],
+            "resource": txn_payload.get("resource"),
+            # The grant is server-decided: the requested scopes never reach the code.
+            "scopes": self._grant_scopes,
+        }
+        with self._engine.connect() as conn:
+            conn.execute(delete(self._codes_table).where(self._codes_table.c.expires_at < now))
+            conn.execute(
+                insert(self._codes_table).values(
+                    code_hash=_hash(code), payload=json.dumps(payload), expires_at=now + self._auth_code_ttl
+                )
+            )
+            conn.commit()
+
+    async def load_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: str
+    ) -> Optional[AuthorizationCode]:
+        row = await self._run(self._load_code_sync, authorization_code)
+        if row is None:
+            return None
+        payload, expires_at = row
+        if payload["client_id"] != client.client_id:
+            return None
+        return AuthorizationCode(
+            code=authorization_code,
+            scopes=payload["scopes"],
+            expires_at=expires_at,
+            client_id=payload["client_id"],
+            code_challenge=payload["code_challenge"],
+            redirect_uri=payload["redirect_uri"],
+            redirect_uri_provided_explicitly=payload["redirect_uri_provided_explicitly"],
+            resource=payload.get("resource"),
+        )
+
+    def _load_code_sync(self, code: str) -> Optional[Any]:
+        from sqlalchemy import select
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(self._codes_table.c.payload, self._codes_table.c.expires_at).where(
+                    self._codes_table.c.code_hash == _hash(code)
+                )
+            ).first()
+        if row is None or row[1] < time.time():
+            return None
+        return json.loads(row[0]), row[1]
+
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
+    ) -> OAuthToken:
+        # Single use, atomically: the DELETE succeeds for exactly one caller, so a
+        # replayed code fails on every replica. PKCE was already verified by the SDK
+        # token handler against the stored code_challenge.
+        deleted = await self._run(self._delete_code_sync, authorization_code.code)
+        if not deleted:
+            raise TokenError("invalid_grant", "Authorization code not found or already used.")
+        if client.client_id is None:
+            raise TokenError("invalid_client", "Client ID is required")
+        return await self._issue_tokens(client.client_id, authorization_code.scopes)
+
+    def _delete_code_sync(self, code: str) -> bool:
+        from sqlalchemy import delete
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            result = conn.execute(delete(self._codes_table).where(self._codes_table.c.code_hash == _hash(code)))
+            conn.commit()
+        return result.rowcount == 1
+
+    # ==================== Tokens ====================
+
+    async def _issue_tokens(self, client_id: str, scopes: List[str]) -> OAuthToken:
+        await self._run(self._ensure_ready)
+        assert self._issuer is not None
+        access_token = self._issuer.issue_access_token(
+            client_id=client_id, scopes=scopes, jti=secrets.token_hex(16), expires_in=self._access_token_ttl
+        )
+        refresh_token = self._issuer.issue_refresh_token(
+            client_id=client_id, scopes=scopes, jti=secrets.token_hex(16), expires_in=self._refresh_token_ttl
+        )
+        await self._run(self._store_refresh_sync, refresh_token, client_id, scopes)
+        return OAuthToken(
+            access_token=access_token,
+            token_type="Bearer",
+            expires_in=self._access_token_ttl,
+            refresh_token=refresh_token,
+            scope=" ".join(scopes),
+        )
+
+    def _store_refresh_sync(self, refresh_token: str, client_id: str, scopes: List[str]) -> None:
+        from sqlalchemy import delete, insert
+
+        self._ensure_ready()
+        now = int(time.time())
+        with self._engine.connect() as conn:
+            conn.execute(delete(self._refresh_table).where(self._refresh_table.c.expires_at < now))
+            conn.execute(
+                insert(self._refresh_table).values(
+                    token_hash=_hash(refresh_token),
+                    client_id=client_id,
+                    scopes=json.dumps(scopes),
+                    expires_at=now + self._refresh_token_ttl,
+                )
+            )
+            conn.commit()
+
+    async def load_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token: str
+    ) -> Optional[RefreshToken]:
+        await self._run(self._ensure_ready)
+        assert self._issuer is not None
+        try:
+            self._issuer.verify_token(refresh_token, expected_token_use="refresh")
+        except Exception:
+            return None
+        row = await self._run(self._load_refresh_sync, refresh_token)
+        if row is None:
+            return None
+        client_id, scopes, expires_at = row
+        if client_id != client.client_id:
+            return None
+        return RefreshToken(token=refresh_token, client_id=client_id, scopes=scopes, expires_at=expires_at)
+
+    def _load_refresh_sync(self, refresh_token: str) -> Optional[Any]:
+        from sqlalchemy import select
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    self._refresh_table.c.client_id, self._refresh_table.c.scopes, self._refresh_table.c.expires_at
+                ).where(self._refresh_table.c.token_hash == _hash(refresh_token))
+            ).first()
+        if row is None or row[2] < time.time():
+            return None
+        return row[0], json.loads(row[1]), row[2]
+
+    async def exchange_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: List[str]
+    ) -> OAuthToken:
+        if scopes and not set(scopes).issubset(set(refresh_token.scopes)):
+            raise TokenError("invalid_scope", "Requested scopes exceed those authorized by the refresh token.")
+        # Rotation on every use: deleting the old row is atomic, so a replayed refresh
+        # token fails on every replica after its first use.
+        deleted = await self._run(self._delete_refresh_sync, refresh_token.token)
+        if not deleted:
+            raise TokenError("invalid_grant", "Refresh token not found or already used.")
+        if client.client_id is None:
+            raise TokenError("invalid_client", "Client ID is required")
+        return await self._issue_tokens(client.client_id, scopes or refresh_token.scopes)
+
+    def _delete_refresh_sync(self, refresh_token: str) -> bool:
+        from sqlalchemy import delete
+
+        self._ensure_ready()
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                delete(self._refresh_table).where(self._refresh_table.c.token_hash == _hash(refresh_token))
+            )
+            conn.commit()
+        return result.rowcount == 1
+
+    async def load_access_token(self, token: str) -> Optional[AccessToken]:
+        """Stateless verification: signature + expiry + issuer + audience, no DB hit."""
+        await self._run(self._ensure_ready)
+        assert self._issuer is not None
+        try:
+            payload = self._issuer.verify_token(token, expected_token_use="access")
+        except Exception:
+            return None
+        client_id = payload.get("client_id", "")
+        scopes = str(payload.get("scope", "")).split()
+        return AccessToken(
+            token=token,
+            client_id=client_id,
+            scopes=scopes,
+            expires_at=payload.get("exp"),
+            claims={**payload, "sub": f"{_PRINCIPAL_PREFIX}{client_id}"},
+        )
+
+    async def revoke_token(self, token: Any) -> None:
+        """RFC 7009: refresh tokens are deleted (renewal stops); access tokens are
+        stateless JWTs and expire on their own TTL (rotate the signing key to kill
+        them all)."""
+        value = getattr(token, "token", None)
+        if value is None:
+            return
+        deleted = await self._run(self._delete_refresh_sync, value)
+        if deleted:
+            log_info("Revoked a bundled MCP OAuth refresh token")
+        else:
+            log_debug("Revocation no-op: access tokens are stateless (rotate the signing key to invalidate)")
