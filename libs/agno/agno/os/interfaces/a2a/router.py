@@ -46,7 +46,7 @@ from agno.os.interfaces.a2a.utils import (
     map_run_output_to_a2a_task,
     stream_a2a_response_with_error_handling,
 )
-from agno.os.middleware.user_scope import get_scoped_user_id, verify_run_in_session
+from agno.os.middleware.user_scope import get_scoped_user_id, resolve_run_user_id, verify_run_in_session
 from agno.os.utils import get_agent_by_id, get_request_kwargs, get_team_by_id, get_workflow_by_id
 from agno.run.base import RunStatus
 from agno.team import RemoteTeam, Team
@@ -109,11 +109,6 @@ def _build_failed_task(exc: Exception, context_id: Optional[str]) -> Task:
     )
 
 
-# Reserved principals that a client may never claim (mirrors feat/v2.7 semantics;
-# is_reserved_principal supersedes this at the v2.7 rebase).
-_RESERVED_PRINCIPAL_PREFIX = "sa:"
-_SCHEDULER_PRINCIPAL = "__scheduler__"
-
 # Run states in which a task can no longer be cancelled.
 _TERMINAL_RUN_STATUSES = {RunStatus.completed, RunStatus.error, RunStatus.cancelled}
 
@@ -135,26 +130,16 @@ def _jsonrpc_error_response(request_id, error: A2AError) -> JSONResponse:
 
 
 def _resolve_a2a_user_id(request: Request, request_body: dict) -> Optional[str]:
-    """Resolve the identity a run is attributed to (mirrors feat/v2.7's resolve_run_user_id).
+    """Resolve the run's ``user_id``, mirroring the REST run route's identity pinning.
 
-    A scoped caller is pinned to its own principal; any other authenticated
-    caller to request.state.user_id. Only an anonymous caller may supply an
-    identity for attribution — and never a reserved one.
+    A2A must not take run identity from the client: the client-supplied ``X-User-ID``
+    header / ``metadata.userId`` is honoured for attribution only when the caller is
+    anonymous (see ``resolve_run_user_id`` for the full precedence).
     """
-    scoped_user_id = get_scoped_user_id(request)
-    if scoped_user_id is not None:
-        return scoped_user_id
-    state_user_id = getattr(request.state, "user_id", None)
-    if state_user_id:
-        return state_user_id
-    client_user_id = request.headers.get("X-User-ID")
-    if not client_user_id:
-        client_user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
-    if client_user_id and (
-        client_user_id.startswith(_RESERVED_PRINCIPAL_PREFIX) or client_user_id == _SCHEDULER_PRINCIPAL
-    ):
-        raise HTTPException(status_code=403, detail="Client-supplied user_id may not claim a reserved principal")
-    return client_user_id
+    client_uid = request.headers.get("X-User-ID")
+    if not client_uid:
+        client_uid = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+    return resolve_run_user_id(request, client_uid)
 
 
 def _entity_family(entity) -> str:
@@ -167,13 +152,24 @@ def _entity_family(entity) -> str:
 
 def _check_a2a_scope(request: Request, family: str, entity_id: str, action: str = "run") -> None:
     """In-handler RBAC check for routes whose URL alone cannot authorize the
-    operation (JSON-RPC dispatchers, legacy dynamic dispatch). Route-level scope
-    mappings for the direct routes land with the feat/v2.7 rebase.
+    operation (the JSON-RPC dispatchers multiplex read and run methods on one URL).
     """
     if not getattr(request.state, "authorization_enabled", False):
         return
     if not check_resource_access(request, entity_id, family, action):
         raise HTTPException(status_code=403, detail=f"Insufficient permissions to {action} this {family[:-1]}")
+
+
+def _enforce_dynamic_dispatch_scope(request: Request, entity: object, entity_id: str) -> None:
+    """Re-check the run scope for the resolved family on the deprecated dispatch routes.
+
+    ``POST /message:send`` / ``:stream`` resolve the target as an agent, team, OR workflow
+    at runtime, so the route-level gate can only require a single coarse scope (``agents:run``).
+    That would let an ``agents:run``-only token execute teams/workflows. Once the entity is
+    resolved we know its family, so enforce ``<family>:run`` via the canonical RBAC decision.
+    No-op when RBAC is not active.
+    """
+    _check_a2a_scope(request, _entity_family(entity), entity_id, "run")
 
 
 _SUPPORTED_A2A_MAJOR = "1"
@@ -307,7 +303,7 @@ def attach_routes(
     # ============= AGENTS =============
     @router.get("/agents/{id}/.well-known/agent-card.json")
     async def get_agent_card(request: Request, id: str):
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -343,7 +339,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_run_agent)
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if not isinstance(agent, (Agent, RemoteAgent)):
@@ -403,7 +399,7 @@ def attach_routes(
             # The run is not locatable without its session.
             raise HTTPException(status_code=400, detail="contextId is required to poll a task")
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if isinstance(agent, RemoteAgent):
@@ -443,7 +439,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         if isinstance(agent, RemoteAgent):
@@ -501,7 +497,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_stream_agent)
 
-        agent = get_agent_by_id(id, agents)
+        agent = get_agent_by_id(id, agents, create_fresh=True)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -558,7 +554,7 @@ def attach_routes(
     # ============= TEAMS =============
     @router.get("/teams/{id}/.well-known/agent-card.json")
     async def get_team_card(request: Request, id: str):
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -594,7 +590,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_run_team)
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -648,7 +644,7 @@ def attach_routes(
         if not context_id:
             raise HTTPException(status_code=400, detail="contextId is required to poll a task")
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
         if isinstance(team, RemoteTeam):
@@ -684,7 +680,7 @@ def attach_routes(
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
         if isinstance(team, RemoteTeam):
@@ -734,7 +730,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_stream_team)
 
-        team = get_team_by_id(id, teams)
+        team = get_team_by_id(id, teams, create_fresh=True)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
@@ -791,7 +787,7 @@ def attach_routes(
     # ============= WORKFLOWS =============
     @router.get("/workflows/{id}/.well-known/agent-card.json")
     async def get_workflow_card(request: Request, id: str):
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -829,7 +825,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_run_workflow)
 
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -878,7 +874,7 @@ def attach_routes(
         request_body = await request.json()
         kwargs = await get_request_kwargs(request, a2a_stream_workflow)
 
-        workflow = get_workflow_by_id(id, workflows)
+        workflow = get_workflow_by_id(id, workflows, create_fresh=True)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -958,18 +954,18 @@ def attach_routes(
             )
         entity: Optional[Union[Agent, RemoteAgent, AgentProtocol, Team, RemoteTeam, Workflow, RemoteWorkflow]] = None
         if agents:
-            entity = get_agent_by_id(agent_id, agents)
+            entity = get_agent_by_id(agent_id, agents, create_fresh=True)
         if not entity and teams:
-            entity = get_team_by_id(agent_id, teams)
+            entity = get_team_by_id(agent_id, teams, create_fresh=True)
         if not entity and workflows:
-            entity = get_workflow_by_id(agent_id, workflows)
+            entity = get_workflow_by_id(agent_id, workflows, create_fresh=True)
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
         # The route-level gate for this dynamic-dispatch endpoint can only be
         # coarse; re-check the resolved entity's family here (mirrors feat/v2.7's
         # _enforce_dynamic_dispatch_scope).
-        _check_a2a_scope(request, _entity_family(entity), agent_id, "run")
+        _enforce_dynamic_dispatch_scope(request, entity, agent_id)
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
@@ -1032,15 +1028,15 @@ def attach_routes(
             )
         entity: Optional[Union[Agent, RemoteAgent, AgentProtocol, Team, RemoteTeam, Workflow, RemoteWorkflow]] = None
         if agents:
-            entity = get_agent_by_id(agent_id, agents)
+            entity = get_agent_by_id(agent_id, agents, create_fresh=True)
         if not entity and teams:
-            entity = get_team_by_id(agent_id, teams)
+            entity = get_team_by_id(agent_id, teams, create_fresh=True)
         if not entity and workflows:
-            entity = get_workflow_by_id(agent_id, workflows)
+            entity = get_workflow_by_id(agent_id, workflows, create_fresh=True)
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
-        _check_a2a_scope(request, _entity_family(entity), agent_id, "run")
+        _enforce_dynamic_dispatch_scope(request, entity, agent_id)
 
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
