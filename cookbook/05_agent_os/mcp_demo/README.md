@@ -5,6 +5,8 @@ Examples for `mcp_demo` in AgentOS.
 ## Files
 - `enable_mcp_example.py` — Example AgentOS app with MCP enabled.
 - `custom_mcp_tool_example.py` — Expose ONE custom MCP tool routed through an agent, with the built-in tools disabled (uses `MCPServerConfig`).
+- `oauth_bundled_example.py` — Add OAuth so claude.ai / ChatGPT can connect by pasting the `/mcp` URL, using the bundled authorization server (`mcp_auth="bundled"`).
+- `oauth_authkit_example.py` — Same, but with an external authorization server (WorkOS AuthKit) for production / multi-user.
 - `mcp_tools_advanced_example.py` — Example AgentOS app where the agent has MCPTools.
 - `mcp_tools_example.py` — Example AgentOS app where the agent has MCPTools.
 - `mcp_tools_existing_lifespan.py` — Example AgentOS app where the agent has MCPTools.
@@ -70,6 +72,50 @@ your deploy/tunnel host; localhost works out of the box. `allowed_origins=[...]`
 
 **Escape hatch.** `middleware=[...]` takes `starlette.middleware.Middleware` instances for anything
 the options above don't cover.
+
+## OAuth: connecting claude.ai and ChatGPT
+
+A bearer-secured `/mcp` (JWT or `agno_pat_`) works for config-file clients — Claude Code,
+Cursor, and Claude **Desktop** via the `mcp-remote` bridge. But **claude.ai (web)** and
+**ChatGPT** custom connectors authenticate over **OAuth only** — there is no field to paste
+a token. `AgentOS(mcp_auth=...)` adds OAuth to `/mcp` so those clients connect by pasting the
+URL. It is opt-in: with `mcp_auth` unset, nothing changes. Existing `agno_pat_` and JWT clients
+keep working alongside it.
+
+**Tier 1 — bundled server (out of the box, `oauth_bundled_example.py`).** AgentOS becomes its
+own OAuth authorization server, backed by its Postgres db. No external accounts. Never open:
+connecting requires the deployer secret on a consent page.
+
+```python
+agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth="bundled")
+```
+
+```bash
+export AGENTOS_PUBLIC_URL=https://your-deployment.example.com   # the public origin
+export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the connect-page login secret
+```
+
+Then in claude.ai (Settings → Connectors) or ChatGPT (custom connector), paste your public
+`/mcp` URL → sign in with the connect secret → connected. Access tokens are short-lived signed
+JWTs; refresh tokens rotate on every use; the connect secret gates issuance, and rotating the
+signing key (`AGENTOS_MCP_SIGNING_KEY`) is the revocation kill switch.
+
+**Tier 2 — bring your own server (production / multi-user, `oauth_authkit_example.py`).** Pass
+any fastmcp `AuthProvider` for real per-user identity, RBAC, and SSO. WorkOS AuthKit is the
+documented default (free to 1M MAU):
+
+```python
+from fastmcp.server.auth.providers.workos import AuthKitProvider
+
+agent_os = AgentOS(
+    agents=[my_agent], db=postgres_db, enable_mcp_server=True,
+    mcp_auth=AuthKitProvider(authkit_domain=AUTHKIT_DOMAIN, base_url=PUBLIC_BASE_URL),
+)
+```
+
+The same seam carries both tiers, so moving from bundled to an external AS is a config change.
+`/info` reports `auth_mode="oauth"` with the authorization server and resource URL so clients
+(and `agno connect`) can discover the mode.
 
 ## Prerequisites
 - Load environment variables with `direnv allow` (requires `.envrc`).
