@@ -449,6 +449,32 @@ async def test_jwt_claiming_reserved_principal_rejected():
     assert response.status_code == 401
 
 
+async def test_jwt_audience_falls_back_to_agent_os_id():
+    """Parity with the parent middleware: verify_audience with no explicit audience
+    enforces the AgentOS id as the expected audience on /mcp, not only on REST."""
+    from agno.os.config import AuthorizationConfig
+
+    os = AgentOS(
+        id="mcp-audience-os",
+        agents=[_agent()],
+        enable_mcp_server=True,
+        mcp_auth=_oauth_provider(),
+        authorization=True,
+        authorization_config=AuthorizationConfig(
+            verification_keys=["test-jwt-secret"], algorithm="HS256", verify_audience=True
+        ),
+        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+    )
+    async with _http_client(os) as client:
+        matching = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(aud="mcp-audience-os")))
+        mismatched = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(aud="other-os")))
+        missing_aud = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt()))
+
+    assert matching.status_code == 200
+    assert mismatched.status_code == 401
+    assert missing_aud.status_code == 401
+
+
 async def test_jwt_verifier_mirrors_authorization_flag():
     """JWT scopes are enforced only when RBAC is on (parity with the parent middleware,
     which sets authorization_enabled = os.authorization for JWT identities)."""

@@ -210,7 +210,10 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     return JWTBearerTokenVerifier(
         validator,
         verify_audience=bool(kwargs.get("verify_audience")),
-        audience=kwargs.get("audience"),
+        # The parent AuthMiddleware falls back to the AgentOS id as the expected
+        # audience; without the same fallback here, verify_audience with no explicit
+        # audience would enforce on REST but not on /mcp.
+        audience=kwargs.get("audience") or (getattr(os, "id", None) if kwargs.get("verify_audience") else None),
         authorization=bool(getattr(os, "authorization", False)),
     )
 
