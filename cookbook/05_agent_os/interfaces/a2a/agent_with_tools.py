@@ -6,7 +6,7 @@ Demonstrates agent with tools.
 """
 
 from agno.agent.agent import Agent
-from agno.models.openai import OpenAIChat
+from agno.models.openai import OpenAIResponses
 from agno.os import AgentOS
 from agno.tools.websearch import WebSearchTools
 
@@ -17,7 +17,7 @@ from agno.tools.websearch import WebSearchTools
 agent = Agent(
     name="Agent with Tools",
     id="tools_agent",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIResponses(id="gpt-5.5"),
     tools=[WebSearchTools()],
     description="A versatile AI assistant with real-time web search capabilities powered by DuckDuckGo, providing current information and context-aware responses with access to datetime, history, and location data",
     instructions="""
@@ -54,7 +54,7 @@ if __name__ == "__main__":
 
     Endpoints (A2A 1.0, JSON-RPC 2.0 envelope, flat Part with mediaType):
         GET  http://localhost:7777/a2a/agents/{id}/.well-known/agent-card.json
-        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage — what the a2a-sdk Client targets)
+        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage / GetTask / CancelTask — what the a2a-sdk Client targets)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:send    (legacy URL-style, kept for back-compat)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:stream  (legacy URL-style, kept for back-compat)
 

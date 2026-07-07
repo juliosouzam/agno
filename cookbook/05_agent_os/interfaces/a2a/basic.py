@@ -6,7 +6,7 @@ Demonstrates basic.
 """
 
 from agno.agent.agent import Agent
-from agno.models.openai import OpenAIChat
+from agno.models.openai import OpenAIResponses
 from agno.os import AgentOS
 
 # ---------------------------------------------------------------------------
@@ -15,7 +15,7 @@ from agno.os import AgentOS
 
 chat_agent = Agent(
     name="basic-agent",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIResponses(id="gpt-5.5"),
     id="basic_agent",
     description="A helpful and responsive AI assistant that provides thoughtful answers and assistance with a wide range of topics",
     instructions="You are a helpful AI assistant.",
@@ -40,7 +40,7 @@ if __name__ == "__main__":
 
     Endpoints (A2A 1.0, JSON-RPC 2.0 envelope, flat Part with mediaType):
         GET  http://localhost:7777/a2a/agents/{id}/.well-known/agent-card.json
-        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage — what the a2a-sdk Client targets)
+        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage / GetTask / CancelTask — what the a2a-sdk Client targets)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:send    (legacy URL-style, kept for back-compat)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:stream  (legacy URL-style, kept for back-compat)
 

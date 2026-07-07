@@ -9,11 +9,12 @@ LangGraph, etc.
 ## Files
 
 - `basic.py` — Minimal A2A-exposed Agno Agent.
+- `basic_agent/` — Self-contained server + client pair: `AgentOS(a2a_interface=True)` on one side, `A2AClient` on the other. Start here.
 - `agent_with_tools.py` — Agent with WebSearch tools over A2A.
 - `reasoning_agent.py` — Reasoning agent (emits reasoning step events over A2A streaming).
 - `research_team.py` — A team of Agno agents exposed as a single A2A endpoint.
 - `structured_output.py` — Agent returning a structured Pydantic response over A2A.
-- `multi_agent_a2a/` — Three servers + three SDK-client demos showing an Agno orchestrator calling other A2A agents through `a2a.client`. See its README.
+- `multi_agent_a2a/` — Three servers + SDK-client demos showing an Agno orchestrator calling other A2A agents through `A2AClient`. See its README.
 
 ## Quick start
 
@@ -32,7 +33,7 @@ from a2a.client import create_client
 from a2a.types import Message, Part, Role, SendMessageRequest
 
 async def main():
-    client = await create_client("http://localhost:7777/a2a/agents/agno-assist")
+    client = await create_client("http://localhost:7777/a2a/agents/basic_agent")
     async with client:
         req = SendMessageRequest(message=Message(
             message_id=str(uuid4()),
@@ -58,12 +59,38 @@ asyncio.run(main())
 
 The AgentCard for any running example is at `GET <base>/.well-known/agent-card.json` and follows the v1 schema (`supportedInterfaces`, `capabilities`, `extendedAgentCard`, ...).
 
+### Calling A2A agents from an Agno agent
+
+To make an Agno agent the *client* side, use `A2AClient` — one instance
+per remote agent, wrapping the official `a2a-sdk` client as agent tools. Tool
+names carry the remote agent's URL slug, so multiple instances coexist:
+
+```python
+from agno.agent import Agent
+from agno.models.openai import OpenAIResponses
+from agno.tools.a2a import A2AClient
+
+orchestrator = Agent(
+    model=OpenAIResponses(id="gpt-5.5"),
+    tools=[A2AClient(url="http://localhost:7777/a2a/agents/basic_agent")],
+    instructions=["Use `send_message_to_basic_agent(message=...)` to delegate to the remote agent."],
+)
+```
+
+See `cookbook/91_tools/a2a/` for a runnable version and
+`multi_agent_a2a/trip_planning_a2a_client.py` for an orchestrator coordinating
+multiple remote agents (one toolkit instance per specialist).
+
 ### Stream event shapes
 
-- `status_update` — lifecycle events (working / completed / failed / cancelled). Metadata carries `agno_event_type` for tool calls, reasoning, memory updates, workflow steps, etc.
-- `artifact_update` — incremental text chunks of the agent's response, with `append=true`. Concatenate the text parts across these events for a live token stream.
-- `task` — single terminal event with the full final `history` and any media artifacts. Receiving this means the run is complete.
-- `message` is reserved by the v1 spec as a terminal event; Agno's interface never emits one mid-stream (the SDK would otherwise stop iterating early).
+The stream is ordered per the v1 spec:
+
+1. `task` — the initial Task (state `SUBMITTED`), always the first event.
+2. `status_update` — lifecycle events (working / completed / failed / cancelled). Metadata carries `agno_event_type` for tool calls, reasoning, memory updates, workflow steps, etc.
+3. `artifact_update` — incremental text chunks of the agent's response. The first chunk creates the artifact (`append` unset), later chunks carry `append=true`, and a closing event carries `lastChunk=true`. Concatenate the text parts for a live token stream.
+4. `status_update` with a terminal state, then a final `task` snapshot with the full `history` and any media artifacts.
+
+`message` is reserved by the v1 spec as a terminal event; Agno's interface never emits one mid-stream (the SDK would otherwise stop iterating early). Consume streams by reacting to the terminal `status_update`/final `task` — not by assuming the first `task` event carries the answer.
 
 ## Testing interactively
 

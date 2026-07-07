@@ -21,7 +21,7 @@ import asyncio
 from uuid import uuid4
 
 from a2a.client import create_client
-from a2a.types import Message, Part, Role, SendMessageRequest
+from a2a.types import Message, Part, Role, SendMessageRequest, TaskState
 
 TARGET_BASE_URL = "http://localhost:7770/a2a/agents/weather-reporter-agent"
 PROMPT = "What is the weather in Tokyo right now? Be concise."
@@ -65,6 +65,10 @@ async def main() -> None:
                     print(f"[message] {text}")
             elif kind == "task":
                 task = response.task
+                if task.status.state == TaskState.TASK_STATE_SUBMITTED:
+                    # The stream opens with the initial Task before any updates.
+                    print(f"[initial task] id={task.id}")
+                    continue
                 print(f"\n[final task] id={task.id} state={task.status.state}")
                 for entry in task.history:
                     body = "".join(

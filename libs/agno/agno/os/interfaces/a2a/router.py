@@ -23,19 +23,34 @@ try:
         TaskState,
         TaskStatus,
     )
+    from a2a.utils.errors import (
+        JSON_RPC_ERROR_CODE_MAP,
+        A2AError,
+        InvalidParamsError,
+        MethodNotFoundError,
+        PushNotificationNotSupportedError,
+        TaskNotCancelableError,
+        TaskNotFoundError,
+        UnsupportedOperationError,
+        VersionNotSupportedError,
+    )
     from google.protobuf import json_format
 except ImportError as e:
     raise ImportError("`a2a-sdk>=1.0` is required. Install with `pip install -U 'a2a-sdk>=1.0'`.") from e
 
 from agno.agent import Agent, RemoteAgent
 from agno.agent.protocol import AgentProtocol
+from agno.os.auth import check_resource_access
 from agno.os.interfaces.a2a.utils import (
     map_a2a_request_to_run_input,
     map_run_output_to_a2a_task,
     stream_a2a_response_with_error_handling,
 )
+from agno.os.middleware.user_scope import get_scoped_user_id, verify_run_in_session
 from agno.os.utils import get_agent_by_id, get_request_kwargs, get_team_by_id, get_workflow_by_id
+from agno.run.base import RunStatus
 from agno.team import RemoteTeam, Team
+from agno.utils.log import log_error
 from agno.workflow import RemoteWorkflow, Workflow
 
 
@@ -59,14 +74,32 @@ def _send_message_envelope(request_id, task: Task) -> dict:
     }
 
 
+def _task_envelope(request_id, task: Task) -> dict:
+    """JSON-RPC 2.0 envelope around a bare Task.
+
+    GetTask/CancelTask responses carry the Task directly (the a2a-sdk client
+    parses `result` as a Task) — only Send* wraps it in SendMessageResponse.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": _proto_to_jsonable(task),
+    }
+
+
 def _build_failed_task(exc: Exception, context_id: Optional[str]) -> Task:
-    """Build a Task in failed state with an error message in history."""
+    """Build a Task in failed state with a generic error message in history.
+
+    The real exception goes to the server log only — wire responses must not
+    leak internal details (paths, connection strings, stack context).
+    """
+    log_error(f"A2A run failed: {type(exc).__name__}: {exc}")
     ctx = context_id or str(uuid4())
     error_message = Message(
         message_id=str(uuid4()),
         role=Role.ROLE_AGENT,
         context_id=ctx,
-        parts=[Part(text=f"Error: {str(exc)}", media_type="text/plain")],
+        parts=[Part(text="Error: the run failed due to an internal server error.", media_type="text/plain")],
     )
     return Task(
         id=str(uuid4()),
@@ -74,6 +107,94 @@ def _build_failed_task(exc: Exception, context_id: Optional[str]) -> Task:
         status=TaskStatus(state=TaskState.TASK_STATE_FAILED),
         history=[error_message],
     )
+
+
+# Reserved principals that a client may never claim (mirrors feat/v2.7 semantics;
+# is_reserved_principal supersedes this at the v2.7 rebase).
+_RESERVED_PRINCIPAL_PREFIX = "sa:"
+_SCHEDULER_PRINCIPAL = "__scheduler__"
+
+# Run states in which a task can no longer be cancelled.
+_TERMINAL_RUN_STATUSES = {RunStatus.completed, RunStatus.error, RunStatus.cancelled}
+
+
+def _jsonrpc_error_response(request_id, error: A2AError) -> JSONResponse:
+    """JSON-RPC 2.0 error envelope with the A2A spec error code for `error`.
+
+    Per the JSON-RPC binding, protocol-level errors ride an HTTP 200 response;
+    only transport concerns (auth, malformed HTTP) use HTTP status codes.
+    """
+    code = JSON_RPC_ERROR_CODE_MAP.get(type(error), -32603)
+    return JSONResponse(
+        content={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": error.message},
+        }
+    )
+
+
+def _resolve_a2a_user_id(request: Request, request_body: dict) -> Optional[str]:
+    """Resolve the identity a run is attributed to (mirrors feat/v2.7's resolve_run_user_id).
+
+    A scoped caller is pinned to its own principal; any other authenticated
+    caller to request.state.user_id. Only an anonymous caller may supply an
+    identity for attribution — and never a reserved one.
+    """
+    scoped_user_id = get_scoped_user_id(request)
+    if scoped_user_id is not None:
+        return scoped_user_id
+    state_user_id = getattr(request.state, "user_id", None)
+    if state_user_id:
+        return state_user_id
+    client_user_id = request.headers.get("X-User-ID")
+    if not client_user_id:
+        client_user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+    if client_user_id and (
+        client_user_id.startswith(_RESERVED_PRINCIPAL_PREFIX) or client_user_id == _SCHEDULER_PRINCIPAL
+    ):
+        raise HTTPException(status_code=403, detail="Client-supplied user_id may not claim a reserved principal")
+    return client_user_id
+
+
+def _entity_family(entity) -> str:
+    if isinstance(entity, (Team, RemoteTeam)):
+        return "teams"
+    if isinstance(entity, (Workflow, RemoteWorkflow)):
+        return "workflows"
+    return "agents"
+
+
+def _check_a2a_scope(request: Request, family: str, entity_id: str, action: str = "run") -> None:
+    """In-handler RBAC check for routes whose URL alone cannot authorize the
+    operation (JSON-RPC dispatchers, legacy dynamic dispatch). Route-level scope
+    mappings for the direct routes land with the feat/v2.7 rebase.
+    """
+    if not getattr(request.state, "authorization_enabled", False):
+        return
+    if not check_resource_access(request, entity_id, family, action):
+        raise HTTPException(status_code=403, detail=f"Insufficient permissions to {action} this {family[:-1]}")
+
+
+_SUPPORTED_A2A_MAJOR = "1"
+
+
+def _check_a2a_version(request: Request, request_id) -> Optional[JSONResponse]:
+    """Reject explicitly-unsupported A2A-Version values.
+
+    A missing header is served as the current version: this server does not
+    implement 0.3 (the spec default for absent headers), and rejecting every
+    header-less client would break otherwise-compatible 1.0 callers.
+    """
+    version = request.headers.get("A2A-Version")
+    if not version:
+        return None
+    if version.split(".")[0] != _SUPPORTED_A2A_MAJOR:
+        return _jsonrpc_error_response(
+            request_id,
+            VersionNotSupportedError(f"Unsupported A2A version {version!r}; this server supports 1.x"),
+        )
+    return None
 
 
 def _build_agent_card(
@@ -91,8 +212,7 @@ def _build_agent_card(
         name=name,
         description=description,
         tags=["agno"],
-        examples=["search", "ok"],
-        output_modes=["application/json"],
+        output_modes=["text/plain", "application/json"],
     )
     capabilities = AgentCapabilities(
         streaming=streaming,
@@ -109,8 +229,9 @@ def _build_agent_card(
         version="1.0.0",
         description=description,
         supported_interfaces=[interface],
-        default_input_modes=["text"],
-        default_output_modes=["text"],
+        # Input/output modes are media types per the spec.
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain", "application/json"],
         capabilities=capabilities,
         skills=[skill],
     )
@@ -124,6 +245,64 @@ def attach_routes(
 ) -> APIRouter:
     if agents is None and teams is None and workflows is None:
         raise ValueError("Agents, Teams, or Workflows are required to setup the A2A interface.")
+
+    # Mount prefix (e.g. "/a2a", or custom via A2A(prefix=...)) — agent-card
+    # interface URLs must advertise the real mount point.
+    prefix = router.prefix or ""
+
+    # JSON-RPC methods this server declines, with their spec error. Push
+    # notification configs and the remaining optional operations are declared
+    # unsupported in the agent card capabilities.
+    _PUSH_CONFIG_METHODS = {
+        "CreateTaskPushNotificationConfig",
+        "GetTaskPushNotificationConfig",
+        "ListTaskPushNotificationConfigs",
+        "DeleteTaskPushNotificationConfig",
+    }
+    _UNSUPPORTED_METHODS = {"ListTasks", "SubscribeToTask", "GetExtendedAgentCard"}
+    _METHOD_ACTIONS = {"SendMessage": "run", "SendStreamingMessage": "run", "GetTask": "read", "CancelTask": "run"}
+
+    async def _dispatch_a2a_method(request: Request, id: str, family: str, handlers: dict) -> JSONResponse:
+        """Shared JSON-RPC dispatcher body for all three families.
+
+        The scope check is per-method because one URL multiplexes read and run
+        operations — route-level gating cannot distinguish them.
+        """
+        # Note: delegated handlers call request.json() again; Starlette caches
+        # the body so this is a single read on the wire.
+        body = await request.json()
+        request_id = body.get("id")
+        version_error = _check_a2a_version(request, request_id)
+        if version_error is not None:
+            return version_error
+
+        method = body.get("method") or ""
+        if method in _PUSH_CONFIG_METHODS:
+            return _jsonrpc_error_response(request_id, PushNotificationNotSupportedError())
+        if method in _UNSUPPORTED_METHODS:
+            return _jsonrpc_error_response(request_id, UnsupportedOperationError(f"{method} is not supported"))
+        handler = handlers.get(method)
+        if handler is None:
+            if method in _METHOD_ACTIONS:
+                # Known spec method this family cannot serve (e.g. workflow tasks).
+                return _jsonrpc_error_response(
+                    request_id, UnsupportedOperationError(f"{method} is not supported for {family}")
+                )
+            return _jsonrpc_error_response(
+                request_id, MethodNotFoundError(f"Method not found or not supported: {method!r}")
+            )
+
+        _check_a2a_scope(request, family, id, _METHOD_ACTIONS[method])
+        try:
+            return await handler(request, id)
+        except HTTPException as exc:
+            # Map task-level failures onto the spec's typed JSON-RPC errors;
+            # auth and server errors stay transport-level HTTP.
+            if exc.status_code == 404 and method in ("GetTask", "CancelTask"):
+                return _jsonrpc_error_response(request_id, TaskNotFoundError(str(exc.detail)))
+            if exc.status_code == 400:
+                return _jsonrpc_error_response(request_id, InvalidParamsError(str(exc.detail)))
+            raise
 
     # ============= AGENTS =============
     @router.get("/agents/{id}/.well-known/agent-card.json")
@@ -139,7 +318,7 @@ def attach_routes(
                     name=agent.name or "",
                     description=getattr(agent, "description", None) or "",
                     base_url=base_url,
-                    interface_path=f"/a2a/agents/{agent.id}/v1",
+                    interface_path=f"{prefix}/agents/{agent.id}/v1",
                     skill_id=agent.id or "",
                     streaming=True,
                 )
@@ -170,11 +349,13 @@ def attach_routes(
         if not isinstance(agent, (Agent, RemoteAgent)):
             raise HTTPException(status_code=501, detail="A2A protocol is not supported for this agent type")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
 
@@ -192,11 +373,10 @@ def attach_routes(
             )
 
             a2a_task = map_run_output_to_a2a_task(response)
-            status_code = 202 if not blocking else 200
-            return JSONResponse(
-                content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task),
-                status_code=status_code,
-            )
+            # The JSON-RPC binding expects 200 for every successful envelope,
+            # including non-blocking sends (the SUBMITTED state carries the async
+            # semantics; a 202 makes strict clients treat the call as failed).
+            return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task))
 
         except Exception as e:
             failed_task = _build_failed_task(e, context_id)
@@ -219,6 +399,9 @@ def attach_routes(
 
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
+        if not context_id:
+            # The run is not locatable without its session.
+            raise HTTPException(status_code=400, detail="contextId is required to poll a task")
 
         agent = get_agent_by_id(id, agents)
         if not agent:
@@ -228,12 +411,20 @@ def attach_routes(
         if not isinstance(agent, Agent):
             raise HTTPException(status_code=501, detail="Task polling is not supported for this agent type")
 
-        run_output = await agent.aget_run_output(run_id=task_id, session_id=context_id)
+        # A scoped caller may only read runs in sessions it owns, pinned to this
+        # agent (mirrors feat/v2.7's tasks:get hardening).
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            await verify_run_in_session(
+                agent, context_id, task_id, scoped_user_id, component_type="agents", component_id=id
+            )
+
+        run_output = await agent.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
         if not run_output:
             raise HTTPException(status_code=404, detail="Task not found")
 
         a2a_task = map_run_output_to_a2a_task(run_output)
-        return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task))
+        return JSONResponse(content=_task_envelope(request_body.get("id", "unknown"), a2a_task))
 
     @router.post(
         "/agents/{id}/v1/tasks:cancel",
@@ -260,17 +451,36 @@ def attach_routes(
         if not isinstance(agent, Agent):
             raise HTTPException(status_code=501, detail="Task cancellation is not supported for this agent type")
 
-        # cancel_run always stores cancellation intent (even for not-yet-registered runs
-        # in cancel-before-start scenarios), so we always return success.
+        # CancelTaskRequest has no contextId field; the official client can carry
+        # it in the request's metadata Struct, so accept both locations.
+        context_id = params.get("contextId") or params.get("metadata", {}).get("contextId")
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            if not context_id:
+                raise HTTPException(status_code=400, detail="contextId is required to cancel a task")
+            await verify_run_in_session(
+                agent, context_id, task_id, scoped_user_id, component_type="agents", component_id=id
+            )
+
+        # When the run is locatable, be honest about the outcome: a finished run
+        # is not cancelable and a nonexistent one is not found. Without a
+        # contextId (unscoped callers only) keep the blind cancel-intent store —
+        # it covers cancel-before-start scenarios.
+        if context_id:
+            run_output = await agent.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
+            if run_output is None:
+                return _jsonrpc_error_response(request_body.get("id"), TaskNotFoundError())
+            if run_output.status in _TERMINAL_RUN_STATUSES:
+                return _jsonrpc_error_response(request_body.get("id"), TaskNotCancelableError())
+
         await agent.acancel_run(run_id=task_id)
 
-        context_id = params.get("contextId", str(uuid4()))
         canceled_task = Task(
             id=task_id,
-            context_id=context_id,
+            context_id=context_id or str(uuid4()),
             status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
         )
-        return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), canceled_task))
+        return JSONResponse(content=_task_envelope(request_body.get("id", "unknown"), canceled_task))
 
     @router.post(
         "/agents/{id}/v1/message:stream",
@@ -295,11 +505,13 @@ def attach_routes(
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             event_stream = agent.arun(
@@ -315,7 +527,10 @@ def attach_routes(
                 **kwargs,
             )
             return StreamingResponse(
-                stream_a2a_response_with_error_handling(event_stream=event_stream, request_id=request_body["id"]),  # type: ignore[arg-type]
+                stream_a2a_response_with_error_handling(
+                    event_stream=event_stream,  # type: ignore[arg-type]
+                    request_id=request_body.get("id", ""),
+                ),
                 media_type="text/event-stream",
             )
         except Exception as e:
@@ -328,18 +543,15 @@ def attach_routes(
         description="A2A 1.0 JSON-RPC dispatcher for an Agno Agent. The official a2a-sdk client POSTs every operation here with the method in the JSON-RPC `method` field.",
     )
     async def a2a_agent_jsonrpc(request: Request, id: str):
-        body = await request.json()
-        method = body.get("method") or ""
-        if method == "SendMessage":
-            return await a2a_run_agent(request, id)
-        if method == "SendStreamingMessage":
-            return await a2a_stream_agent(request, id)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "error": {"code": -32601, "message": f"Method not found or not supported: {method!r}"},
+        return await _dispatch_a2a_method(
+            request,
+            id,
+            "agents",
+            {
+                "SendMessage": a2a_run_agent,
+                "SendStreamingMessage": a2a_stream_agent,
+                "GetTask": a2a_get_agent_task,
+                "CancelTask": a2a_cancel_agent_task,
             },
         )
 
@@ -357,7 +569,7 @@ def attach_routes(
                     name=team.name or "",
                     description=team.description or "",
                     base_url=base_url,
-                    interface_path=f"/a2a/teams/{team.id}/v1",
+                    interface_path=f"{prefix}/teams/{team.id}/v1",
                     skill_id=team.id or "",
                     streaming=True,
                 )
@@ -386,11 +598,13 @@ def attach_routes(
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         blocking = request_body.get("params", {}).get("configuration", {}).get("blocking", True)
 
@@ -408,11 +622,7 @@ def attach_routes(
             )
 
             a2a_task = map_run_output_to_a2a_task(response)
-            status_code = 202 if not blocking else 200
-            return JSONResponse(
-                content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task),
-                status_code=status_code,
-            )
+            return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task))
 
         except Exception as e:
             failed_task = _build_failed_task(e, context_id)
@@ -435,6 +645,8 @@ def attach_routes(
 
         if not task_id:
             raise HTTPException(status_code=400, detail="Task ID (params.id) is required")
+        if not context_id:
+            raise HTTPException(status_code=400, detail="contextId is required to poll a task")
 
         team = get_team_by_id(id, teams)
         if not team:
@@ -442,12 +654,18 @@ def attach_routes(
         if isinstance(team, RemoteTeam):
             raise HTTPException(status_code=400, detail="Task polling is not supported for remote teams")
 
-        run_output = await team.aget_run_output(run_id=task_id, session_id=context_id)
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            await verify_run_in_session(
+                team, context_id, task_id, scoped_user_id, component_type="teams", component_id=id
+            )
+
+        run_output = await team.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
         if not run_output:
             raise HTTPException(status_code=404, detail="Task not found")
 
         a2a_task = map_run_output_to_a2a_task(run_output)  # type: ignore[arg-type]
-        return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), a2a_task))
+        return JSONResponse(content=_task_envelope(request_body.get("id", "unknown"), a2a_task))
 
     @router.post(
         "/teams/{id}/v1/tasks:cancel",
@@ -472,15 +690,30 @@ def attach_routes(
         if isinstance(team, RemoteTeam):
             raise HTTPException(status_code=400, detail="Task cancellation is not supported for remote teams")
 
+        context_id = params.get("contextId") or params.get("metadata", {}).get("contextId")
+        scoped_user_id = get_scoped_user_id(request)
+        if scoped_user_id is not None:
+            if not context_id:
+                raise HTTPException(status_code=400, detail="contextId is required to cancel a task")
+            await verify_run_in_session(
+                team, context_id, task_id, scoped_user_id, component_type="teams", component_id=id
+            )
+
+        if context_id:
+            run_output = await team.aget_run_output(run_id=task_id, session_id=context_id, user_id=scoped_user_id)
+            if run_output is None:
+                return _jsonrpc_error_response(request_body.get("id"), TaskNotFoundError())
+            if run_output.status in _TERMINAL_RUN_STATUSES:
+                return _jsonrpc_error_response(request_body.get("id"), TaskNotCancelableError())
+
         await team.acancel_run(run_id=task_id)
 
-        context_id = params.get("contextId", str(uuid4()))
         canceled_task = Task(
             id=task_id,
-            context_id=context_id,
+            context_id=context_id or str(uuid4()),
             status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
         )
-        return JSONResponse(content=_send_message_envelope(request_body.get("id", "unknown"), canceled_task))
+        return JSONResponse(content=_task_envelope(request_body.get("id", "unknown"), canceled_task))
 
     @router.post(
         "/teams/{id}/v1/message:stream",
@@ -505,11 +738,13 @@ def attach_routes(
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             event_stream = team.arun(
@@ -525,7 +760,10 @@ def attach_routes(
                 **kwargs,
             )
             return StreamingResponse(
-                stream_a2a_response_with_error_handling(event_stream=event_stream, request_id=request_body["id"]),  # type: ignore[arg-type]
+                stream_a2a_response_with_error_handling(
+                    event_stream=event_stream,  # type: ignore[arg-type]
+                    request_id=request_body.get("id", ""),
+                ),
                 media_type="text/event-stream",
             )
         except Exception as e:
@@ -538,18 +776,15 @@ def attach_routes(
         description="A2A 1.0 JSON-RPC dispatcher for an Agno Team.",
     )
     async def a2a_team_jsonrpc(request: Request, id: str):
-        body = await request.json()
-        method = body.get("method") or ""
-        if method == "SendMessage":
-            return await a2a_run_team(request, id)
-        if method == "SendStreamingMessage":
-            return await a2a_stream_team(request, id)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "error": {"code": -32601, "message": f"Method not found or not supported: {method!r}"},
+        return await _dispatch_a2a_method(
+            request,
+            id,
+            "teams",
+            {
+                "SendMessage": a2a_run_team,
+                "SendStreamingMessage": a2a_stream_team,
+                "GetTask": a2a_get_team_task,
+                "CancelTask": a2a_cancel_team_task,
             },
         )
 
@@ -567,9 +802,11 @@ def attach_routes(
                     name=workflow.name or "",
                     description=workflow.description or "",
                     base_url=base_url,
-                    interface_path=f"/a2a/workflows/{workflow.id}/v1",
+                    interface_path=f"{prefix}/workflows/{workflow.id}/v1",
                     skill_id=workflow.id or "",
-                    streaming=False,
+                    # The workflow message:stream route exists — the card must say so,
+                    # or SDK clients refuse to stream from workflows.
+                    streaming=True,
                 )
             )
         )
@@ -596,11 +833,13 @@ def attach_routes(
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             response = await workflow.arun(
@@ -643,11 +882,13 @@ def attach_routes(
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
+        version_error = _check_a2a_version(request, request_body.get("id"))
+        if version_error is not None:
+            return version_error
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             event_stream = workflow.arun(
@@ -663,7 +904,9 @@ def attach_routes(
                 **kwargs,
             )
             return StreamingResponse(
-                stream_a2a_response_with_error_handling(event_stream=event_stream, request_id=request_body["id"]),  # type: ignore[arg-type]
+                stream_a2a_response_with_error_handling(
+                    event_stream=event_stream, request_id=request_body.get("id", "")
+                ),  # type: ignore[arg-type]
                 media_type="text/event-stream",
             )
         except Exception as e:
@@ -676,18 +919,15 @@ def attach_routes(
         description="A2A 1.0 JSON-RPC dispatcher for an Agno Workflow.",
     )
     async def a2a_workflow_jsonrpc(request: Request, id: str):
-        body = await request.json()
-        method = body.get("method") or ""
-        if method == "SendMessage":
-            return await a2a_run_workflow(request, id)
-        if method == "SendStreamingMessage":
-            return await a2a_stream_workflow(request, id)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "error": {"code": -32601, "message": f"Method not found or not supported: {method!r}"},
+        # Workflows have no task get/cancel routes; the dispatcher reports those
+        # spec methods as UnsupportedOperation rather than MethodNotFound.
+        return await _dispatch_a2a_method(
+            request,
+            id,
+            "workflows",
+            {
+                "SendMessage": a2a_run_workflow,
+                "SendStreamingMessage": a2a_stream_workflow,
             },
         )
 
@@ -726,11 +966,14 @@ def attach_routes(
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
+        # The route-level gate for this dynamic-dispatch endpoint can only be
+        # coarse; re-check the resolved entity's family here (mirrors feat/v2.7's
+        # _enforce_dynamic_dispatch_scope).
+        _check_a2a_scope(request, _entity_family(entity), agent_id, "run")
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=False)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             if isinstance(entity, Workflow):
@@ -797,11 +1040,11 @@ def attach_routes(
         if entity is None:
             raise HTTPException(status_code=404, detail=f"Agent, Team, or Workflow with ID '{agent_id}' not found")
 
+        _check_a2a_scope(request, _entity_family(entity), agent_id, "run")
+
         run_input = await map_a2a_request_to_run_input(request_body, stream=True)
         context_id = request_body.get("params", {}).get("message", {}).get("contextId")
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            user_id = request_body.get("params", {}).get("message", {}).get("metadata", {}).get("userId")
+        user_id = _resolve_a2a_user_id(request, request_body)
 
         try:
             if isinstance(entity, Workflow):
@@ -831,7 +1074,9 @@ def attach_routes(
                     **kwargs,
                 )
             return StreamingResponse(
-                stream_a2a_response_with_error_handling(event_stream=event_stream, request_id=request_body["id"]),  # type: ignore[arg-type]
+                stream_a2a_response_with_error_handling(
+                    event_stream=event_stream, request_id=request_body.get("id", "")
+                ),  # type: ignore[arg-type]
                 media_type="text/event-stream",
             )
         except Exception as e:

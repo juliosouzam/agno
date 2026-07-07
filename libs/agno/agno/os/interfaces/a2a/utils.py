@@ -78,6 +78,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.utils.log import log_error
 
 
 # --- proto <-> wire helpers ----------------------------------------------------
@@ -180,6 +181,21 @@ def _status_update(
 # --- request parsing -----------------------------------------------------------
 
 
+def _validated_file(part_index: int, media_type: str, **file_kwargs) -> File:
+    """Build an agno File from a part, converting mime-type rejections into a 400.
+
+    Agno's File model validates mime_type against an allowlist; a client sending a
+    type outside it is a content-type problem, not a server error.
+    """
+    try:
+        return File(mime_type=media_type or None, **file_kwargs)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported media type {media_type!r} in message part {part_index}",
+        )
+
+
 async def map_a2a_request_to_run_input(request_body: dict, stream: bool = True) -> RunInput:
     """Map an A2A v1 JSON-RPC SendMessage request body to an Agno RunInput.
 
@@ -226,7 +242,7 @@ async def map_a2a_request_to_run_input(request_body: dict, stream: bool = True) 
     audios: List[Audio] = []
     files: List[File] = []
 
-    for part in a2a_message.parts:
+    for idx, part in enumerate(a2a_message.parts):
         which = part.WhichOneof("content")
         if which == "text":
             text_parts.append(part.text)
@@ -238,15 +254,31 @@ async def map_a2a_request_to_run_input(request_body: dict, stream: bool = True) 
                 videos.append(Video(url=part.url))
             elif mt.startswith("audio/"):
                 audios.append(Audio(url=part.url))
-            elif mt:
-                files.append(File(url=part.url, mime_type=mt))
+            else:
+                files.append(_validated_file(idx, mt, url=part.url))
         elif which == "raw":
             mt = part.media_type or ""
-            if mt:
-                files.append(File(content=part.raw, mime_type=mt))
+            if mt.startswith("image/"):
+                images.append(Image(content=part.raw))
+            elif mt.startswith("video/"):
+                videos.append(Video(content=part.raw))
+            elif mt.startswith("audio/"):
+                audios.append(Audio(content=part.raw))
+            else:
+                files.append(_validated_file(idx, mt, content=part.raw))
         elif which == "data":
             data_dict = json_format.MessageToDict(part.data) if part.HasField("data") else {}
             text_parts.append(json.dumps(data_dict))
+        else:
+            # A part whose content oneof is empty after ParseDict means the client sent
+            # a shape this server cannot represent (e.g. a pre-1.0 `kind`-discriminated
+            # file part). Reject per spec (ContentTypeNotSupportedError) rather than
+            # silently dropping the content.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported content in message part {idx}: "
+                "expected an A2A v1 part with one of `text`, `url`, `raw` or `data` set",
+            )
 
     return RunInput(
         input_content="\n".join(text_parts) if text_parts else "",
@@ -269,7 +301,9 @@ def _map_run_status_to_task_state(status: Optional[RunStatus]) -> int:
         RunStatus.completed: TaskState.TASK_STATE_COMPLETED,
         RunStatus.error: TaskState.TASK_STATE_FAILED,
         RunStatus.cancelled: TaskState.TASK_STATE_CANCELED,
-        RunStatus.paused: TaskState.TASK_STATE_WORKING,
+        # A paused run is waiting on human input (HITL) — INPUT_REQUIRED tells the
+        # client to prompt its user instead of polling a run that will never progress.
+        RunStatus.paused: TaskState.TASK_STATE_INPUT_REQUIRED,
     }
     return _mapping.get(status, TaskState.TASK_STATE_COMPLETED)
 
@@ -369,12 +403,26 @@ async def stream_a2a_response(
     accumulated_content = ""
     completion_event = None
     cancelled_event = None
+    initial_task_sent = False
+    artifact_created = False
+
+    def _initial_task_event() -> str:
+        task = Task(
+            id=task_id,
+            context_id=context_id,
+            status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+        )
+        return _sse_event("Task", request_id, task)
 
     def _emit_status_metadata(meta: Dict[str, Any]) -> str:
         evt = _status_update(task_id, context_id, TaskState.TASK_STATE_WORKING, metadata=meta)
         return _sse_event("TaskStatusUpdateEvent", request_id, evt)
 
     def _emit_text_chunk(text: str, *, extra_meta: Optional[Dict[str, Any]] = None) -> str:
+        # The first chunk must create the artifact (append=False); only subsequent
+        # chunks may append. append=True for an unknown artifact_id is a protocol
+        # violation that a2a-sdk >= 1.1 consumers reject (a2a-python #1038).
+        nonlocal artifact_created
         artifact = Artifact(
             artifact_id=content_artifact_id,
             name="agent-response",
@@ -384,20 +432,29 @@ async def stream_a2a_response(
             task_id=task_id,
             context_id=context_id,
             artifact=artifact,
-            append=True,
+            append=artifact_created,
             last_chunk=False,
         )
+        artifact_created = True
         if extra_meta:
             _set_struct(evt.metadata, extra_meta)
         return _sse_event("TaskArtifactUpdateEvent", request_id, evt)
 
     async for event in event_stream:
-        if isinstance(event, (RunStartedEvent, TeamRunStartedEvent, WorkflowStartedEvent)):
+        is_start_event = isinstance(event, (RunStartedEvent, TeamRunStartedEvent, WorkflowStartedEvent))
+        if is_start_event:
             if hasattr(event, "run_id") and event.run_id:
                 task_id = event.run_id
             if hasattr(event, "session_id") and event.session_id:
                 context_id = event.session_id
 
+        # The stream must open with the Task object (before any status/artifact
+        # update), regardless of which agno event arrives first.
+        if not initial_task_sent:
+            initial_task_sent = True
+            yield _initial_task_event()
+
+        if is_start_event:
             yield _sse_event(
                 "TaskStatusUpdateEvent",
                 request_id,
@@ -598,6 +655,22 @@ async def stream_a2a_response(
         elif isinstance(event, (RunCancelledEvent, TeamRunCancelledEvent, WorkflowCancelledEvent)):
             cancelled_event = event
 
+    # An empty event stream still yields a well-formed sequence (Task first).
+    if not initial_task_sent:
+        initial_task_sent = True
+        yield _initial_task_event()
+
+    # Close the content artifact before the terminal status update.
+    if artifact_created and not cancelled_event:
+        closing_evt = TaskArtifactUpdateEvent(
+            task_id=task_id,
+            context_id=context_id,
+            artifact=Artifact(artifact_id=content_artifact_id, name="agent-response"),
+            append=True,
+            last_chunk=True,
+        )
+        yield _sse_event("TaskArtifactUpdateEvent", request_id, closing_evt)
+
     # Final status event
     if cancelled_event:
         final_metadata: Dict[str, Any] = {"agno_event_type": "run_cancelled"}
@@ -721,11 +794,14 @@ async def stream_a2a_response_with_error_handling(
             yield chunk
 
     except Exception as e:
+        # Log the real exception server-side; the wire response must not leak
+        # internal details (paths, connection strings, stack context) to callers.
+        log_error(f"A2A stream failed: {type(e).__name__}: {e}")
         failed_status_event = _status_update(task_id, context_id, TaskState.TASK_STATE_FAILED)
         yield _sse_event("TaskStatusUpdateEvent", request_id, failed_status_event)
 
         error_message = _build_agent_message(
-            parts=[_text_part(f"Error: {str(e)}")],
+            parts=[_text_part("Error: the run failed due to an internal server error.")],
             context_id=context_id,
         )
         failed_task = Task(

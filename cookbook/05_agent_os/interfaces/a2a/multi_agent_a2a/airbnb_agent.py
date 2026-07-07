@@ -8,7 +8,7 @@ Demonstrates airbnb agent.
 from textwrap import dedent
 
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
+from agno.models.openai import OpenAIResponses
 from agno.os import AgentOS
 from agno.tools.mcp import MCPTools
 
@@ -20,7 +20,7 @@ airbnb_agent = Agent(
     id="airbnb-search-agent",
     name="Airbnb Search Agent",
     description="A specialized agent for finding and detailing Airbnb listings using the OpenBNB MCP server.",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIResponses(id="gpt-5.5"),
     tools=[MCPTools("npx -y @openbnb/mcp-server-airbnb --ignore-robots-txt")],
     instructions=dedent("""
         You are an expert travel assistant.
@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
     Endpoints (A2A 1.0, JSON-RPC 2.0 envelope, flat Part with mediaType):
         GET  http://localhost:7774/a2a/agents/airbnb-search-agent/.well-known/agent-card.json
-        POST http://localhost:7774/a2a/agents/airbnb-search-agent/v1                 (JSON-RPC: SendMessage / SendStreamingMessage)
+        POST http://localhost:7774/a2a/agents/airbnb-search-agent/v1                 (JSON-RPC: SendMessage / SendStreamingMessage / GetTask / CancelTask — what the a2a-sdk Client targets)
         POST http://localhost:7774/a2a/agents/airbnb-search-agent/v1/message:send    (legacy URL-style)
         POST http://localhost:7774/a2a/agents/airbnb-search-agent/v1/message:stream  (legacy URL-style)
 

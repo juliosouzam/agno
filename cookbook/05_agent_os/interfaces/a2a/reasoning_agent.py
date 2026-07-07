@@ -6,7 +6,7 @@ Demonstrates reasoning agent.
 """
 
 from agno.agent.agent import Agent
-from agno.models.openai import OpenAIChat
+from agno.models.openai import OpenAIResponses
 from agno.os import AgentOS
 from agno.tools.websearch import WebSearchTools
 
@@ -17,7 +17,7 @@ from agno.tools.websearch import WebSearchTools
 reasoning_agent = Agent(
     name="reasoning-agent",
     id="reasoning_agent",
-    model=OpenAIChat(id="o4-mini"),
+    model=OpenAIResponses(id="o4-mini"),
     description="An advanced AI assistant with deep reasoning and analytical capabilities, enhanced with real-time web search to deliver thorough, well-thought-out responses with contextual awareness",
     instructions="You are a helpful AI assistant with reasoning capabilities.",
     add_datetime_to_context=True,
@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     Endpoints (A2A 1.0, JSON-RPC 2.0 envelope, flat Part with mediaType):
         GET  http://localhost:7777/a2a/agents/{id}/.well-known/agent-card.json
-        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage — what the a2a-sdk Client targets)
+        POST http://localhost:7777/a2a/agents/{id}/v1                 (JSON-RPC: SendMessage / SendStreamingMessage / GetTask / CancelTask — what the a2a-sdk Client targets)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:send    (legacy URL-style, kept for back-compat)
         POST http://localhost:7777/a2a/agents/{id}/v1/message:stream  (legacy URL-style, kept for back-compat)
 

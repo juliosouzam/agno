@@ -1,29 +1,43 @@
-# A2AClientTools Cookbook
+# A2AClient Cookbook
 
-`A2AClientTools` is the toolkit that lets an Agno agent **call any A2A 1.0
-agent** as a tool. It wraps the official `a2a-sdk` Python client, so the
-same Agno code can talk to any A2A 1.0 server on the wire.
+`A2AClient` is the toolkit that lets an Agno agent **call a remote A2A
+1.0 agent** as a tool. One toolkit instance binds one remote agent; it wraps
+the official `a2a-sdk` Python client, so the same Agno code can talk to any
+A2A 1.0 server on the wire.
 
 ```python
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.tools.a2a import A2AClientTools
+from agno.models.openai import OpenAIResponses
+from agno.tools.a2a import A2AClient
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
-    tools=[A2AClientTools(default_agent_url="http://localhost:7777/a2a/agents/basic_agent")],
+    model=OpenAIResponses(id="gpt-5.5"),
+    tools=[A2AClient(url="http://localhost:7777/a2a/agents/basic_agent")],
 )
 agent.print_response("Ask the remote agent to say hello.")
 ```
 
-The toolkit exposes two operations to the LLM:
+Each instance exposes two operations, named after the remote agent's URL slug
+so several instances can coexist on one Agno agent:
 
-- `send_message(agent_url, message) -> str` — Send a message, get the agent's final response text.
-- `get_agent_card(agent_url) -> str` — Fetch the agent's `/.well-known/agent-card.json` so the LLM can discover capabilities first.
+- `send_message_to_<slug>(message) -> str` — Send a message, get the agent's final response text.
+- `get_<slug>_card() -> str` — Fetch the agent's `/.well-known/agent-card.json` so the LLM can discover capabilities first.
 
-`agent_url` is the **base URL** of the agent (everything up to but not
-including `/.well-known/...`). The SDK resolves the agent card automatically.
-Set `default_agent_url` at init time to skip passing it every call.
+`url` is the **base URL** of the agent (everything up to but not including
+`/.well-known/...`). The SDK resolves the agent card automatically. To talk
+to several remote agents, give each its own instance:
+
+```python
+weather = A2AClient(url="http://localhost:7770/a2a/agents/weather-reporter-agent")
+airbnb = A2AClient(url="http://localhost:7774/a2a/agents/airbnb-search-agent")
+agent = Agent(model=OpenAIResponses(id="gpt-5.5"), tools=[weather, airbnb])
+# -> send_message_to_weather_reporter_agent, send_message_to_airbnb_search_agent, ...
+```
+
+The toolkit connects lazily on first use. For explicit lifecycle management
+(resolve the card up front, reuse one connection, enrich tool descriptions
+from the card), use `await toolkit.connect()` / `await toolkit.close()` or
+`async with toolkit:`.
 
 ## Example: Agno → Agno
 
@@ -45,7 +59,7 @@ Other interface cookbooks worth trying as the remote target:
 
 ## Cross-framework interop — coming when the ecosystem catches up
 
-`A2AClientTools` works against any A2A 1.0 base URL — that's the point of the
+`A2AClient` works against any A2A 1.0 base URL — that's the point of the
 protocol. Today, however, most Python agent frameworks still ship `a2a-sdk`
 0.3.x:
 
@@ -53,7 +67,7 @@ protocol. Today, however, most Python agent frameworks still ship `a2a-sdk`
 - **Microsoft Agent Framework** — A2A 1.0 lives in the .NET packages; the Python build hasn't shipped v1 yet.
 - **LangGraph / LangChain Agent Server** — exposes `/a2a/{assistant_id}` but uses the v0.3 method naming.
 
-When any of these upgrade, point `A2AClientTools` at their base URL and it'll
+When any of these upgrade, point `A2AClient` at their base URL and it'll
 just work — same toolkit, no Agno changes.
 
 A note on safety: a remote agent's response flows into the orchestrator's
@@ -62,11 +76,11 @@ you trust.
 
 ## How it works
 
-`A2AClientTools` is async-native. Under the hood:
+`A2AClient` is async-native. Under the hood:
 
-1. `create_client(agent_url)` from `a2a-sdk` resolves the agent card and picks the right transport (JSON-RPC over HTTP+JSON for Agno servers).
-2. `send_message` streams: chunks arrive as `artifact_update` events, the run completes with a final `task` event. The toolkit accumulates the chunks and prefers the final task's full text for its return value.
-3. `get_agent_card` returns a pretty-printed JSON of the v1 AgentCard so the LLM can read agent metadata directly.
+1. On connect (explicit or lazy on first call), the `a2a-sdk` resolves the agent card and opens a persistent client with the right transport (JSON-RPC over HTTP+JSON for Agno servers). Sync tool variants run a one-shot client per call instead.
+2. `send_message_to_<slug>` streams: chunks arrive as `artifact_update` events, the run completes with a final `task` event. The toolkit accumulates the chunks and prefers the terminal task's full text for its return value; FAILED/CANCELED/REJECTED terminal states come back as explicit errors.
+3. `get_<slug>_card` returns a pretty-printed JSON of the v1 AgentCard so the LLM can read agent metadata directly.
 
 Errors (connection refused, timeouts, malformed responses) are caught and
 returned as a short string starting with `Error talking to ...` or
