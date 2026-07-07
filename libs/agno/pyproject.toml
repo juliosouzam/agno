@@ -1,6 +1,6 @@
 [project]
 name = "agno"
-version = "2.6.9"
+version = "2.6.22"
 description = "The programming language for agentic software."
 requires-python = ">=3.7,<4"
 readme = "README.md"
@@ -88,7 +88,7 @@ azure = ["azure-ai-inference", "aiohttp"]
 cerebras = ["cerebras-cloud-sdk"]
 cohere = ["cohere"]
 infinity = ["infinity_client"]
-google = ["google-genai>=1.52.0"]
+google = ["google-genai>=1.52.0", "pydantic>=2.12.5"]
 groq = ["groq"]
 ibm = ["ibm-watsonx-ai"]
 litellm = ["litellm<=1.82.6"]
@@ -124,6 +124,7 @@ seltz = ["seltz>=0.2.0"]
 fal = ["fal_client"]
 firecrawl = ["firecrawl-py==3.4.0"]
 tavily = ["tavily-python"]
+scavio = ["scavio"]
 crawl4ai = ["crawl4ai>=0.6.3"]
 github = ["PyGithub"]
 gitlab = ["python-gitlab", "httpx"]
@@ -138,7 +139,7 @@ memori = ["memori>=3.0.5"]
 newspaper = ["newspaper4k", "lxml_html_clean"]
 notion = ["notion-client"]
 opencv = ["opencv-python"]
-parallel = ["parallel-web"]
+parallel = ["parallel-web>=1.0"]
 psycopg = ["psycopg-binary", "psycopg"]
 redshift = ["redshift-connector"]
 reportlab = ["reportlab"]
@@ -155,6 +156,7 @@ oxylabs = ["oxylabs"]
 trafilatura = ["trafilatura"]
 neo4j = ["neo4j"]
 telegram = ["pyTelegramBotAPI>=4.32.0", "aiohttp"]
+twelvelabs = ["twelvelabs>=1.2.8"]
 
 # Dependencies for Storage
 sql = ["sqlalchemy"]
@@ -197,7 +199,7 @@ chonkie = [
 ]
 
 # Dependencies for AG-UI integration
-agui = ["ag-ui-protocol"]
+agui = ["ag-ui-protocol>=0.1.15", "jsonpatch>=1.33"]
 
 # Dependencies for A2A integration
 a2a = ["a2a-sdk>=1.0"]
@@ -256,6 +258,7 @@ tools = [
   "agno[youtube]",
   "agno[firecrawl]",
   "agno[tavily]",
+  "agno[scavio]",
   # "agno[crawl4ai]",  # Temporarily disabled - depends on litellm which is compromised on PyPI (March 24, 2026)
   "agno[github]",
   "agno[gitlab]",
@@ -290,6 +293,7 @@ tools = [
   "agno[reportlab]",
   "agno[trafilatura]",
   "agno[neo4j]",
+  "agno[twelvelabs]",
 ]
 
 # All storage
@@ -393,7 +397,7 @@ demo = [
     "opentelemetry-api",
     "opentelemetry-sdk",
     "pandas",
-    "parallel-web",
+    "parallel-web>=1.0",
     "pgvector",
     "pillow",
     "psycopg[binary]",
@@ -497,10 +501,12 @@ module = [
   "github.*",
   "gitlab.*",
   "google.*",
+  "google_auth_httplib2.*",
   "googlemaps.*",
   "google_maps_places.*",
   "google_auth_oauthlib.*",
   "googleapiclient.*",
+  "httplib2.*",
   "groq.*",
   "hexbytes.*",
   "huggingface_hub.*",
@@ -508,6 +514,7 @@ module = [
   "imghdr.*",
   "infinity_client.*",
   "jira.*",
+  "jsonpatch.*",
   "jwt.*",
   "kubernetes.*",
   "lancedb.*",
@@ -553,6 +560,7 @@ module = [
   "redisvl.*",
   "replicate.*",
   "requests.*",
+  "scavio.*",
   "scrapegraph_py.*",
   "sentence_transformers.*",
   "serpapi.*",
@@ -572,6 +580,7 @@ module = [
   "torch.*",
   "todoist_api_python.*",
   "tweepy.*",
+  "twelvelabs.*",
   "twilio.*",
   "tzlocal.*",
   "upstash_vector.*",
