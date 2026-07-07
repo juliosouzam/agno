@@ -34,10 +34,12 @@ Security properties, deliberate and load-bearing:
 - **Single-use, short-lived codes; refresh rotation on every use.** Code exchange and
   refresh rotation are atomic DELETE-then-act, so a replayed code/refresh token fails
   on every replica.
-- **The consent page** is served only over HTTPS (or loopback for dev), renders only for
-  a valid pending authorization transaction, compares the secret in constant time,
-  double-submits a Secure CSRF cookie, denies framing, and rate-limits failures per-IP
-  and globally (verify-first, so a wrong-secret flood never blocks a correct login).
+- **The consent page** is served over a secure origin -- the SDK's ``validate_issuer_url``
+  rejects a non-HTTPS, non-localhost ``base_url`` at construction, so a plaintext deploy
+  cannot be stood up. It renders only for a valid pending authorization transaction,
+  compares the secret in constant time, double-submits a CSRF cookie (marked ``Secure``
+  on an HTTPS deployment), denies framing, and rate-limits failures per-IP and globally
+  (verify-first, so a wrong-secret flood never blocks a correct login).
 - **Revocation levers:** rotating the signing key invalidates every token it signed --
   access *and* refresh (both are JWTs under the same key) -- forcing re-consent; deleting
   a refresh-token row stops renewal for that client. Rotating the connect secret gates
@@ -559,13 +561,21 @@ class AgentOSBundledAuth(OAuthProvider):
             count = conn.execute(select(func.count()).select_from(self._transactions_table)).scalar() or 0
             overflow = count - (self._max_pending_transactions - 1)
             if overflow > 0:
+                # Wrap the oldest-N select in a derived table so the delete is not a bare
+                # self-referential subquery -- MySQL rejects "DELETE FROM t WHERE x IN
+                # (SELECT ... FROM t ...)" (error 1093), while the derived-table form is
+                # portable across sqlite / Postgres / MySQL.
                 oldest = (
                     select(self._transactions_table.c.txn_id)
                     .order_by(self._transactions_table.c.expires_at.asc())
                     .limit(overflow)
-                    .scalar_subquery()
+                    .subquery()
                 )
-                conn.execute(delete(self._transactions_table).where(self._transactions_table.c.txn_id.in_(oldest)))
+                conn.execute(
+                    delete(self._transactions_table).where(
+                        self._transactions_table.c.txn_id.in_(select(oldest.c.txn_id))
+                    )
+                )
             conn.execute(
                 insert(self._transactions_table).values(
                     txn_id=txn_id,
@@ -737,13 +747,18 @@ class AgentOSBundledAuth(OAuthProvider):
                 return client_id
         return await self._run(self._client_display_name_sync, client_id)
 
-    @staticmethod
-    def _request_is_secure(request: "Request") -> bool:
-        """HTTPS, or a loopback host (local development over http)."""
-        if request.url.scheme == "https":
-            return True
-        host = (request.url.hostname or "").lower()
-        return host in ("localhost", "127.0.0.1", "::1")
+    def _deployment_is_https(self) -> bool:
+        """Whether the deployment's public origin is HTTPS.
+
+        The MCP SDK already guarantees the consent page is served over a secure origin:
+        ``create_auth_routes`` rejects any ``base_url`` that is not HTTPS or localhost at
+        construction (``validate_issuer_url``), so a plaintext non-localhost bundled AS
+        cannot be stood up. This derives the CSRF cookie's ``Secure`` flag from that same
+        deployer-declared origin -- correct behind a TLS-terminating proxy (Railway/PaaS),
+        where the app sees plain http from the edge though the user's connection is https,
+        and off for a localhost http dev flow (where a Secure cookie would not be sent).
+        """
+        return str(self.base_url).lower().startswith("https")
 
     def _render_consent_page(
         self,
@@ -796,21 +811,9 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         )
         return response
 
-    def _insecure_response(self) -> Any:
-        from starlette.responses import HTMLResponse
-
-        # The page carries the deployer secret: never serve it over plaintext HTTP.
-        return HTMLResponse(
-            "<h1>This connection must be made over HTTPS.</h1>",
-            status_code=400,
-            headers=self._consent_headers(),
-        )
-
     async def _consent_get(self, request: "Request") -> Any:
         from starlette.responses import HTMLResponse
 
-        if not self._request_is_secure(request):
-            return self._insecure_response()
         txn_id = request.query_params.get("txn", "")
         payload = await self._run(self._load_transaction_sync, txn_id)
         if payload is None:
@@ -821,14 +824,12 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
                 headers=self._consent_headers(),
             )
         client_name = await self._display_name(payload["client_id"])
-        return self._render_consent_page(txn_id, payload, client_name, secure_cookie=request.url.scheme == "https")
+        return self._render_consent_page(txn_id, payload, client_name, secure_cookie=self._deployment_is_https())
 
     async def _consent_post(self, request: "Request") -> Any:
         from starlette.responses import HTMLResponse, RedirectResponse
 
-        if not self._request_is_secure(request):
-            return self._insecure_response()
-        secure_cookie = request.url.scheme == "https"
+        secure_cookie = self._deployment_is_https()
         form = await request.form()
         txn_id = str(form.get("txn", ""))
         payload = await self._run(self._load_transaction_sync, txn_id)

@@ -404,14 +404,65 @@ async def test_pending_transactions_are_capped(tmp_path):
     assert count <= 3
 
 
+def test_transaction_eviction_is_mysql_safe(tmp_path):
+    """The oldest-eviction DELETE must be a derived-table subquery, not a bare
+    self-referential one -- MySQL rejects "DELETE FROM t WHERE x IN (SELECT ... FROM t)"
+    (error 1093). Assert the rendered SQL wraps the subquery in a derived table on MySQL."""
+    from sqlalchemy import delete, select
+    from sqlalchemy.dialects import mysql
+
+    provider = _provider(_db(tmp_path))
+    provider._ensure_ready()
+    t = provider._transactions_table
+    oldest = select(t.c.txn_id).order_by(t.c.expires_at.asc()).limit(2).subquery()
+    stmt = delete(t).where(t.c.txn_id.in_(select(oldest.c.txn_id)))
+    rendered = " ".join(str(stmt.compile(dialect=mysql.dialect())).split())
+    assert "FROM (SELECT" in rendered  # derived table -> MySQL-safe
+
+
 # ==================== HTTPS / consent-cookie hardening ====================
 
 
-async def test_consent_rejected_over_plaintext_http(tmp_path):
-    """The consent page carries the deployer secret: a non-localhost HTTP request is
-    refused (only HTTPS, or a loopback host for local dev, is allowed)."""
+def test_plaintext_deployment_cannot_be_constructed(tmp_path):
+    """A plaintext (http, non-localhost) origin is refused at construction by the SDK's
+    issuer-URL validation, so the consent page is inherently served over a secure origin
+    -- no per-request HTTPS gate needed (which would misfire behind a TLS proxy)."""
+    provider = _provider(_db(tmp_path), base_url="http://my-os.example.com")
+    with pytest.raises(ValueError, match="HTTPS"):
+        provider.get_routes(mcp_path="/mcp")
+
+
+def test_consent_cookie_is_secure_for_https_deployment(tmp_path):
+    """The CSRF cookie is marked Secure when the deployment origin is HTTPS -- keyed on
+    the deployer-declared base_url, so it holds even when the app sees plain http from a
+    TLS-terminating proxy (Railway/PaaS). A localhost dev deploy gets a non-Secure cookie
+    so the dev flow works."""
+    https_provider = _provider(_db(tmp_path), base_url="https://my-os.up.railway.app")
+    assert https_provider._deployment_is_https() is True
+    payload = {"client_id": "c", "redirect_uri": _REDIRECT_URI, "state": "s"}
+    https_cookie = https_provider._render_consent_page(
+        "txn", payload, "c", secure_cookie=https_provider._deployment_is_https()
+    ).headers.get("set-cookie", "")
+    assert "Secure" in https_cookie
+    assert "HttpOnly" in https_cookie
+
+    local_provider = _provider(_db(tmp_path / "local"), base_url="http://localhost")
+    (tmp_path / "local").mkdir(exist_ok=True)
+    assert local_provider._deployment_is_https() is False
+    local_cookie = local_provider._render_consent_page(
+        "txn", payload, "c", secure_cookie=local_provider._deployment_is_https()
+    ).headers.get("set-cookie", "")
+    assert "Secure" not in local_cookie
+
+
+async def test_consent_served_on_proxy_terminated_https_deploy(tmp_path):
+    """Regression: on a proxy-terminated-TLS deploy (base_url https, app sees http), the
+    consent page must still serve -- gating on the per-request scheme would 400 the whole
+    connector flow on the primary production target."""
     db = _db(tmp_path)
-    async with _http_client(_os(_provider(db), db=db)) as client:
+    provider = _provider(db, base_url="https://my-os.up.railway.app")
+    os = _os(provider, db=db)
+    async with _http_client(os) as client:
         registration = await _register(client)
         client_id = registration.json()["client_id"]
         _, challenge = _pkce_pair()
@@ -427,25 +478,11 @@ async def test_consent_rejected_over_plaintext_http(tmp_path):
             },
             follow_redirects=False,
         )
-        # Drive the consent GET with a non-localhost Host over http.
-        response = await client.get(authorization.headers["location"], headers={"Host": "my-os.example.com"})
-    assert response.status_code == 400
-    assert "HTTPS" in response.text
-
-
-def test_consent_cookie_is_secure_over_https(tmp_path):
-    """The CSRF cookie is marked Secure when the request is HTTPS."""
-    from types import SimpleNamespace
-
-    from starlette.datastructures import URL
-
-    provider = _provider(_db(tmp_path))
-    request = SimpleNamespace(url=URL("https://my-os.example.com/mcp-auth/consent"))
-    payload = {"client_id": "c", "redirect_uri": _REDIRECT_URI, "state": "s"}
-    response = provider._render_consent_page("txn", payload, "c", secure_cookie=provider._request_is_secure(request))
-    set_cookie = response.headers.get("set-cookie", "")
-    assert "Secure" in set_cookie
-    assert "HttpOnly" in set_cookie
+        # The app receives a plain-http request with the public (non-loopback) Host.
+        consent_path = authorization.headers["location"].split(str(provider.base_url).rstrip("/"))[-1]
+        page = await client.get(consent_path, headers={"Host": "my-os.up.railway.app"})
+    assert page.status_code == 200
+    assert 'name="csrf"' in page.text
 
 
 # ==================== Token lifecycle ====================
