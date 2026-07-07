@@ -92,7 +92,10 @@ DEFAULT_REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60  # 30 days, rotated on every use
 DEFAULT_AUTH_CODE_TTL = 5 * 60  # single-use, 5 minutes
 DEFAULT_TRANSACTION_TTL = 10 * 60  # login page validity window
 DEFAULT_MAX_CLIENTS = 1000  # cap on PENDING (unconsummated) DCR registrations
-DEFAULT_UNCONSUMED_CLIENT_TTL = 24 * 60 * 60  # unconsummated registrations expire
+# Unconsummated registrations expire fast: a real connector completes register -> consent
+# within minutes, so a short TTL shrinks the window an unauthenticated /register flood
+# could fill the pending cap and delay new-client onboarding.
+DEFAULT_UNCONSUMED_CLIENT_TTL = 60 * 60
 
 # The login/consent surface, served by this provider inside the MCP sub-app (and so
 # automatically exempted from the parent AuthMiddleware with the other provider routes).
@@ -102,6 +105,8 @@ _CSRF_COOKIE = "agno_mcp_consent"
 
 # user_id namespace for OAuth-connected clients; distinct from sa:<name> and JWT subs.
 _PRINCIPAL_PREFIX = "oauth:"
+
+from agno.os.mcp_auth import INTERNAL_ISSUER_CLAIM  # noqa: E402
 
 
 def _hash(value: str) -> str:
@@ -169,7 +174,6 @@ class AgentOSBundledAuth(OAuthProvider):
         max_login_failures_per_ip: int = 10,
         max_login_failures_global: int = 100,
         enable_cimd: bool = True,
-        consumed_client_retention: int = DEFAULT_REFRESH_TOKEN_TTL * 2,
     ):
         super().__init__(
             base_url=base_url,
@@ -192,7 +196,6 @@ class AgentOSBundledAuth(OAuthProvider):
         self._signing_key_material = signing_key_material
         self._server_name = server_name
         self._max_clients = max_clients
-        self._consumed_client_retention = consumed_client_retention
         # Verifiers, newest first: the current key issues, and any of the persisted
         # keys can verify -- so rotation is add-new-key, let old tokens drain, then
         # remove the old key (a graceful dual-key overlap rather than a hard cut).
@@ -329,9 +332,28 @@ class AgentOSBundledAuth(OAuthProvider):
             if self._tables_ready:
                 return
             self._define_tables()
+            self._ensure_schema_exists()
             self._metadata.create_all(self._engine, checkfirst=True)
             self._issuers = self._load_issuers()
             self._tables_ready = True
+
+    def _ensure_schema_exists(self) -> None:
+        """Create the db's schema if it does not exist (Postgres non-default schema).
+
+        ``MetaData(schema=...).create_all`` emits ``CREATE TABLE <schema>.<name>`` but not
+        ``CREATE SCHEMA`` -- so an escape-hatch deployment that hands this provider a
+        Postgres db whose schema no other agno startup path has provisioned would 500 on
+        the first request. Mirrors ``PostgresDb._create_table``, which creates the schema
+        first. No-op for SQLite (no schemas) and when the schema already exists.
+        """
+        db_schema = getattr(self._db, "db_schema", None)
+        if not db_schema or self._engine.dialect.name == "sqlite":
+            return
+        from sqlalchemy import text
+
+        with self._engine.connect() as conn:
+            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {db_schema}"))
+            conn.commit()
 
     def _build_issuer(self, material: str, kid: str) -> Tuple[str, "JWTIssuer"]:
         salt = str(self.base_url).rstrip("/")
@@ -454,20 +476,16 @@ class AgentOSBundledAuth(OAuthProvider):
         self._ensure_ready()
         now = int(time.time())
         with self._engine.connect() as conn:
-            # /register is an unauthenticated write path. Expire unconsummated
-            # registrations (the flood vector), and age out consumed rows well past the
-            # refresh-token TTL (a consumed client with a live refresh token must keep
-            # resolving, so retention comfortably exceeds it).
+            # /register is an unauthenticated write path: expire unconsummated
+            # registrations (the flood vector). Consumed rows are NOT pruned -- a consumed
+            # client keeps a live, rotating refresh token whose lifetime is unbounded, so
+            # deleting its row would 401 an actively-used connector at /token; and a
+            # consumed row required the deployer secret to create, so it is not a flood
+            # vector to bound.
             conn.execute(
                 delete(self._clients_table).where(
                     self._clients_table.c.consumed_at.is_(None),
                     self._clients_table.c.created_at < now - DEFAULT_UNCONSUMED_CLIENT_TTL,
-                )
-            )
-            conn.execute(
-                delete(self._clients_table).where(
-                    self._clients_table.c.consumed_at.isnot(None),
-                    self._clients_table.c.consumed_at < now - self._consumed_client_retention,
                 )
             )
             # The cap is anti-flood: it bounds UNCONSUMED registrations only, so a run of
@@ -573,6 +591,7 @@ class AgentOSBundledAuth(OAuthProvider):
     def _mark_client_consumed_sync(self, client_id: str) -> None:
         from sqlalchemy import update
 
+        self._ensure_ready()
         with self._engine.connect() as conn:
             conn.execute(
                 update(self._clients_table)
@@ -953,7 +972,14 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
             client_id=client_id,
             scopes=scopes,
             expires_at=payload.get("exp"),
-            claims={**payload, "sub": f"{_PRINCIPAL_PREFIX}{client_id}"},
+            # INTERNAL_ISSUER_CLAIM marks this as a first-party token so the identity
+            # bridge trusts its server-assigned ``oauth:`` principal (an external Tier-2
+            # token claiming that namespace is rejected).
+            claims={
+                **payload,
+                "sub": f"{_PRINCIPAL_PREFIX}{client_id}",
+                INTERNAL_ISSUER_CLAIM: True,
+            },
         )
 
     async def revoke_token(self, token: Any) -> None:

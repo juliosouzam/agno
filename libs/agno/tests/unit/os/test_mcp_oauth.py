@@ -515,6 +515,40 @@ def test_scope_gate_enforces_bridged_identity(monkeypatch):
     mcp_mod._require_tool_scopes("POST", "/agents/demo-agent/runs")
 
 
+def test_scope_gate_allows_authenticated_rbac_off_caller(monkeypatch):
+    """A caller the bridge DID authenticate but whose token carries no RBAC (an RBAC-off
+    agno JWT, or an external Tier-2 token) is a legitimate unenforced caller -- the
+    fail-closed gate must NOT deny it (that only fires when the bridge did not run)."""
+    import fastmcp.server.dependencies as deps
+
+    from agno.os import mcp as mcp_mod
+
+    rbac_off = {"authenticated": True, "user_id": "alice", "scopes": ["agents:run"], "authorization_enabled": False}
+    monkeypatch.setattr(deps, "get_http_request", lambda: _fake_http_request(rbac_off, mcp_auth_enabled=True))
+    # No exception: enforcement is skipped exactly as on a non-mcp_auth RBAC-off deploy.
+    mcp_mod._require_tool_scopes("POST", "/agents/demo-agent/runs")
+
+
+async def test_rbac_off_jwt_bearer_runs_tools_under_mcp_auth(tmp_path):
+    """End-to-end coexistence: on an authorization=False deployment, an agno-JWT bearer
+    still reaches a built-in tool over an OAuth-enabled /mcp (the fail-closed gate must
+    not deny it just because RBAC is off)."""
+    from agno.os.config import AuthorizationConfig
+
+    db = _sqlite_db(tmp_path)
+    os = AgentOS(
+        agents=[_agent()],
+        db=db,
+        enable_mcp_server=True,
+        mcp_auth=_oauth_provider(),
+        authorization=False,
+        authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
+    )
+    async with _http_client(os) as client:
+        init = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt()))
+    assert init.status_code == 200
+
+
 # ==================== Parent auth stays intact around the exemptions ====================
 
 
@@ -647,6 +681,28 @@ async def test_identity_bridge_leaves_unauthenticated_requests_untouched():
     state = await _bridged_state(None)
     assert "user_id" not in state
     assert "authorization_enabled" not in state
+
+
+async def test_identity_bridge_rejects_external_token_claiming_reserved_principal():
+    """An external (Tier-2) provider token whose sub falls in a server-reserved namespace
+    (sa:/oauth:/__scheduler__) must NOT be honored -- the bridge leaves the identity unset
+    so the fail-closed gates deny it, rather than letting it impersonate the principal."""
+    from agno.os.mcp_auth import INTERNAL_ISSUER_CLAIM
+
+    for reserved in ("sa:admin", "oauth:evil", "__scheduler__"):
+        token = AccessToken(token="t", client_id="ext", scopes=["agents:run"], claims={"sub": reserved})
+        state = await _bridged_state(token)
+        assert "user_id" not in state, f"{reserved} should not be bridged"
+        assert "authenticated" not in state
+
+    # But a first-party bundled-AS token (marked with the internal-issuer claim) is trusted
+    # to carry its own oauth: principal.
+    trusted = AccessToken(
+        token="t", client_id="c", scopes=["agents:run"], claims={"sub": "oauth:c", INTERNAL_ISSUER_CLAIM: True}
+    )
+    state = await _bridged_state(trusted)
+    assert state["user_id"] == "oauth:c"
+    assert state["authenticated"] is True
 
 
 # ==================== The PAT verifier (unit) ====================

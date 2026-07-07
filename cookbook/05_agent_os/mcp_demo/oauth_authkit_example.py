@@ -10,6 +10,12 @@ One-time WorkOS setup (free):
   2. Register your public /mcp URL as a Resource Indicator (the token audience the log
      line below prints on startup).
   3. Set AUTHKIT_DOMAIN to your AuthKit domain.
+  4. Configure AuthKit to emit agno-format scopes in the token's `scope`/`scp` claim:
+     agents:run, teams:run, workflows:run, sessions:read, config:read (or whatever
+     subset each user should have). AgentOS enforces its scope map on the external
+     token, so a token carrying only OIDC scopes (openid/profile/email) authenticates
+     but is denied every tool. Mapping users to agno scopes at the AS *is* the Tier-2
+     per-user RBAC story.
 
     export AUTHKIT_DOMAIN=your-tenant.authkit.app
     export AGENTOS_PUBLIC_URL=https://your-deployment.example.com

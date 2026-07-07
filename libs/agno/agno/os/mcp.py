@@ -272,12 +272,14 @@ def _require_tool_scopes(method: str, path: str) -> None:
     state = request.state
     is_service_account = getattr(state, "service_account_name", None) is not None
     if not is_service_account and not getattr(state, "authorization_enabled", False):
-        # Under mcp_auth every request here carries a provider-verified token, so a
-        # missing identity means the bridge did not run (an ordering regression) --
-        # fail closed instead of silently disabling enforcement. Without mcp_auth the
-        # skip is the intended open/security-key behavior (anonymous callers carry no
-        # scopes and pass).
-        if _mcp_auth_enabled(request):
+        # Under mcp_auth, a verified request whose identity bridge did NOT run (an
+        # ordering regression) has no ``authenticated`` marker -- fail closed rather than
+        # silently disabling enforcement. But a request the bridge DID authenticate whose
+        # token simply carries no RBAC (an RBAC-off agno JWT, or an external Tier-2 token
+        # whose AS is the authority) is a legitimate unenforced caller and skips agno
+        # scope enforcement, exactly as on a non-mcp_auth deployment. Without mcp_auth the
+        # skip is the intended open/security-key behavior.
+        if _mcp_auth_enabled(request) and not getattr(state, "authenticated", False):
             raise Exception(_MISSING_BRIDGE_DETAIL)
         return
 
@@ -316,11 +318,13 @@ async def _enforce_run_continuation_allowed(db: Any, run_id: str) -> None:
     state = request.state
     if (
         _mcp_auth_enabled(request)
+        and not getattr(state, "authenticated", False)
         and getattr(state, "service_account_name", None) is None
         and not getattr(state, "authorization_enabled", False)
     ):
-        # Same fail-closed rule as _require_tool_scopes: a provider-verified request
-        # with no bridged identity must not bypass the approval gate.
+        # Same fail-closed rule as _require_tool_scopes: a provider-verified request whose
+        # identity bridge did not run (no ``authenticated`` marker) must not bypass the
+        # approval gate. A bridged RBAC-off caller is legitimate and proceeds.
         raise Exception(_MISSING_BRIDGE_DETAIL)
     reason = await run_continuation_blocked_reason(
         db,

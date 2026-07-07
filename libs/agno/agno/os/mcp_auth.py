@@ -25,6 +25,7 @@ agno adds two things on top of the provider:
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agno.os.middleware.jwt import is_reserved_principal as _is_reserved_principal
 from agno.utils.log import log_warning
 
 try:
@@ -46,6 +47,12 @@ SERVICE_ACCOUNT_CLAIM = "agno_service_account"
 # behavior: JWT scopes are enforced only when RBAC is on (state.authorization_enabled =
 # os.authorization), while PAT and OAuth-provider scopes are always enforced.
 AUTHORIZATION_ENABLED_CLAIM = "agno_authorization_enabled"
+
+# Marks a token minted by a trusted first-party agno source (the bundled AS) so the
+# identity bridge permits it to carry a server-assigned reserved principal (``oauth:``).
+# An external Tier-2 provider's token never carries it, so a reserved ``sub`` from such a
+# token is rejected rather than honored (impersonation guard).
+INTERNAL_ISSUER_CLAIM = "agno_mcp_internal_issuer"
 
 
 class ServiceAccountTokenVerifier(TokenVerifier):
@@ -147,19 +154,30 @@ class MCPIdentityBridgeMiddleware:
             access_token = getattr(scope.get("user"), "access_token", None)
             if access_token is not None:
                 claims = getattr(access_token, "claims", None) or {}
+                user_id = claims.get("sub") or getattr(access_token, "client_id", None)
+                service_account_name = claims.get(SERVICE_ACCOUNT_CLAIM)
+                # A token must not claim a server-reserved principal (sa:/oauth:/scheduler)
+                # unless it comes from a trusted first-party source that owns that
+                # namespace: the PAT verifier (sa:) or the bundled AS (oauth:). An
+                # external Tier-2 provider's token carrying such a sub is an impersonation
+                # attempt -- leave the identity unset so the fail-closed tool gates deny.
+                trusted_internal = service_account_name is not None or bool(claims.get(INTERNAL_ISSUER_CLAIM))
+                if not trusted_internal and _is_reserved_principal(user_id):
+                    log_warning(f"MCP token claims a reserved principal {user_id!r}; refusing to bridge its identity")
+                    await self.app(scope, receive, send)
+                    return
                 # request.state is backed by scope["state"]; the mounted sub-app and the
                 # parent share it, so the tools read these exactly as they do under the
                 # parent AuthMiddleware.
                 state = scope.setdefault("state", {})
                 state["authenticated"] = True
-                state["user_id"] = claims.get("sub") or getattr(access_token, "client_id", None)
+                state["user_id"] = user_id
                 state["session_id"] = claims.get("session_id")
                 state["scopes"] = list(getattr(access_token, "scopes", None) or [])
                 state["authorization_enabled"] = bool(claims.get(AUTHORIZATION_ENABLED_CLAIM, True))
                 if self.admin_scope:
                     state["admin_scope"] = self.admin_scope
                 state["user_isolation_enabled"] = self.user_isolation
-                service_account_name = claims.get(SERVICE_ACCOUNT_CLAIM)
                 if service_account_name is not None:
                     state["service_account_name"] = service_account_name
                 else:

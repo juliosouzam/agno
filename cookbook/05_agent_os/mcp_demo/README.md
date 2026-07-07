@@ -117,6 +117,12 @@ The same seam carries both tiers, so moving from bundled to an external AS is a 
 `/info` reports `auth_mode="oauth"` with the authorization server and resource URL so clients
 (and `agno connect`) can discover the mode.
 
+**Tier 2 scopes.** AgentOS enforces its scope map (`agents:run`, `teams:run`, `workflows:run`,
+`sessions:read`, `config:read`) on the external token, so configure your AS to emit agno-format
+scopes in the token's `scope`/`scp` claim per user — a token carrying only OIDC scopes
+authenticates but is denied every tool. Mapping users to agno scopes at the AS *is* the Tier-2
+per-user RBAC story. (The bundled Tier-1 server issues these scopes itself.)
+
 ## Prerequisites
 - Load environment variables with `direnv allow` (requires `.envrc`).
 - Run examples with `.venvs/demo/bin/python <path-to-file>.py`.

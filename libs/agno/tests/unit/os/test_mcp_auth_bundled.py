@@ -527,6 +527,23 @@ async def test_client_cap_bounds_pending_not_lifetime(tmp_path):
     assert registration.status_code == 201
 
 
+async def test_consumed_client_survives_later_registrations(tmp_path):
+    """A consumed client's row is never pruned, so a long-lived connector keeps refreshing
+    even as other clients register (a fixed-TTL prune would 401 its live refresh token)."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        tokens, client_id = await _full_flow(client)
+        # Simulate many later onboardings (each calls /register, the only prune trigger).
+        for _ in range(3):
+            await _full_flow(client)
+        # The original client's refresh token still works -- its row was not pruned.
+        refreshed = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id},
+        )
+    assert refreshed.status_code == 200, refreshed.text
+
+
 # ==================== Refresh across access-token expiry (forced short TTL) ====================
 
 
