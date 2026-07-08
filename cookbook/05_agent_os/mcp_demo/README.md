@@ -91,15 +91,20 @@ import os
 
 from agno.os import AgentOS, AgentOSBuiltinAuth
 
-# The two inputs are spelled out so the config documents itself; the shorthand
-# AgentOSBuiltinAuth.from_env() reads the same two env vars.
-mcp_auth = AgentOSBuiltinAuth(url=os.environ["AGENTOS_URL"], secret=os.environ["MCP_CONNECT_SECRET"])
+# The inputs are spelled out so the config documents itself; the shorthand
+# AgentOSBuiltinAuth.from_env() reads these same env vars.
+mcp_auth = AgentOSBuiltinAuth(
+    url=os.environ["AGENTOS_URL"],
+    secret=os.environ["MCP_CONNECT_SECRET"],
+    signing_key_material=os.environ.get("AGENTOS_MCP_SIGNING_KEY"),  # optional; env-pins the token key
+)
 agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth=mcp_auth)
 ```
 
 ```bash
-export AGENTOS_URL=https://your-deployment.example.com   # the public origin
-export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the connect-page login secret
+export AGENTOS_URL=https://your-deployment.example.com   # the public origin the client connects to
+export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the connect-page login secret (>= 16 chars)
+export AGENTOS_MCP_SIGNING_KEY=$(openssl rand -base64 32)       # optional: env-pinned token key (>= 32 chars)
 ```
 
 Then in claude.ai (Settings → Connectors) or ChatGPT (custom connector), paste your public
