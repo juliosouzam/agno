@@ -180,14 +180,28 @@ def test_mcp_auth_requires_enable_mcp_server():
 
 
 def test_mcp_auth_builtin_requires_postgres(monkeypatch):
-    """AgentOSBuiltinAuth.from_env() (unbound) on an AgentOS with no Postgres db errors
-    clearly when resolved, rather than 500ing later."""
+    """AgentOSBuiltinAuth.from_env() (unbound) on an AgentOS with no db errors clearly
+    when resolved, rather than 500ing later."""
     from agno.os import AgentOSBuiltinAuth
 
     monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
     monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
     os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
-    with pytest.raises(ValueError, match="Postgres"):
+    with pytest.raises(ValueError, match="needs a database"):
+        os.get_app()
+
+
+def test_mcp_auth_builtin_never_binds_an_agent_db(tmp_path, monkeypatch):
+    """The built-in AS binds only the AgentOS-level db (os.db) -- never an agent's db,
+    which is that agent's data store, not the platform's OAuth state. With no AgentOS db
+    but an agent that has one, resolution still errors."""
+    from agno.os import AgentOSBuiltinAuth
+
+    monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
+    agent_with_db = Agent(id="a", name="A", db=_sqlite_db(tmp_path))
+    os = AgentOS(agents=[agent_with_db], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
+    with pytest.raises(ValueError, match="needs a database"):
         os.get_app()
 
 

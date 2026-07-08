@@ -218,28 +218,6 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     )
 
 
-def _first_sql_db(os: "AgentOS") -> Optional[Any]:
-    """The AgentOS's SQLAlchemy-backed db to bind the built-in AS to.
-
-    Prefers the AgentOS-level ``db`` (set at construction, before database
-    auto-discovery populates ``os.dbs``); falls back to any agent-attached db. Returns
-    the first one exposing a ``db_engine`` (PostgresDb, SqliteDb, ...) -- the provider's
-    own ``_resolve_engine`` then validates it (rejecting async, warning on SQLite).
-    """
-    candidates: List[Any] = []
-    if getattr(os, "db", None) is not None:
-        candidates.append(os.db)
-    for value in (getattr(os, "dbs", None) or {}).values():
-        if isinstance(value, (list, tuple, set)):
-            candidates.extend(value)
-        else:
-            candidates.append(value)
-    for db in candidates:
-        if getattr(db, "db_engine", None) is not None:
-            return db
-    return None
-
-
 def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     """Resolve ``AgentOS.mcp_auth`` into the provider handed to ``FastMCP(auth=...)``.
 
@@ -263,11 +241,13 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
             "See fastmcp.server.auth for the available providers, or AgentOSBuiltinAuth for the built-in one."
         )
     # The built-in AS may be constructed without a db (AgentOSBuiltinAuth.from_env());
-    # bind the AgentOS db so a template can hand it straight to AgentOS.
+    # bind the AgentOS-level db so a template can hand it straight to AgentOS. Only the
+    # AgentOS db (os.db) is used -- never an agent-attached db, which is that agent's
+    # data store, not the platform's OAuth state.
     from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
 
     if isinstance(raw, AgentOSBuiltinAuth) and not raw.is_db_bound():
-        db = _first_sql_db(os)
+        db = getattr(os, "db", None)
         if db is None:
             raise ValueError(
                 "AgentOSBuiltinAuth needs a database: give AgentOS a Postgres db "
