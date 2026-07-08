@@ -1303,9 +1303,9 @@ class BaseDb(ABC):
         raise NotImplementedError
 
     def store_mcp_oauth_refresh(
-        self, *, token_hash: str, client_id: str, scopes: str, expires_at: int, now: int
+        self, *, token_hash: str, client_id: str, scopes: str, expires_at: int, now: int, family_id: str
     ) -> None:
-        """Insert a hashed refresh token, sweeping expired rows first."""
+        """Insert a hashed refresh token (tagged with its rotation family), sweeping expired rows first."""
         raise NotImplementedError
 
     def get_mcp_oauth_refresh(self, token_hash: str) -> Optional[tuple]:
@@ -1314,6 +1314,10 @@ class BaseDb(ABC):
 
     def delete_mcp_oauth_refresh(self, token_hash: str) -> bool:
         """Delete a hashed refresh token atomically. Returns True iff exactly one row was removed (rotation-on-use)."""
+        raise NotImplementedError
+
+    def delete_mcp_oauth_refresh_family(self, family_id: str) -> int:
+        """Delete every refresh token in a rotation family (reuse-detection revocation). Returns the count removed."""
         raise NotImplementedError
 
     def get_mcp_oauth_keys(self) -> List[tuple]:

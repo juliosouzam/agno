@@ -5127,7 +5127,7 @@ class SqliteDb(BaseDb):
         return mcp_oauth_store.delete_code(self.db_engine, table, code_hash)
 
     def store_mcp_oauth_refresh(
-        self, *, token_hash: str, client_id: str, scopes: str, expires_at: int, now: int
+        self, *, token_hash: str, client_id: str, scopes: str, expires_at: int, now: int, family_id: str
     ) -> None:
         table = self._get_table(table_type=MCP_OAUTH_REFRESH_TOKENS, create_table_if_not_found=True)
         mcp_oauth_store.store_refresh(
@@ -5138,6 +5138,7 @@ class SqliteDb(BaseDb):
             scopes=scopes,
             expires_at=expires_at,
             now=now,
+            family_id=family_id,
         )
 
     def get_mcp_oauth_refresh(self, token_hash: str) -> Optional[tuple]:
@@ -5147,6 +5148,10 @@ class SqliteDb(BaseDb):
     def delete_mcp_oauth_refresh(self, token_hash: str) -> bool:
         table = self._get_table(table_type=MCP_OAUTH_REFRESH_TOKENS, create_table_if_not_found=True)
         return mcp_oauth_store.delete_refresh(self.db_engine, table, token_hash)
+
+    def delete_mcp_oauth_refresh_family(self, family_id: str) -> int:
+        table = self._get_table(table_type=MCP_OAUTH_REFRESH_TOKENS, create_table_if_not_found=True)
+        return mcp_oauth_store.delete_refresh_family(self.db_engine, table, family_id)
 
     def get_mcp_oauth_keys(self) -> List[tuple]:
         table = self._get_table(table_type=MCP_OAUTH_KEYS, create_table_if_not_found=True)

@@ -533,6 +533,36 @@ async def test_refresh_rotates_and_old_token_dies(tmp_path):
         assert response.status_code == 200
 
 
+async def test_reused_refresh_token_revokes_the_family(tmp_path):
+    """Presenting a rotated-away refresh token is reuse detection (OAuth 2.1 / RFC 9700):
+    it is refused AND revokes the whole rotation family, so the legitimate current refresh
+    token dies too and the client must re-consent."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        tokens, client_id = await _full_flow(client)
+        # Legitimate rotation: token1 -> token2.
+        rotated = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id},
+        )
+        assert rotated.status_code == 200, rotated.text
+        token2 = rotated.json()["refresh_token"]
+
+        # Reuse of the rotated-away token1 is refused AND trips family revocation.
+        replay = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id},
+        )
+        assert replay.status_code in (400, 401)
+
+        # token2 was the legitimate current token, but the family was revoked, so it is dead too.
+        after = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": token2, "client_id": client_id},
+        )
+        assert after.status_code in (400, 401)
+
+
 async def test_scopes_are_server_decided(tmp_path):
     """A client requesting broader scopes (admin) gets exactly the configured grant."""
     db = _db(tmp_path)
@@ -898,3 +928,22 @@ def test_oauth_principal_is_reserved():
     assert is_reserved_principal("oauth:claude-ai") is True
     assert is_reserved_principal("sa:bot") is True
     assert is_reserved_principal("regular-user") is False
+
+
+def test_loopback_redirect_matching():
+    """Redirect validation (a security control) is owned locally, not delegated to a
+    private fastmcp symbol. A registered loopback URI may vary only in port (RFC 8252);
+    everything else stays strict exact-match, and mismatches are refused."""
+    from agno.os.mcp_auth_builtin import _redirect_uri_matches_registered as matches
+
+    reg = "http://127.0.0.1:51111/callback"
+    # Accepted: exact match, and a loopback host with only the port differing.
+    assert matches(reg, reg) is True
+    assert matches("http://127.0.0.1:62000/callback", reg) is True
+    assert matches("http://localhost:62000/cb", "http://localhost:51111/cb") is True
+    # Refused: different path, non-loopback host, and a scheme change on a non-loopback URI.
+    assert matches("http://127.0.0.1:62000/evil", reg) is False
+    assert matches("http://evil.example.com:51111/callback", reg) is False
+    assert matches("https://claude.ai/cb", "http://claude.ai/cb") is False
+    # Refused: userinfo in the URI must never participate in matching.
+    assert matches("http://x@127.0.0.1:62000/callback", reg) is False

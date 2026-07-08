@@ -290,8 +290,12 @@ class InfoResponse(BaseModel):
     team_count: int = Field(0, description="Number of teams registered in the OS")
     workflow_count: int = Field(0, description="Number of workflows registered in the OS")
     mcp: McpInfo = Field(default_factory=McpInfo, description="MCP server availability for this OS instance")
-    auth_mode: Literal["none", "security_key", "jwt", "oauth"] = Field(
-        "none", description="Authentication mode effectively enforced by this OS instance"
+    auth_mode: Literal["none", "security_key", "jwt"] = Field(
+        "none",
+        description=(
+            "Authentication mode enforced on the REST/WS plane of this OS instance. MCP OAuth, "
+            "when enabled, is described separately under `mcp.oauth`."
+        ),
     )
 
 

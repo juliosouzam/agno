@@ -238,8 +238,19 @@ class _MarkerScrubbingProvider(AuthProvider):
         access_token = await self._wrapped.verify_token(token)
         if access_token is None:
             return None
-        claims = getattr(access_token, "claims", None)
-        if claims and any(marker in claims for marker in RESERVED_MARKER_CLAIMS):
+        claims = getattr(access_token, "claims", None) or {}
+        # An external provider must not assert a server-reserved principal (sa:/oauth:/
+        # __scheduler__). Its token is cryptographically valid, so fastmcp would not 401 it;
+        # the identity bridge then refuses to stamp the reserved identity, but the request
+        # still reaches the tools as an unauthenticated session -- custom tools run with
+        # user_id=None and skip the authorize() allowlist. Reject at verify, mirroring
+        # JWTBearerTokenVerifier, so a reserved-principal external token never gets a session.
+        # The effective principal is computed exactly as the bridge does (sub, else client_id).
+        effective_sub = claims["sub"] if "sub" in claims else getattr(access_token, "client_id", None)
+        if _is_reserved_principal(effective_sub):
+            log_warning(f"Rejected external MCP token asserting a reserved principal: {effective_sub!r}")
+            return None
+        if any(marker in claims for marker in RESERVED_MARKER_CLAIMS):
             scrubbed = {k: v for k, v in claims.items() if k not in RESERVED_MARKER_CLAIMS}
             return access_token.model_copy(update={"claims": scrubbed})
         return access_token

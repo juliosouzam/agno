@@ -54,12 +54,15 @@ MCP_OAUTH_CODES_TABLE_SCHEMA = {
     "expires_at": {"type": BigInteger, "nullable": False, "index": True},
 }
 
-# Refresh tokens, SHA-256-hashed at rest. Rotated (deleted) on every use.
+# Refresh tokens, SHA-256-hashed at rest. Rotated (deleted) on every use. ``family_id``
+# ties every token in a rotation chain together so reuse of a rotated token can revoke the
+# whole family (OAuth 2.1 / RFC 9700 reuse detection); it is indexed for that delete.
 MCP_OAUTH_REFRESH_TOKENS_TABLE_SCHEMA = {
     "token_hash": {"type": String, "primary_key": True, "nullable": False},
     "client_id": {"type": String, "nullable": False},
     "scopes": {"type": Text, "nullable": False},
     "expires_at": {"type": BigInteger, "nullable": False, "index": True},
+    "family_id": {"type": String, "nullable": False, "index": True},
 }
 
 # HS256 signing keys, newest-first by ``created_at``. The newest signs; any verifies (the
