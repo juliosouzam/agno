@@ -398,8 +398,9 @@ async def test_pending_transactions_are_capped(tmp_path):
         for _ in range(6):
             await _start_authorization(client, client_id)
 
+    txns = db._get_table("mcp_oauth_transactions", create_table_if_not_found=True)
     with db.db_engine.connect() as conn:
-        count = conn.execute(select(func.count()).select_from(provider._transactions_table)).scalar()
+        count = conn.execute(select(func.count()).select_from(txns)).scalar()
     assert count <= 3
 
 
@@ -410,9 +411,9 @@ def test_transaction_eviction_is_mysql_safe(tmp_path):
     from sqlalchemy import delete, select
     from sqlalchemy.dialects import mysql
 
-    provider = _provider(_db(tmp_path))
-    provider._ensure_ready()
-    t = provider._transactions_table
+    db = _db(tmp_path)
+    _provider(db)
+    t = db._get_table("mcp_oauth_transactions", create_table_if_not_found=True)
     oldest = select(t.c.txn_id).order_by(t.c.expires_at.asc()).limit(2).subquery()
     stmt = delete(t).where(t.c.txn_id.in_(select(oldest.c.txn_id)))
     rendered = " ".join(str(stmt.compile(dialect=mysql.dialect())).split())
@@ -628,21 +629,16 @@ async def test_unconsummated_registration_is_pruned(tmp_path):
         from agno.os.mcp_auth_builtin import DEFAULT_UNCONSUMED_CLIENT_TTL
 
         old = int(time.time()) - DEFAULT_UNCONSUMED_CLIENT_TTL - 60
+        clients = db._get_table("mcp_oauth_clients", create_table_if_not_found=True)
         with db.db_engine.connect() as conn:
-            conn.execute(
-                update(provider._clients_table)
-                .where(provider._clients_table.c.client_id == stale_id)
-                .values(created_at=old)
-            )
+            conn.execute(update(clients).where(clients.c.client_id == stale_id).values(created_at=old))
             conn.commit()
         # A fresh registration triggers the prune.
         await _register(client)
 
     with db.db_engine.connect() as conn:
         remaining = conn.execute(
-            select(func.count())
-            .select_from(provider._clients_table)
-            .where(provider._clients_table.c.client_id == stale_id)
+            select(func.count()).select_from(clients).where(clients.c.client_id == stale_id)
         ).scalar()
     assert remaining == 0
 
@@ -650,10 +646,10 @@ async def test_unconsummated_registration_is_pruned(tmp_path):
 async def test_env_signing_key_is_primary(tmp_path, monkeypatch):
     """With AGENTOS_MCP_SIGNING_KEY set, two providers on different databases issue
     mutually verifiable tokens (same derived key + issuer) -- the env-primary path."""
-    provider_a = _provider(_db(tmp_path), signing_key_material="a-high-entropy-material")
+    provider_a = _provider(_db(tmp_path), signing_key_material="a-high-entropy-material-of-sufficient-length")
     db_b = _db(tmp_path / "b")
     (tmp_path / "b").mkdir(exist_ok=True)
-    provider_b = _provider(db_b, signing_key_material="a-high-entropy-material")
+    provider_b = _provider(db_b, signing_key_material="a-high-entropy-material-of-sufficient-length")
 
     db_a = _db(tmp_path)
     async with _http_client(_os(provider_a, db=db_a)) as client:
@@ -672,6 +668,20 @@ async def test_env_signing_key_is_primary(tmp_path, monkeypatch):
 def test_requires_secret(tmp_path):
     with pytest.raises(ValueError, match="requires a secret"):
         AgentOSBuiltinAuth(url="http://localhost", db=_db(tmp_path), secret="")
+
+
+def test_short_secret_rejected(tmp_path):
+    """The connect secret is the sole gate on the consent page, so a trivially short one
+    is refused at construction rather than deploying a guessable gate."""
+    with pytest.raises(ValueError, match="too short"):
+        AgentOSBuiltinAuth(url="http://localhost", db=_db(tmp_path), secret="short")
+
+
+def test_weak_signing_key_rejected(tmp_path):
+    """A low-entropy AGENTOS_MCP_SIGNING_KEY is offline-brute-forceable (derive_jwt_key
+    treats it as high-entropy material), so a sub-32-char value is refused at construction."""
+    with pytest.raises(ValueError, match="AGENTOS_MCP_SIGNING_KEY is too short"):
+        AgentOSBuiltinAuth(url="http://localhost", db=_db(tmp_path), secret=_SECRET, signing_key_material="connect-me")
 
 
 async def test_from_env_binds_agentos_db_and_runs(tmp_path, monkeypatch):
@@ -868,7 +878,7 @@ async def test_signing_key_rotation_overlap(tmp_path):
 
     # Rotation: a new env-primary key is added. The persisted key is still active, so the
     # old token keeps verifying (overlap); new tokens are signed by the env key.
-    rotated = _os(_provider(db, signing_key_material="freshly-rotated-in-key-material"), db=db)
+    rotated = _os(_provider(db, signing_key_material="freshly-rotated-in-key-material-32b+"), db=db)
     async with _http_client(rotated) as client:
         old_still_valid = await client.post(
             "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}"}

@@ -61,16 +61,30 @@ async def _ok_tool(message: str) -> str:
     return message
 
 
-def _tier2_provider() -> RemoteAuthProvider:
+def _tier2_provider(tokens=None, **provider_kwargs) -> RemoteAuthProvider:
     """An external-AS resource server: local verification, remote authorization."""
     verifier = StaticTokenVerifier(
-        tokens={_EXTERNAL_TOKEN: {"client_id": "external-user@example.com", "scopes": ["agents:run"]}}
+        tokens=tokens or {_EXTERNAL_TOKEN: {"client_id": "external-user@example.com", "scopes": ["agents:run"]}}
     )
     return RemoteAuthProvider(
         token_verifier=verifier,
         authorization_servers=[AnyHttpUrl(_EXTERNAL_AS)],
         base_url="http://localhost",
+        **provider_kwargs,
     )
+
+
+def _capture_state_middleware(captured: dict):
+    class _CaptureState(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            response = await call_next(request)
+            if request.url.path == "/mcp":
+                captured["user_id"] = getattr(request.state, "user_id", "MISSING")
+                captured["service_account_name"] = getattr(request.state, "service_account_name", None)
+                captured["authorization_enabled"] = getattr(request.state, "authorization_enabled", None)
+            return response
+
+    return _CaptureState
 
 
 def _os(provider, db=None, **config_kwargs) -> AgentOS:
@@ -135,6 +149,86 @@ async def test_tier2_external_token_bridges_identity():
     assert response.status_code == 200
     assert captured["user_id"] == "external-user@example.com"
     assert captured["scopes"] == ["agents:run"]
+
+
+async def test_tier2_token_cannot_forge_trust_markers():
+    """An external token that reflects agno's internal markers into its claims must not
+    have them honored: agno_service_account and agno_authorization_enabled are stripped, so
+    a Tier-2 caller cannot forge a service-account identity or disable scope enforcement."""
+    captured: dict = {}
+    tokens = {
+        "forged": {
+            "client_id": "external-user@example.com",
+            "scopes": ["agents:run"],
+            "agno_service_account": "admin",
+            "agno_authorization_enabled": False,
+        }
+    }
+    os = _os(_tier2_provider(tokens=tokens), middleware=[Middleware(_capture_state_middleware(captured))])
+    async with _http_client(os) as client:
+        response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": "Bearer forged"}
+        )
+
+    assert response.status_code == 200
+    assert captured["user_id"] == "external-user@example.com"
+    assert captured["service_account_name"] is None
+    # The RBAC-off flag was stripped; the bridge falls back to enforcing (True).
+    assert captured["authorization_enabled"] is True
+
+
+async def test_tier2_token_cannot_impersonate_reserved_principal():
+    """An external token claiming agno_mcp_internal_issuer + a reserved sub (oauth:/sa:)
+    must not bridge that identity: the marker is stripped, so the reserved-principal guard
+    fires and the caller's identity is left unset rather than impersonating the principal."""
+    captured: dict = {}
+    tokens = {
+        "impersonator": {
+            "client_id": "external-user@example.com",
+            "scopes": ["agents:run"],
+            "sub": "oauth:victim",
+            "agno_mcp_internal_issuer": True,
+        }
+    }
+    os = _os(_tier2_provider(tokens=tokens), middleware=[Middleware(_capture_state_middleware(captured))])
+    async with _http_client(os) as client:
+        response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": "Bearer impersonator"}
+        )
+
+    assert response.status_code == 200
+    # The reserved sub was not honored (identity left unset), so no impersonation.
+    assert captured["user_id"] != "oauth:victim"
+
+
+async def test_tier2_required_scopes_do_not_block_pat(tmp_path):
+    """A Tier-2 provider configured with required_scopes must not 403 coexisting PAT
+    bearers: PATs carry agno resource scopes, never the provider's OAuth scopes, so the
+    provider's required_scopes are enforced only against its own tokens (inside verify),
+    not applied route-wide to every verified bearer."""
+    from agno.db.sqlite import SqliteDb
+
+    db = SqliteDb(db_file=str(tmp_path / "tier2-scopes.db"))
+    plaintext, token_hash, token_prefix = generate_token()
+    db.create_service_account(
+        ServiceAccount(
+            id=str(uuid4()),
+            name="tier2-scoped-bot",
+            token_hash=token_hash,
+            token_prefix=token_prefix,
+            scopes=["agents:run"],
+            created_at=int(time.time()),
+        ).to_dict()
+    )
+    provider = _tier2_provider()
+    # The deployer's provider requires a scope PATs never carry; without the fix MultiAuth
+    # would inherit it route-wide and 403 the PAT.
+    provider.required_scopes = ["openid"]
+    async with _http_client(_os(provider, db=db)) as client:
+        response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {plaintext}"}
+        )
+    assert response.status_code == 200
 
 
 async def test_tier2_invalid_token_rejected():

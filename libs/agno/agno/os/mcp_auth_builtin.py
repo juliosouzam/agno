@@ -12,11 +12,14 @@ What the SDK/fastmcp provide vs what lives here:
   S256 enforcement, redirect-URI exact-match, and MCP-compliant error codes. Signed
   JWT access/refresh tokens come from fastmcp's ``JWTIssuer`` (HS256) -- verification
   is stateless, so any replica sharing the signing key can verify without a DB hit.
-- This module implements the nine token-store methods on the AgentOS database
-  (clients / authorization codes / refresh-token state in namespaced tables, created
-  on first use like every other agno table), the login+consent page (the single
-  deployer-secret gate -- fastmcp has no login building block), and the server-decided
-  scope grant.
+- This module implements the OAuthProvider callbacks against the AgentOS database
+  (clients / authorization codes / refresh-token / signing-key state), the login+consent
+  page (the single deployer-secret gate -- fastmcp has no login building block), and the
+  server-decided scope grant. The persistence itself lives on the db behind the
+  ``BaseDb.*_mcp_oauth_*`` contract (schemas in ``agno.db.schemas.mcp_oauth``, shared SQL
+  in ``agno.db.mcp_oauth_store``, implemented by the sync SQLAlchemy backends), so the
+  namespaced tables are created on first use by the same schema-aware path as every other
+  agno table -- this module holds only OAuth protocol logic, not DDL.
 
 Security properties, deliberate and load-bearing:
 
@@ -103,6 +106,12 @@ DEFAULT_MAX_PENDING_TRANSACTIONS = 2000  # cap on pending /authorize transaction
 # within minutes, so a short TTL shrinks the window an unauthenticated /register flood
 # could fill the pending cap and delay new-client onboarding.
 DEFAULT_UNCONSUMED_CLIENT_TTL = 60 * 60
+
+# Minimum lengths enforced at construction. The connect secret is the sole gate on the
+# consent page and the signing key is the HS256 root for every issued token, so both must
+# have real length -- a passphrase-strength value for either is a footgun.
+MIN_CONNECT_SECRET_LENGTH = 16
+MIN_SIGNING_KEY_LENGTH = 32
 
 # The login/consent surface, served by this provider inside the MCP sub-app (and so
 # automatically exempted from the parent AuthMiddleware with the other provider routes).
@@ -195,13 +204,33 @@ class AgentOSBuiltinAuth(OAuthProvider):
                 "It is the login credential on the consent page -- use a dedicated secret, not a "
                 "root credential."
             )
+        if len(secret) < MIN_CONNECT_SECRET_LENGTH:
+            raise ValueError(
+                f"AgentOSBuiltinAuth secret is too short ({len(secret)} chars): it is the only gate on "
+                f"the consent page, so it must be at least {MIN_CONNECT_SECRET_LENGTH} characters. "
+                "Generate a strong one, e.g. `openssl rand -base64 32`."
+            )
+        # AGENTOS_MCP_SIGNING_KEY is fed to fastmcp's derive_jwt_key as high-entropy
+        # material (a single HKDF pass, no stretching), so a low-entropy value is
+        # offline-brute-forceable from any token a client holds. Require real length --
+        # a passphrase like "connect-me" must be rejected, not silently accepted as an
+        # HS256 root. (When unset, a strong key is generated and persisted instead.)
+        if signing_key_material is not None and len(signing_key_material) < MIN_SIGNING_KEY_LENGTH:
+            raise ValueError(
+                f"AGENTOS_MCP_SIGNING_KEY is too short ({len(signing_key_material)} chars): it is the "
+                f"HS256 signing root for every issued token and must be at least {MIN_SIGNING_KEY_LENGTH} "
+                "high-entropy characters. Generate one with `openssl rand -base64 32`, or leave it unset "
+                "to have a strong key generated and persisted for you."
+            )
         # db may be bound now (explicit) or later by AgentOS (``bind_db``), so passing
-        # AgentOSBuiltinAuth.from_env() to AgentOS(db=...) just works -- the store binds
-        # to the AgentOS Postgres db without threading it through here. Typed Any (not
-        # Optional[Engine]): every store method calls _ensure_ready(), which raises when
-        # the engine is unbound, so the .connect() sites downstream never see None.
+        # AgentOSBuiltinAuth.from_env() to AgentOS(db=...) just works -- the store binds to
+        # the AgentOS Postgres db without threading it through here. The token store lives
+        # on the db (BaseDb.*_mcp_oauth_* methods, implemented by the sync SQLAlchemy
+        # backends); every store call goes through _ensure_ready(), which raises when the
+        # db is unbound, so the delegations downstream never see None.
+        if db is not None:
+            self._validate_db(db)
         self._db = db
-        self._engine: Any = self._resolve_engine(db) if db is not None else None
         self._secret = secret
         self._grant_scopes = list(scopes) if scopes is not None else list(DEFAULT_GRANT_SCOPES)
         self._access_token_ttl = access_token_ttl
@@ -215,8 +244,8 @@ class AgentOSBuiltinAuth(OAuthProvider):
         # keys can verify -- so rotation is add-new-key, let old tokens drain, then
         # remove the old key (a graceful dual-key overlap rather than a hard cut).
         self._issuers: List[Tuple[str, JWTIssuer]] = []
-        self._tables_ready = False
-        # Guards lazy table creation + key load against concurrent first requests.
+        self._issuers_ready = False
+        # Guards the one-time signing-key load against concurrent first requests.
         self._ready_lock = threading.Lock()
 
         from agno.os.service_accounts import _FailedLookupLimiter
@@ -267,9 +296,9 @@ class AgentOSBuiltinAuth(OAuthProvider):
         )
 
     def is_db_bound(self) -> bool:
-        """Whether a Postgres db is attached (either passed to the constructor or bound
+        """Whether a database is attached (either passed to the constructor or bound
         later by AgentOS)."""
-        return self._engine is not None
+        return self._db is not None
 
     def bind_db(self, db: Any) -> None:
         """Attach the AgentOS database if one was not passed to the constructor.
@@ -278,24 +307,29 @@ class AgentOSBuiltinAuth(OAuthProvider):
         ``AgentOSBuiltinAuth.from_env()`` handed to ``AgentOS(db=...)`` picks up the
         AgentOS db, while an explicit ``AgentOSBuiltinAuth(db=other)`` is left alone.
         """
-        if self._engine is not None:
+        if self._db is not None:
             return
+        self._validate_db(db)
         self._db = db
-        self._engine = self._resolve_engine(db)
 
     # ==================== Storage ====================
 
     @staticmethod
-    def _resolve_engine(db: Any) -> Any:
+    def _validate_db(db: Any) -> None:
+        """Fail fast (at construction/bind) unless the db can back the OAuth store.
+
+        The store is served through the ``BaseDb.*_mcp_oauth_*`` methods, which only the
+        sync SQLAlchemy backends implement. Gate on a synchronous ``db_engine`` so a
+        non-SQLAlchemy db (Mongo/Dynamo -> NotImplementedError) or an async adapter
+        (AsyncPostgresDb / AsyncSqliteDb, whose AsyncEngine the sync store cannot drive)
+        is rejected here rather than with an opaque error mid-OAuth-flow.
+        """
         engine = getattr(db, "db_engine", None)
         if engine is None:
             raise ValueError(
                 f"AgentOSBuiltinAuth requires a SQLAlchemy-backed database (PostgresDb in production); "
                 f"got {type(db).__name__}."
             )
-        # Async adapters (AsyncPostgresDb / AsyncSqliteDb) expose a db_engine too, but it
-        # is an AsyncEngine the synchronous store paths cannot drive. Fail clearly at
-        # construction rather than with an opaque 500 on the first request.
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         if isinstance(engine, AsyncEngine):
@@ -308,95 +342,33 @@ class AgentOSBuiltinAuth(OAuthProvider):
                 "AgentOSBuiltinAuth is running on SQLite -- fine for development, but production "
                 "deployments should use PostgresDb (restart-safe and shared across replicas)."
             )
-        return engine
 
-    def _define_tables(self) -> None:
-        from sqlalchemy import BigInteger, Column, MetaData, String, Table, Text
-
-        # Pin the OAuth tables to the same schema as the rest of the agno tables, so a
-        # deployment with a non-default/locked-down schema (e.g. a role without CREATE on
-        # public) creates them where it expects. db_schema is None for SQLite.
-        db_schema = getattr(self._db, "db_schema", None)
-        self._metadata = MetaData(schema=db_schema)
-        self._clients_table = Table(
-            "agno_mcp_oauth_clients",
-            self._metadata,
-            Column("client_id", String(255), primary_key=True),
-            Column("client_metadata", Text, nullable=False),
-            Column("created_at", BigInteger, nullable=False),
-            Column("consumed_at", BigInteger, nullable=True),
-        )
-        self._transactions_table = Table(
-            "agno_mcp_oauth_transactions",
-            self._metadata,
-            Column("txn_id", String(64), primary_key=True),
-            Column("client_id", String(255), nullable=False),
-            Column("params", Text, nullable=False),
-            Column("expires_at", BigInteger, nullable=False),
-        )
-        self._codes_table = Table(
-            "agno_mcp_oauth_codes",
-            self._metadata,
-            Column("code_hash", String(64), primary_key=True),
-            Column("payload", Text, nullable=False),
-            Column("expires_at", BigInteger, nullable=False),
-        )
-        self._refresh_table = Table(
-            "agno_mcp_oauth_refresh_tokens",
-            self._metadata,
-            Column("token_hash", String(64), primary_key=True),
-            Column("client_id", String(255), nullable=False),
-            Column("scopes", Text, nullable=False),
-            Column("expires_at", BigInteger, nullable=False),
-        )
-        self._keys_table = Table(
-            "agno_mcp_oauth_keys",
-            self._metadata,
-            Column("kid", String(64), primary_key=True),
-            Column("secret", Text, nullable=False),
-            Column("created_at", BigInteger, nullable=False),
-        )
-
-    def _ensure_ready(self) -> None:
-        """Create the namespaced tables on first use and load the signing key(s).
-
-        Locked so concurrent first requests do not both run create_all (a TOCTOU that
-        would 500 the loser) or double-load the keys. Idempotent after the first call.
-        """
-        if self._tables_ready:
-            return
-        if self._engine is None:
+    def _require_db(self) -> Any:
+        """The bound db, or a clear error. The store methods route through this."""
+        if self._db is None:
             raise ValueError(
                 "AgentOSBuiltinAuth has no database bound: pass db= when constructing it, or attach it "
                 "to an AgentOS with a Postgres db (AgentOS(db=PostgresDb(...), mcp_auth=...)). It stores "
                 "clients, authorization codes, and refresh-token state there."
             )
-        with self._ready_lock:
-            if self._tables_ready:
-                return
-            self._define_tables()
-            self._ensure_schema_exists()
-            self._metadata.create_all(self._engine, checkfirst=True)
-            self._issuers = self._load_issuers()
-            self._tables_ready = True
+        return self._db
 
-    def _ensure_schema_exists(self) -> None:
-        """Create the db's schema if it does not exist (Postgres non-default schema).
+    def _ensure_ready(self) -> None:
+        """Load the signing key(s) once. The token-store tables are created on first use
+        by the db layer's normal schema-aware path (BaseDb._get_table), so nothing here
+        touches DDL -- this only loads/generates the signing keys.
 
-        ``MetaData(schema=...).create_all`` emits ``CREATE TABLE <schema>.<name>`` but not
-        ``CREATE SCHEMA`` -- so an escape-hatch deployment that hands this provider a
-        Postgres db whose schema no other agno startup path has provisioned would 500 on
-        the first request. Mirrors ``PostgresDb._create_table``, which creates the schema
-        first. No-op for SQLite (no schemas) and when the schema already exists.
+        Locked so concurrent first requests do not double-load (or double-generate) keys.
+        Idempotent after the first call.
         """
-        db_schema = getattr(self._db, "db_schema", None)
-        if not db_schema or self._engine.dialect.name == "sqlite":
+        if self._issuers_ready:
             return
-        from sqlalchemy import text
-
-        with self._engine.connect() as conn:
-            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {db_schema}"))
-            conn.commit()
+        self._require_db()
+        with self._ready_lock:
+            if self._issuers_ready:
+                return
+            self._issuers = self._load_issuers()
+            self._issuers_ready = True
 
     def _build_issuer(self, material: str, kid: str) -> Tuple[str, "JWTIssuer"]:
         salt = str(self.base_url).rstrip("/")
@@ -419,38 +391,26 @@ class AgentOSBuiltinAuth(OAuthProvider):
         When neither env nor a persisted key exists, one is generated and persisted so
         tokens survive a redeploy and verify across replicas.
         """
-        from sqlalchemy import insert, select
-        from sqlalchemy.exc import IntegrityError
+        db = self._require_db()
 
         issuers: List[Tuple[str, JWTIssuer]] = []
         if self._signing_key_material:
             issuers.append(self._build_issuer(self._signing_key_material, "env"))
 
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(self._keys_table.c.kid, self._keys_table.c.secret).order_by(self._keys_table.c.created_at.desc())
-            ).all()
-            if not rows and not issuers:
-                material = secrets.token_urlsafe(48)
-                try:
-                    conn.execute(
-                        insert(self._keys_table).values(kid="default", secret=material, created_at=int(time.time()))
-                    )
-                    conn.commit()
-                    log_info(
-                        "Generated and persisted the built-in MCP OAuth signing key. For production, set "
-                        "AGENTOS_MCP_SIGNING_KEY so the token trust root is env-managed, not stored in the database."
-                    )
-                    rows = [("default", material)]
-                except IntegrityError:
-                    conn.rollback()
-                    rows = conn.execute(
-                        select(self._keys_table.c.kid, self._keys_table.c.secret).order_by(
-                            self._keys_table.c.created_at.desc()
-                        )
-                    ).all()
-            for kid, material in rows:
-                issuers.append(self._build_issuer(material, kid))
+        rows = db.get_mcp_oauth_keys()
+        if not rows and not issuers:
+            material = secrets.token_urlsafe(48)
+            if db.insert_mcp_oauth_key(kid="default", secret=material, created_at=int(time.time())):
+                log_info(
+                    "Generated and persisted the built-in MCP OAuth signing key. For production, set "
+                    "AGENTOS_MCP_SIGNING_KEY so the token trust root is env-managed, not stored in the database."
+                )
+                rows = [("default", material)]
+            else:
+                # Another replica won the cold-start race and inserted first; use its key.
+                rows = db.get_mcp_oauth_keys()
+        for kid, material in rows:
+            issuers.append(self._build_issuer(material, kid))
         return issuers
 
     @property
@@ -483,19 +443,13 @@ class AgentOSBuiltinAuth(OAuthProvider):
         return await self._run(self._get_client_sync, client_id)
 
     def _get_client_sync(self, client_id: str) -> Optional[OAuthClientInformationFull]:
-        from sqlalchemy import select
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(self._clients_table.c.client_metadata).where(self._clients_table.c.client_id == client_id)
-            ).first()
-        if row is None:
+        metadata = self._require_db().get_mcp_oauth_client(client_id)
+        if metadata is None:
             return None
         # Return a client whose redirect-URI validation allows a registered loopback
         # host to vary its port (RFC 8252) -- Claude Code / mcp-remote persist their
         # client_id and bind a fresh ephemeral callback port on a later auth run.
-        return _LoopbackTolerantClient.model_validate(json.loads(row[0]))
+        return _LoopbackTolerantClient.model_validate(json.loads(metadata))
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         # Public clients only: connector clients (claude.ai, ChatGPT, Claude Code,
@@ -514,49 +468,21 @@ class AgentOSBuiltinAuth(OAuthProvider):
         await self._run(self._register_client_sync, client_info)
 
     def _register_client_sync(self, client_info: OAuthClientInformationFull) -> None:
-        from sqlalchemy import delete, func, insert, select
-
-        self._ensure_ready()
-        now = int(time.time())
-        with self._engine.connect() as conn:
-            # /register is an unauthenticated write path: expire unconsummated
-            # registrations (the flood vector). Consumed rows are NOT pruned -- a consumed
-            # client keeps a live, rotating refresh token whose lifetime is unbounded, so
-            # deleting its row would 401 an actively-used connector at /token; and a
-            # consumed row required the deployer secret to create, so it is not a flood
-            # vector to bound.
-            conn.execute(
-                delete(self._clients_table).where(
-                    self._clients_table.c.consumed_at.is_(None),
-                    self._clients_table.c.created_at < now - DEFAULT_UNCONSUMED_CLIENT_TTL,
-                )
+        # The store expires unconsummated registrations (the /register flood vector) and
+        # caps only unconsumed rows, so a run of deployer-approved (consumed) connections
+        # can never wedge /register. A False return means that cap was reached.
+        inserted = self._require_db().create_mcp_oauth_client(
+            client_id=client_info.client_id,
+            client_metadata=client_info.model_dump_json(),
+            now=int(time.time()),
+            unconsumed_ttl=DEFAULT_UNCONSUMED_CLIENT_TTL,
+            max_clients=self._max_clients,
+        )
+        if not inserted:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="Too many pending client registrations on this server; try again later.",
             )
-            # The cap is anti-flood: it bounds UNCONSUMED registrations only, so a run of
-            # legitimate (deployer-approved, consumed) connections can never wedge
-            # /register for new clients.
-            count = (
-                conn.execute(
-                    select(func.count())
-                    .select_from(self._clients_table)
-                    .where(self._clients_table.c.consumed_at.is_(None))
-                ).scalar()
-                or 0
-            )
-            if count >= self._max_clients:
-                conn.commit()
-                raise RegistrationError(
-                    error="invalid_client_metadata",
-                    error_description="Too many pending client registrations on this server; try again later.",
-                )
-            conn.execute(
-                insert(self._clients_table).values(
-                    client_id=client_info.client_id,
-                    client_metadata=client_info.model_dump_json(),
-                    created_at=now,
-                    consumed_at=None,
-                )
-            )
-            conn.commit()
         log_debug(f"Registered MCP OAuth client {client_info.client_id}")
 
     # ==================== Authorization (the consent gate) ====================
@@ -581,89 +507,31 @@ class AgentOSBuiltinAuth(OAuthProvider):
         return f"{str(self.base_url).rstrip('/')}{CONSENT_PATH}?txn={txn_id}"
 
     def _store_transaction_sync(self, txn_id: str, client_id: str, payload: Dict[str, Any]) -> None:
-        from sqlalchemy import delete, func, insert, select
-
-        self._ensure_ready()
         now = int(time.time())
-        with self._engine.connect() as conn:
-            conn.execute(delete(self._transactions_table).where(self._transactions_table.c.expires_at < now))
-            # Bound the table: /authorize is reachable unauthenticated after one DCR
-            # registration, so cap pending transactions and evict the oldest to make room
-            # rather than let a flood grow the table by rate x TTL. Legit new authorizes
-            # always succeed; an evicted stale transaction just restarts from the client.
-            count = conn.execute(select(func.count()).select_from(self._transactions_table)).scalar() or 0
-            overflow = count - (self._max_pending_transactions - 1)
-            if overflow > 0:
-                # Wrap the oldest-N select in a derived table so the delete is not a bare
-                # self-referential subquery -- MySQL rejects "DELETE FROM t WHERE x IN
-                # (SELECT ... FROM t ...)" (error 1093), while the derived-table form is
-                # portable across sqlite / Postgres / MySQL.
-                oldest = (
-                    select(self._transactions_table.c.txn_id)
-                    .order_by(self._transactions_table.c.expires_at.asc())
-                    .limit(overflow)
-                    .subquery()
-                )
-                conn.execute(
-                    delete(self._transactions_table).where(
-                        self._transactions_table.c.txn_id.in_(select(oldest.c.txn_id))
-                    )
-                )
-            conn.execute(
-                insert(self._transactions_table).values(
-                    txn_id=txn_id,
-                    client_id=client_id,
-                    params=json.dumps(payload),
-                    expires_at=now + DEFAULT_TRANSACTION_TTL,
-                )
-            )
-            conn.commit()
+        self._require_db().store_mcp_oauth_transaction(
+            txn_id=txn_id,
+            client_id=client_id,
+            params=json.dumps(payload),
+            expires_at=now + DEFAULT_TRANSACTION_TTL,
+            now=now,
+            max_pending=self._max_pending_transactions,
+        )
 
     def _load_transaction_sync(self, txn_id: str) -> Optional[Dict[str, Any]]:
-        from sqlalchemy import select
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(self._transactions_table.c.params, self._transactions_table.c.expires_at).where(
-                    self._transactions_table.c.txn_id == txn_id
-                )
-            ).first()
+        row = self._require_db().get_mcp_oauth_transaction(txn_id)
         if row is None or row[1] < int(time.time()):
             return None
         return json.loads(row[0])
 
     def _consume_transaction_sync(self, txn_id: str) -> Optional[Dict[str, Any]]:
         """Atomically claim the transaction: the DELETE succeeds on exactly one replica."""
-        from sqlalchemy import delete, select
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(self._transactions_table.c.params, self._transactions_table.c.expires_at).where(
-                    self._transactions_table.c.txn_id == txn_id
-                )
-            ).first()
-            if row is None or row[1] < int(time.time()):
-                conn.commit()
-                return None
-            result = conn.execute(delete(self._transactions_table).where(self._transactions_table.c.txn_id == txn_id))
-            conn.commit()
-        if result.rowcount != 1:
+        row = self._require_db().consume_mcp_oauth_transaction(txn_id, int(time.time()))
+        if row is None:
             return None
         return json.loads(row[0])
 
     def _mark_client_consumed_sync(self, client_id: str) -> None:
-        from sqlalchemy import update
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            conn.execute(
-                update(self._clients_table)
-                .where(self._clients_table.c.client_id == client_id, self._clients_table.c.consumed_at.is_(None))
-                .values(consumed_at=int(time.time()))
-            )
-            conn.commit()
+        self._require_db().mark_mcp_oauth_client_consumed(client_id, int(time.time()))
 
     # ==================== The consent page ====================
 
@@ -936,9 +804,6 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
     # ==================== Authorization codes ====================
 
     def _store_code_sync(self, code: str, txn_payload: Dict[str, Any]) -> None:
-        from sqlalchemy import delete, insert
-
-        self._ensure_ready()
         now = int(time.time())
         payload = {
             "client_id": txn_payload["client_id"],
@@ -949,14 +814,9 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
             # The grant is server-decided: the requested scopes never reach the code.
             "scopes": self._grant_scopes,
         }
-        with self._engine.connect() as conn:
-            conn.execute(delete(self._codes_table).where(self._codes_table.c.expires_at < now))
-            conn.execute(
-                insert(self._codes_table).values(
-                    code_hash=_hash(code), payload=json.dumps(payload), expires_at=now + self._auth_code_ttl
-                )
-            )
-            conn.commit()
+        self._require_db().store_mcp_oauth_code(
+            code_hash=_hash(code), payload=json.dumps(payload), expires_at=now + self._auth_code_ttl, now=now
+        )
 
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
@@ -979,15 +839,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         )
 
     def _load_code_sync(self, code: str) -> Optional[Any]:
-        from sqlalchemy import select
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(self._codes_table.c.payload, self._codes_table.c.expires_at).where(
-                    self._codes_table.c.code_hash == _hash(code)
-                )
-            ).first()
+        row = self._require_db().get_mcp_oauth_code(_hash(code))
         if row is None or row[1] < time.time():
             return None
         return json.loads(row[0]), row[1]
@@ -1006,13 +858,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         return await self._issue_tokens(client.client_id, authorization_code.scopes)
 
     def _delete_code_sync(self, code: str) -> bool:
-        from sqlalchemy import delete
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            result = conn.execute(delete(self._codes_table).where(self._codes_table.c.code_hash == _hash(code)))
-            conn.commit()
-        return result.rowcount == 1
+        return self._require_db().delete_mcp_oauth_code(_hash(code))
 
     # ==================== Tokens ====================
 
@@ -1034,21 +880,14 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         )
 
     def _store_refresh_sync(self, refresh_token: str, client_id: str, scopes: List[str]) -> None:
-        from sqlalchemy import delete, insert
-
-        self._ensure_ready()
         now = int(time.time())
-        with self._engine.connect() as conn:
-            conn.execute(delete(self._refresh_table).where(self._refresh_table.c.expires_at < now))
-            conn.execute(
-                insert(self._refresh_table).values(
-                    token_hash=_hash(refresh_token),
-                    client_id=client_id,
-                    scopes=json.dumps(scopes),
-                    expires_at=now + self._refresh_token_ttl,
-                )
-            )
-            conn.commit()
+        self._require_db().store_mcp_oauth_refresh(
+            token_hash=_hash(refresh_token),
+            client_id=client_id,
+            scopes=json.dumps(scopes),
+            expires_at=now + self._refresh_token_ttl,
+            now=now,
+        )
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
@@ -1065,15 +904,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         return RefreshToken(token=refresh_token, client_id=client_id, scopes=scopes, expires_at=expires_at)
 
     def _load_refresh_sync(self, refresh_token: str) -> Optional[Any]:
-        from sqlalchemy import select
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            row = conn.execute(
-                select(
-                    self._refresh_table.c.client_id, self._refresh_table.c.scopes, self._refresh_table.c.expires_at
-                ).where(self._refresh_table.c.token_hash == _hash(refresh_token))
-            ).first()
+        row = self._require_db().get_mcp_oauth_refresh(_hash(refresh_token))
         if row is None or row[2] < time.time():
             return None
         return row[0], json.loads(row[1]), row[2]
@@ -1093,15 +924,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         return await self._issue_tokens(client.client_id, scopes or refresh_token.scopes)
 
     def _delete_refresh_sync(self, refresh_token: str) -> bool:
-        from sqlalchemy import delete
-
-        self._ensure_ready()
-        with self._engine.connect() as conn:
-            result = conn.execute(
-                delete(self._refresh_table).where(self._refresh_table.c.token_hash == _hash(refresh_token))
-            )
-            conn.commit()
-        return result.rowcount == 1
+        return self._require_db().delete_mcp_oauth_refresh(_hash(refresh_token))
 
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
         """Stateless verification: signature + expiry + issuer + audience, no DB hit.
