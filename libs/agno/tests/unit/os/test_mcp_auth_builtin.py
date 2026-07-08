@@ -675,15 +675,53 @@ def test_requires_connect_secret(tmp_path):
         AgentOSBuiltinAuth(base_url="http://localhost", db=_db(tmp_path), connect_secret="")
 
 
+async def test_from_env_binds_agentos_db_and_runs(tmp_path, monkeypatch):
+    """The object form: AgentOSBuiltinAuth.from_env() constructs without a db, AgentOS
+    binds its Postgres/SQLite db, and the full connector flow works. This is the
+    documented, string-free way to enable the built-in server."""
+    monkeypatch.setenv("AGENTOS_URL", "http://localhost")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", _SECRET)
+    provider = AgentOSBuiltinAuth.from_env()
+    assert provider.is_db_bound() is False
+
+    db = _db(tmp_path)
+    os = _os(provider, db=db)
+    async with _http_client(os) as client:
+        # Resolution bound the AgentOS db.
+        assert os._get_mcp_auth_provider() is not None
+        assert provider.is_db_bound() is True
+        tokens, _ = await _full_flow(client)
+        response = await client.post(
+            "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}"}
+        )
+    assert response.status_code == 200
+
+
+def test_explicit_db_is_not_overridden(tmp_path):
+    """A db passed to the constructor wins; bind_db is a no-op once bound."""
+    db_a = _db(tmp_path)
+    provider = _provider(db_a)
+    assert provider.is_db_bound() is True
+    provider.bind_db(_db(tmp_path / "other"))  # ignored
+    assert provider._db is db_a
+
+
+def test_from_env_can_take_db_directly(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTOS_URL", "http://localhost")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", _SECRET)
+    provider = AgentOSBuiltinAuth.from_env(db=_db(tmp_path))
+    assert provider.is_db_bound() is True
+
+
 def test_from_env_requires_public_url(tmp_path, monkeypatch):
-    monkeypatch.delenv("AGENTOS_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("AGENTOS_URL", raising=False)
     monkeypatch.delenv("MCP_CONNECT_SECRET", raising=False)
-    with pytest.raises(ValueError, match="AGENTOS_PUBLIC_URL"):
+    with pytest.raises(ValueError, match="AGENTOS_URL"):
         AgentOSBuiltinAuth.from_env(db=_db(tmp_path))
 
 
 def test_from_env_requires_connect_secret(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTOS_PUBLIC_URL", "https://my-os.example.com")
+    monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
     monkeypatch.delenv("MCP_CONNECT_SECRET", raising=False)
     with pytest.raises(ValueError, match="MCP_CONNECT_SECRET"):
         AgentOSBuiltinAuth.from_env(db=_db(tmp_path))

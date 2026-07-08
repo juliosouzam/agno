@@ -282,14 +282,17 @@ class AgentOS:
                 ``tools=[...]`` and/or scope the built-in tools via ``enable_builtin_tools`` /
                 ``include_tags`` / ``exclude_tags``. Ignored when ``enable_mcp_server`` is False.
                 When omitted, the MCP server exposes all built-in tools (unchanged behavior).
-            mcp_auth: Optional fastmcp ``AuthProvider`` that owns authentication for the MCP
-                endpoint (OAuth for connector clients like claude.ai and ChatGPT). When set,
-                fastmcp serves the provider's discovery/OAuth routes and the 401 challenge on
-                the MCP surface, agno bridges the verified identity into the tool layer, and
-                the provider is composed with the service-account verifier and the existing
-                JWT config so ``agno_pat_`` and agno-JWT bearers keep working. Requires
-                ``enable_mcp_server=True``. When unset, the existing PAT/JWT path is
-                unchanged.
+            mcp_auth: An ``AuthProvider`` object that owns authentication for the MCP
+                endpoint (OAuth for connector clients like claude.ai and ChatGPT). Use
+                ``AgentOSBuiltinAuth.from_env()`` (from ``agno.os``) for the built-in
+                authorization server — it binds to this AgentOS's Postgres db — or an
+                external provider such as WorkOS ``AuthKitProvider`` for bring-your-own.
+                When set, fastmcp serves the provider's discovery/OAuth routes and the 401
+                challenge on the MCP surface, agno bridges the verified identity into the
+                tool layer, and the provider is composed with the service-account verifier
+                and the existing JWT config so ``agno_pat_`` and agno-JWT bearers keep
+                working. Requires ``enable_mcp_server=True``. When unset, the existing
+                PAT/JWT path is unchanged.
             base_app: Optional base FastAPI app to use for the AgentOS. All routes and middleware will be added to this app.
             on_route_conflict: What to do when a route conflict is detected in case a custom base_app is provided.
             auto_provision_dbs: Whether to automatically provision databases

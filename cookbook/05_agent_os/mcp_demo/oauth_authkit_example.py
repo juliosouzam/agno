@@ -18,7 +18,7 @@ One-time WorkOS setup (free):
      per-user RBAC story.
 
     export AUTHKIT_DOMAIN=your-tenant.authkit.app
-    export AGENTOS_PUBLIC_URL=https://your-deployment.example.com
+    export AGENTOS_URL=https://your-deployment.example.com
 
 Then paste the /mcp URL into claude.ai or ChatGPT: they discover AuthKit as the
 authorization server and run the OAuth flow against it — agno never sees a client secret.
@@ -49,7 +49,7 @@ web_research_agent = Agent(
 # verifies the tokens it issues.
 mcp_auth = AuthKitProvider(
     authkit_domain=os.environ["AUTHKIT_DOMAIN"],
-    base_url=os.environ["AGENTOS_PUBLIC_URL"],
+    base_url=os.environ["AGENTOS_URL"],
 )
 
 agent_os = AgentOS(

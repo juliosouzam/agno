@@ -4,8 +4,8 @@
 
 **Status:** PASS (2026-07-07, construction + full flow via unit harness)
 
-**Description:** `AgentOS(mcp_auth="builtin")` — the built-in OAuth authorization server.
-Requires Postgres + `AGENTOS_PUBLIC_URL`/`MCP_CONNECT_SECRET` to run as a server.
+**Description:** `AgentOS(mcp_auth=AgentOSBuiltinAuth.from_env())` — the built-in OAuth
+authorization server. Requires Postgres + `AGENTOS_URL`/`MCP_CONNECT_SECRET` to run as a server.
 
 **Result:** The end-to-end connector flow it demonstrates (DCR → consent → PKCE token →
 `/mcp`, refresh rotation, redeploy/second-replica verification, hash-at-rest) is proven

@@ -179,15 +179,22 @@ def test_mcp_auth_requires_enable_mcp_server():
         AgentOS(agents=[_agent()], mcp_auth=_oauth_provider())
 
 
-def test_mcp_auth_builtin_requires_postgres():
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="builtin")
+def test_mcp_auth_builtin_requires_postgres(monkeypatch):
+    """AgentOSBuiltinAuth.from_env() (unbound) on an AgentOS with no Postgres db errors
+    clearly when resolved, rather than 500ing later."""
+    from agno.os import AgentOSBuiltinAuth
+
+    monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
     with pytest.raises(ValueError, match="Postgres"):
         os.get_app()
 
 
-def test_mcp_auth_unknown_string_rejected():
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="authkit")
-    with pytest.raises(ValueError, match="Unknown mcp_auth"):
+def test_mcp_auth_string_rejected_with_hint():
+    """The string form is gone: mcp_auth takes an object, and the error points at it."""
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="builtin")
+    with pytest.raises(TypeError, match="AgentOSBuiltinAuth"):
         os.get_app()
 
 

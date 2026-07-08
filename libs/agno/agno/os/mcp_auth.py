@@ -218,35 +218,15 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     )
 
 
-def _resolve_builtin(os: "AgentOS") -> AuthProvider:
-    """Resolve ``mcp_auth="builtin"``: the built-in AS on the deployment's Postgres db.
+def _first_sql_db(os: "AgentOS") -> Optional[Any]:
+    """The AgentOS's SQLAlchemy-backed db to bind the built-in AS to.
 
-    Configuration comes from the environment (``AGENTOS_PUBLIC_URL``,
-    ``MCP_CONNECT_SECRET``, optional ``AGENTOS_MCP_SIGNING_KEY``) so a template deploy
-    enables it with env vars alone.
+    Prefers the AgentOS-level ``db`` (set at construction, before database
+    auto-discovery populates ``os.dbs``); falls back to any agent-attached db. Returns
+    the first one exposing a ``db_engine`` (PostgresDb, SqliteDb, ...) -- the provider's
+    own ``_resolve_engine`` then validates it (rejecting async, warning on SQLite).
     """
-    from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
-
-    db = _first_postgres_db(os)
-    if db is None:
-        raise ValueError(
-            'mcp_auth="builtin" requires a Postgres database on the AgentOS (the built-in authorization '
-            "server stores clients, codes, and refresh-token state there). Pass db=PostgresDb(...), or "
-            "construct AgentOSBuiltinAuth(db=...) explicitly -- it accepts SqliteDb for development."
-        )
-    return AgentOSBuiltinAuth.from_env(db=db, server_name=getattr(os, "name", None))
-
-
-def _first_postgres_db(os: "AgentOS") -> Optional[Any]:
-    try:
-        from agno.db.postgres import PostgresDb
-    except ImportError:
-        return None
     candidates: List[Any] = []
-    # os.db (the AgentOS-level db) is set at construction, before database
-    # auto-discovery populates os.dbs -- so it is the reliable source at
-    # mcp_auth resolution time. os.dbs is a fallback for agent-attached dbs and
-    # maps id -> list[db], so its values are flattened.
     if getattr(os, "db", None) is not None:
         candidates.append(os.db)
     for value in (getattr(os, "dbs", None) or {}).values():
@@ -255,7 +235,7 @@ def _first_postgres_db(os: "AgentOS") -> Optional[Any]:
         else:
             candidates.append(value)
     for db in candidates:
-        if isinstance(db, PostgresDb):
+        if getattr(db, "db_engine", None) is not None:
             return db
     return None
 
@@ -272,17 +252,29 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     if raw is None:
         return None
     if isinstance(raw, str):
-        if raw != "builtin":
-            raise ValueError(
-                f'Unknown mcp_auth value {raw!r}: use "builtin" for the built-in authorization server, '
-                "or pass a fastmcp AuthProvider instance (e.g. AuthKitProvider)."
-            )
-        raw = _resolve_builtin(os)
+        raise TypeError(
+            "mcp_auth takes an AuthProvider object, not a string. For the built-in authorization server "
+            "use mcp_auth=AgentOSBuiltinAuth.from_env() (from agno.os), or pass an external provider "
+            "(e.g. AuthKitProvider)."
+        )
     if not isinstance(raw, AuthProvider):
         raise TypeError(
             f"mcp_auth must be a fastmcp AuthProvider, got {type(raw).__name__!r}. "
-            "See fastmcp.server.auth for the available providers."
+            "See fastmcp.server.auth for the available providers, or AgentOSBuiltinAuth for the built-in one."
         )
+    # The built-in AS may be constructed without a db (AgentOSBuiltinAuth.from_env());
+    # bind the AgentOS db so a template can hand it straight to AgentOS.
+    from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
+
+    if isinstance(raw, AgentOSBuiltinAuth) and not raw.is_db_bound():
+        db = _first_sql_db(os)
+        if db is None:
+            raise ValueError(
+                "AgentOSBuiltinAuth needs a database: give AgentOS a Postgres db "
+                "(AgentOS(db=PostgresDb(...), mcp_auth=AgentOSBuiltinAuth.from_env())), or pass db= to "
+                "AgentOSBuiltinAuth directly. It stores clients, codes, and refresh-token state there."
+            )
+        raw.bind_db(db)
     verifiers: List[TokenVerifier] = []
     service_account_verifier = os._get_service_account_verifier()
     if service_account_verifier is not None:

@@ -169,8 +169,8 @@ class AgentOSBuiltinAuth(OAuthProvider):
         self,
         *,
         base_url: str,
-        db: Any,
         connect_secret: str,
+        db: Any = None,
         scopes: Optional[List[str]] = None,
         access_token_ttl: int = DEFAULT_ACCESS_TOKEN_TTL,
         refresh_token_ttl: int = DEFAULT_REFRESH_TOKEN_TTL,
@@ -193,8 +193,13 @@ class AgentOSBuiltinAuth(OAuthProvider):
                 "connect_secret=). It is the login credential on the consent page -- use a "
                 "dedicated secret, not a root credential."
             )
+        # db may be bound now (explicit) or later by AgentOS (``bind_db``), so passing
+        # AgentOSBuiltinAuth.from_env() to AgentOS(db=...) just works -- the store binds
+        # to the AgentOS Postgres db without threading it through here. Typed Any (not
+        # Optional[Engine]): every store method calls _ensure_ready(), which raises when
+        # the engine is unbound, so the .connect() sites downstream never see None.
         self._db = db
-        self._engine = self._resolve_engine(db)
+        self._engine: Any = self._resolve_engine(db) if db is not None else None
         self._connect_secret = connect_secret
         self._grant_scopes = list(scopes) if scopes is not None else list(DEFAULT_GRANT_SCOPES)
         self._access_token_ttl = access_token_ttl
@@ -228,23 +233,28 @@ class AgentOSBuiltinAuth(OAuthProvider):
             self._cimd_manager = CIMDClientManager(enable_cimd=True, default_scope=" ".join(self._grant_scopes))
 
     @classmethod
-    def from_env(cls, db: Any, server_name: Optional[str] = None) -> "AgentOSBuiltinAuth":
-        """Build from the deployment environment: ``AGENTOS_PUBLIC_URL`` (the public
+    def from_env(cls, db: Any = None, server_name: Optional[str] = None) -> "AgentOSBuiltinAuth":
+        """Build from the deployment environment: ``AGENTOS_URL`` (the public
         origin), ``MCP_CONNECT_SECRET`` (the login secret), and optionally
-        ``AGENTOS_MCP_SIGNING_KEY`` (env-primary signing key material)."""
+        ``AGENTOS_MCP_SIGNING_KEY`` (env-primary signing key material).
+
+        The Postgres db is optional here: pass ``AgentOSBuiltinAuth.from_env()`` straight
+        to ``AgentOS(db=..., mcp_auth=...)`` and it binds to the AgentOS db.
+        """
         from os import getenv
 
-        base_url = getenv("AGENTOS_PUBLIC_URL")
+        base_url = getenv("AGENTOS_URL")
         if not base_url:
             raise ValueError(
-                'mcp_auth="builtin" requires AGENTOS_PUBLIC_URL: the deployment\'s public origin '
-                "(e.g. https://my-os.up.railway.app). Every advertised OAuth metadata URL derives from it."
+                "AgentOSBuiltinAuth.from_env() requires AGENTOS_URL: the deployment's public "
+                "origin (e.g. https://my-os.up.railway.app). Every advertised OAuth metadata URL derives "
+                "from it. (Pass base_url=... to construct it directly instead.)"
             )
         connect_secret = getenv("MCP_CONNECT_SECRET")
         if not connect_secret:
             raise ValueError(
-                'mcp_auth="builtin" requires MCP_CONNECT_SECRET: the deployer secret typed on the '
-                "consent page when a client connects. Generate a strong one, e.g. `openssl rand -base64 32`."
+                "AgentOSBuiltinAuth.from_env() requires MCP_CONNECT_SECRET: the deployer secret typed on "
+                "the consent page when a client connects. Generate a strong one, e.g. `openssl rand -base64 32`."
             )
         return cls(
             base_url=base_url,
@@ -253,6 +263,23 @@ class AgentOSBuiltinAuth(OAuthProvider):
             signing_key_material=getenv("AGENTOS_MCP_SIGNING_KEY"),
             server_name=server_name,
         )
+
+    def is_db_bound(self) -> bool:
+        """Whether a Postgres db is attached (either passed to the constructor or bound
+        later by AgentOS)."""
+        return self._engine is not None
+
+    def bind_db(self, db: Any) -> None:
+        """Attach the AgentOS database if one was not passed to the constructor.
+
+        A db passed explicitly wins -- this only binds when unbound, so
+        ``AgentOSBuiltinAuth.from_env()`` handed to ``AgentOS(db=...)`` picks up the
+        AgentOS db, while an explicit ``AgentOSBuiltinAuth(db=other)`` is left alone.
+        """
+        if self._engine is not None:
+            return
+        self._db = db
+        self._engine = self._resolve_engine(db)
 
     # ==================== Storage ====================
 
@@ -336,6 +363,12 @@ class AgentOSBuiltinAuth(OAuthProvider):
         """
         if self._tables_ready:
             return
+        if self._engine is None:
+            raise ValueError(
+                "AgentOSBuiltinAuth has no database bound: pass db= when constructing it, or attach it "
+                "to an AgentOS with a Postgres db (AgentOS(db=PostgresDb(...), mcp_auth=...)). It stores "
+                "clients, authorization codes, and refresh-token state there."
+            )
         with self._ready_lock:
             if self._tables_ready:
                 return

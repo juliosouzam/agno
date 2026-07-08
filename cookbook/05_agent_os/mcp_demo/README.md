@@ -5,7 +5,7 @@ Examples for `mcp_demo` in AgentOS.
 ## Files
 - `enable_mcp_example.py` — Example AgentOS app with MCP enabled.
 - `custom_mcp_tool_example.py` — Expose ONE custom MCP tool routed through an agent, with the built-in tools disabled (uses `MCPServerConfig`).
-- `oauth_builtin_example.py` — Add OAuth so claude.ai / ChatGPT can connect by pasting the `/mcp` URL, using the built-in authorization server (`mcp_auth="builtin"`).
+- `oauth_builtin_example.py` — Add OAuth so claude.ai / ChatGPT can connect by pasting the `/mcp` URL, using the built-in authorization server (`AgentOSBuiltinAuth.from_env()`).
 - `oauth_authkit_example.py` — Same, but with an external authorization server (WorkOS AuthKit) for production / multi-user.
 - `mcp_tools_advanced_example.py` — Example AgentOS app where the agent has MCPTools.
 - `mcp_tools_example.py` — Example AgentOS app where the agent has MCPTools.
@@ -87,11 +87,16 @@ own OAuth authorization server, backed by its Postgres db. No external accounts.
 connecting requires the deployer secret on a consent page.
 
 ```python
-agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth="builtin")
+from agno.os import AgentOS, AgentOSBuiltinAuth
+
+# reads AGENTOS_URL + MCP_CONNECT_SECRET from the env; binds to the AgentOS db below
+agent_os = AgentOS(
+    agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env()
+)
 ```
 
 ```bash
-export AGENTOS_PUBLIC_URL=https://your-deployment.example.com   # the public origin
+export AGENTOS_URL=https://your-deployment.example.com   # the public origin
 export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the connect-page login secret
 ```
 
