@@ -20,7 +20,7 @@ from agno.os.auth import (
     verify_websocket_service_account,
 )
 from agno.os.managers import websocket_manager
-from agno.os.middleware.jwt import JWTValidator, is_reserved_principal
+from agno.os.middleware.jwt import JWTValidator, is_reserved_principal, resolve_expected_audience
 from agno.os.middleware.user_scope import (
     INSUFFICIENT_PERMISSIONS_WS_RECONNECT,
     WORKFLOW_ID_REQUIRED_RECONNECT,
@@ -431,9 +431,11 @@ def get_websocket_router(
                         # configured audience so verify_audience=True applies to
                         # WebSocket tokens, not just HTTP requests.
                         try:
-                            expected_audience = None
-                            if ws_verify_audience:
-                                expected_audience = ws_audience or getattr(websocket.app.state, "agent_os_id", None)
+                            expected_audience = resolve_expected_audience(
+                                verify_audience=ws_verify_audience,
+                                audience=ws_audience,
+                                os_id=getattr(websocket.app.state, "agent_os_id", None),
+                            )
                             payload = jwt_validator.validate_token(token, expected_audience)
                             claims = jwt_validator.extract_claims(payload)
 
