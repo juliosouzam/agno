@@ -443,21 +443,30 @@ def _connect(
         else []
     )
 
+    # Minting needs a REST plane that can authenticate the caller: auth_mode is that
+    # plane (the MCP OAuth posture lives in os_info.oauth and never enables minting).
     minting = os_info.auth_mode not in ("none",) and bool(selected) and not oauth_mode
+    # --pat explicitly asks for minted bearers; against an open REST plane ("none") the
+    # server refuses every mint, so silently writing the tokenless entries the operator
+    # opted out of would be a lie. Fail up front naming the server-side gap.
+    if pat and os_info.oauth_enabled and not minting and selected:
+        require_mint_capable(
+            os_info.base_url, os_info.auth_mode, or_else="Or drop --pat to use the OAuth sign-in flow."
+        )
+        raise CLIError(
+            "--pat needs an admin credential to mint tokens, but this AgentOS reports no REST "
+            "authentication (auth mode: " + os_info.auth_mode + ").",
+            hint="Set OS_SECURITY_KEY (or configure JWT auth) on the server, or drop --pat.",
+        )
     # When we mint, the admin token is attached to base_url and the minted PATs are written
     # into client configs and sent to the (same-origin) MCP URL. Refuse to do any of that
     # over plaintext HTTP to a non-loopback host unless the operator opted in.
     if minting:
         require_secure_url(os_info.base_url, allow_http=allow_http, what="the admin credential and minted tokens")
-        # Before any credential is resolved (or prompted for): an OS whose only auth is
-        # the OAuth provider on /mcp refuses every mint, so no credential can help.
-        require_mint_capable(
-            os_info.base_url,
-            os_info.auth_mode,
-            or_else="Or drop --pat to use the OAuth sign-in flow." if pat else None,
-        )
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
-    if not minting and selected and not json_mode and os_info.auth_mode == "none":
+    # "Authorization is disabled" is a statement about the whole server; stay quiet when
+    # an mcp.oauth block says /mcp has its own auth the REST plane knows nothing about.
+    if not minting and selected and not json_mode and os_info.auth_mode == "none" and os_info.oauth is None:
         print_info("Authorization is disabled on this AgentOS; connecting without credentials.")
 
     # Truthful-outcome check: if the OS enforces auth but /mcp answers without a token,
