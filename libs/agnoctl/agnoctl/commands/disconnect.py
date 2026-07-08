@@ -282,8 +282,9 @@ def _report(
     if cleared:
         print_info("")
         print_warning("Restart " + ", ".join(cleared) + " to drop the connection.")
-        # On an auth-less OS connect minted nothing, so there is nothing to revoke.
-        if not revoke and (os_info is None or os_info.auth_mode != "none"):
+        # On an auth-less or OAuth-protected OS connect minted nothing (OAuth sign-in
+        # state lives inside the clients), so there is nothing to revoke.
+        if not revoke and (os_info is None or os_info.auth_mode not in ("none", "oauth")):
             url_hint = (" --url " + os_info.base_url) if os_info is not None else ""
             print_info(
                 "Tokens minted for these apps stay valid. Revoke them with: agno tokens revoke <name>" + url_hint

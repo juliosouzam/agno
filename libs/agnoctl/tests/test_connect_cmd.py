@@ -728,3 +728,99 @@ def test_connect_leaves_foreign_agno_entry_alone(monkeypatch, fake_os, fake_clie
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
     assert cursor_config["mcpServers"]["agno"]["url"] == "http://other-os:9999/mcp"
     assert cursor_config["mcpServers"]["agentos"]["url"] == MCP_URL
+
+
+# -- OAuth-protected MCP endpoints -------------------------------------------------------
+
+
+def test_connect_oauth_writes_tokenless_entries_and_mints_nothing(monkeypatch, fake_clients):
+    """On an OAuth-protected /mcp, apps sign in themselves: entries carry no token, no
+    service accounts are minted, and each result says how to complete the sign-in."""
+    fake = FakeAgentOS(auth_mode="oauth", name="OAuth OS")
+    install_fake(monkeypatch, fake)
+
+    result = _connect()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert all(r["status"] == "needs-login" for r in payload["results"])
+    assert all(r["verify"]["oauth_challenge"] for r in payload["results"])
+    assert fake.create_calls == 0
+    by_client = {r["client"]: r for r in payload["results"]}
+    assert "codex mcp login oauth-os" in by_client["codex"]["instructions"][0]
+    assert "claude mcp login oauth-os" in by_client["claude-code"]["instructions"][0]
+
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert "headers" not in cursor_config["mcpServers"]["oauth-os"]
+    assert payload["os"]["mcp"]["oauth"]["authorization_servers"] == ["http://localhost:7777/mcp/auth"]
+
+
+def test_connect_oauth_rerun_is_already_connected(monkeypatch, fake_clients):
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    assert _connect(["--clients", "cursor"]).exit_code == 0
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "already-connected"
+
+
+def test_connect_oauth_pat_flag_mints_bearers(monkeypatch, fake_os, fake_clients):
+    """--pat opts back into minted tokens on an OAuth OS (headless clients cannot run
+    a browser flow); the server accepts both kinds of credential."""
+    fake = FakeAgentOS(auth_mode="oauth")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+
+    result = _connect(["--clients", "cursor", "--pat"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "connected"
+    assert list(fake.accounts.keys()) == ["cursor"]
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["agentos"]["headers"]["Authorization"].startswith("Bearer agno_pat_")
+
+
+def test_connect_oauth_existing_pat_entry_stays_connected(monkeypatch, fake_clients):
+    """A round-1 PAT entry keeps verifying on an OAuth OS (the server accepts both), so
+    a re-run without --pat reports already-connected instead of tearing it down."""
+    fake = FakeAgentOS(auth_mode="oauth")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+    assert _connect(["--clients", "cursor", "--pat"]).exit_code == 0
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "already-connected"
+
+
+def test_connect_oauth_rotate_converts_pat_entry_to_oauth(monkeypatch, fake_clients):
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    fake_token_entry = {"mcpServers": {"agentos": {"url": MCP_URL, "headers": {"Authorization": "Bearer stale"}}}}
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(fake_token_entry))
+
+    result = _connect(["--clients", "cursor", "--rotate"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "needs-login"
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert "headers" not in cursor_config["mcpServers"]["agentos"]
+
+
+def test_connect_oauth_auto_surfaces_chat_apps(monkeypatch, fake_clients):
+    """OAuth is exactly what the hosted Connectors UIs speak: a public HTTPS OAuth OS
+    auto-surfaces claude.ai and ChatGPT setup steps (previously auth_mode none only)."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    result = runner.invoke(app, ["connect", "--json", "--url", "https://os.example.com"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    by_client = {r["client"]: r for r in payload["results"]}
+    assert by_client["claude-ai"]["status"] == "manual"
+    assert by_client["chatgpt"]["status"] == "manual"
+    assert any("asked to authorize" in step for step in by_client["chatgpt"]["instructions"])
+
+
+def test_connect_oauth_prints_signin_summary(monkeypatch, fake_clients):
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth", name="OAuth OS"))
+    result = runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "OAuth-protected" in out
+    assert "sign in" in out
+    assert "Restart" in out

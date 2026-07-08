@@ -318,3 +318,23 @@ def test_discover_all_dedupes_loopback_aliases(monkeypatch, tmp_path):
     found = discover_all(None)
     assert [i.base_url for i in found] == ["http://127.0.0.1:7777"]
     assert found[0].url_source == "env-file"
+
+
+def test_discover_parses_mcp_oauth(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeAgentOS(auth_mode="oauth")
+    install_fake(monkeypatch, fake)
+    info = discover("http://localhost:7777")
+    assert info.auth_mode == "oauth"
+    assert info.oauth_enabled is True
+    assert info.oauth is not None
+    assert info.oauth.authorization_servers == ["http://localhost:7777/mcp/auth"]
+    assert info.oauth.resource == "http://localhost:7777/mcp"
+    assert info.public_dict()["mcp"]["oauth"]["resource"] == "http://localhost:7777/mcp"
+
+
+def test_discover_oauth_absent_on_older_servers(monkeypatch, tmp_path, fake_os):
+    """agno <= 2.7 serves no mcp.oauth object: the field stays None and nothing lights up."""
+    info = discover("http://localhost:7777")
+    assert info.oauth is None
+    assert info.oauth_enabled is False

@@ -276,3 +276,18 @@ def test_disconnect_partial_failure_exit_code(monkeypatch, fake_os, fake_clients
     assert by_client["cursor"]["status"] == "failed"
     assert "Refusing to modify" in by_client["cursor"]["error"]
     assert by_client["claude-code"]["status"] == "removed"
+
+
+def test_disconnect_oauth_os_removes_entry_without_token_note(monkeypatch, fake_clients):
+    """Disconnecting from an OAuth OS: URL-matched removal works on tokenless entries,
+    and no revoke reminder prints (nothing was minted; sign-in state lives in the app)."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    assert _connect(["--clients", "cursor"]).exit_code == 0
+
+    result = runner.invoke(app, ["disconnect"] + URL_ARGS + ["--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "Restart" in out
+    assert "stay valid" not in out
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"] == {}

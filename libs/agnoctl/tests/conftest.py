@@ -11,7 +11,7 @@ import pytest
 class FakeAgentOS:
     """Simulates the AgentOS endpoints the CLI touches.
 
-    auth_mode: "none" | "security_key" | "jwt"
+    auth_mode: "none" | "security_key" | "jwt" | "oauth"
     info_discovery: serve the mcp/auth_mode fields on /info (newer servers)
     mcp_requires_token: enforce tokens on /mcp (False models servers predating enforcement)
     """
@@ -27,6 +27,7 @@ class FakeAgentOS:
         agno_version: str = "2.7.0",
         name: Optional[str] = None,
         os_id: Optional[str] = None,
+        oauth: Optional[Dict[str, Any]] = None,
     ):
         self.auth_mode = auth_mode
         self.security_key = security_key
@@ -37,6 +38,14 @@ class FakeAgentOS:
         self.agno_version = agno_version
         self.name = name
         self.os_id = os_id
+        # OAuth-protected /mcp (auth_mode "oauth"): served on /info, and unauthenticated
+        # MCP requests get 401 + a WWW-Authenticate challenge like fastmcp's middleware.
+        self.oauth = oauth
+        if auth_mode == "oauth" and oauth is None:
+            self.oauth = {
+                "authorization_servers": ["http://localhost:7777/mcp/auth"],
+                "resource": "http://localhost:7777/mcp",
+            }
 
         self.accounts: Dict[str, Dict[str, Any]] = {}  # name -> account dict (with plaintext token)
         self.create_calls = 0
@@ -101,7 +110,11 @@ class FakeAgentOS:
         if path == "/info":
             payload: Dict[str, Any] = {"agno_version": self.agno_version, "agents": 1, "teams": 0, "workflows": 0}
             if self.info_discovery:
-                payload["mcp"] = {"enabled": self.mcp_enabled, "path": "/mcp" if self.mcp_enabled else None}
+                payload["mcp"] = {
+                    "enabled": self.mcp_enabled,
+                    "path": "/mcp" if self.mcp_enabled else None,
+                    "oauth": self.oauth,
+                }
                 payload["auth_mode"] = self.auth_mode
                 if self.name is not None:
                     payload["name"] = self.name
@@ -179,6 +192,17 @@ class FakeAgentOS:
             if self.mcp_requires_token and self.auth_mode != "none":
                 token = self._bearer(request)
                 if token != self.security_key and token not in self.active_tokens():
+                    # An OAuth-protected /mcp answers with the RFC 9728 challenge (via
+                    # fastmcp's RequireAuthMiddleware); PATs still pass (MultiAuth).
+                    if self.auth_mode == "oauth":
+                        return httpx.Response(
+                            401,
+                            json={"detail": "Unauthorized"},
+                            headers={
+                                "WWW-Authenticate": "Bearer resource_metadata="
+                                '"http://localhost:7777/.well-known/oauth-protected-resource/mcp"'
+                            },
+                        )
                     return httpx.Response(401, json={"detail": "Invalid authentication token"})
             message = json.loads(request.content) if request.content else {}
             rpc_method = message.get("method")

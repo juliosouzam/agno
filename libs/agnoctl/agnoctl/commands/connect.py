@@ -95,6 +95,15 @@ CHAT_APPS_SPEC = {
 }
 CHAT_APPS = tuple(CHAT_APPS_SPEC)
 
+# The one-time sign-in each client runs after a tokenless entry is written for an
+# OAuth-protected MCP endpoint. {server} is the entry name.
+OAUTH_SIGNIN_STEPS = {
+    "claude-code": "Run: claude mcp login {server}  (or /mcp -> Authenticate inside a session)",
+    "claude-desktop": "Restart Claude Desktop; mcp-remote opens the browser sign-in automatically",
+    "codex": "Run: codex mcp login {server}",
+    "cursor": "Open Cursor Settings -> MCP and click Connect on '{server}'",
+}
+
 
 def _split_chat_apps(clients: Optional[str]) -> "tuple[Optional[str], List[str]]":
     """Peel chat-app requests out of --clients; returns (remaining clients, wanted apps)."""
@@ -140,6 +149,17 @@ def _chat_app_instructions(app: str, os_info: OSInfo) -> Dict[str, Any]:
             + os_info.base_url
             + "; deploy it behind a public HTTPS URL (or a tunnel) before adding it."
         )
+    if os_info.oauth_enabled:
+        auth_line = (
+            "This AgentOS's MCP endpoint supports OAuth sign-in, which is exactly how "
+            + ui_name
+            + "'s Connectors UI authenticates: you will be asked to authorize when adding the connector."
+        )
+    else:
+        auth_line = (
+            ui_name + "'s Connectors UI authenticates with OAuth, not bearer tokens, so a token-protected "
+            "AgentOS cannot be added from the UI yet; use a public or OAuth-enabled AgentOS."
+        )
     return {
         "client": app,
         "status": "manual",
@@ -147,8 +167,7 @@ def _chat_app_instructions(app: str, os_info: OSInfo) -> Dict[str, Any]:
         "url": os_info.mcp_url,
         "instructions": [
             ui_name + " reaches MCP servers from its cloud, so the AgentOS must be on a public HTTPS URL.",
-            ui_name + "'s Connectors UI authenticates with OAuth, not bearer tokens, so a token-protected "
-            "AgentOS cannot be added from the UI yet; use a public or OAuth-enabled AgentOS.",
+            auth_line,
             where,
         ],
         "note": note,
@@ -258,6 +277,11 @@ def connect(
     privileged: bool = typer.Option(
         False, "--privileged", help="Required when --scopes grants write/delete/admin or service_accounts scopes."
     ),
+    pat: bool = typer.Option(
+        False,
+        "--pat",
+        help="Mint service-account tokens even when the MCP endpoint is OAuth-protected (for headless clients).",
+    ),
     server_name: Optional[str] = typer.Option(
         None,
         "--server-name",
@@ -287,6 +311,7 @@ def connect(
             scopes=list(scopes) or None,
             expires=expires,
             privileged=privileged,
+            pat=pat,
             server_name=server_name,
             project=project,
             rotate=rotate,
@@ -306,6 +331,7 @@ def _connect(
     scopes: Optional[List[str]],
     expires: str,
     privileged: bool,
+    pat: bool,
     server_name: Optional[str],
     project: bool,
     rotate: bool,
@@ -353,19 +379,32 @@ def _connect(
         if server_name != LEGACY_SERVER_NAME and not skip_existing:
             legacy_name = LEGACY_SERVER_NAME
     legacy_token_reuse = scopes is None and expires == DEFAULT_EXPIRES
+
+    # OAuth-first: when /mcp is OAuth-protected, apps sign in through the authorization
+    # server themselves -- entries are written without tokens and nothing is minted.
+    # --pat opts back into minted bearers (the server accepts both) for headless clients.
+    oauth_mode = os_info.oauth_enabled and not pat
+
     if not json_mode:
         version = " (agno " + os_info.version + ")" if os_info.version else ""
         source = os_info.source_note()
         os_label = '"' + os_info.name + '" ' if os_info.name else ""
         print_info("AgentOS " + os_label + "at " + os_info.base_url + version + source + ", MCP at " + os_info.mcp_url)
+        if oauth_mode:
+            servers = os_info.oauth.authorization_servers if os_info.oauth is not None else []
+            issuer = (" via " + ", ".join(servers)) if servers else ""
+            print_info("The MCP endpoint is OAuth-protected: apps complete a one-time sign-in" + issuer + ".")
 
     adapters = build_adapters(project=project)
     clients_remaining, wanted_apps = _split_chat_apps(clients)
     # Auto-surface the hosted chat apps only when the run wasn't scoped by --clients AND
-    # the deployed OS is one they can actually add: public HTTPS and no token gate (their
-    # Connectors UIs authenticate with OAuth, not bearer tokens). Explicitly requested
-    # chat apps are honored regardless -- their instructions carry the caveats.
-    auto_surface_apps = clients is None and os_info.auth_mode == "none" and _reachable_from_cloud(os_info)
+    # the deployed OS is one they can actually add: public HTTPS, and either no token
+    # gate or an OAuth-protected /mcp (their Connectors UIs authenticate with OAuth).
+    # Explicitly requested chat apps are honored regardless -- their instructions carry
+    # the caveats.
+    auto_surface_apps = (
+        clients is None and (os_info.auth_mode == "none" or os_info.oauth_enabled) and _reachable_from_cloud(os_info)
+    )
     # Auto-detect only when no --clients was given; a chat-app-only request selects no adapters.
     selected = (
         _resolve_clients(clients_remaining, adapters, required=not auto_surface_apps)
@@ -373,14 +412,14 @@ def _connect(
         else []
     )
 
-    minting = os_info.auth_mode not in ("none",) and bool(selected)
+    minting = os_info.auth_mode not in ("none",) and bool(selected) and not oauth_mode
     # When we mint, the admin token is attached to base_url and the minted PATs are written
     # into client configs and sent to the (same-origin) MCP URL. Refuse to do any of that
     # over plaintext HTTP to a non-loopback host unless the operator opted in.
     if minting:
         require_secure_url(os_info.base_url, allow_http=allow_http, what="the admin credential and minted tokens")
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
-    if not minting and selected and not json_mode:
+    if not minting and selected and not json_mode and os_info.auth_mode == "none":
         print_info("Authorization is disabled on this AgentOS; connecting without credentials.")
 
     # Truthful-outcome check: if the OS enforces auth but /mcp answers without a token,
@@ -457,6 +496,7 @@ def _connect(
                     shared_token=shared_token,
                     legacy_name=legacy_name,
                     legacy_token_reuse=legacy_token_reuse,
+                    oauth_mode=oauth_mode,
                     status=status,
                 )
             except CLIError as e:
@@ -585,6 +625,7 @@ def _connect_one(
     shared_token: Optional[str],
     legacy_name: Optional[str] = None,
     legacy_token_reuse: bool = True,
+    oauth_mode: bool = False,
     status: Optional[Status] = None,
 ) -> None:
     account_name = name or adapter.key
@@ -593,8 +634,14 @@ def _connect_one(
 
     if existing is not None:
         if existing.url == os_info.mcp_url and not rotate:
-            # Idempotency: an entry already pointing at this OS that still verifies is left alone.
-            check = verify_mcp(os_info.mcp_url, token=existing.token)
+            # Idempotency: an entry already pointing at this OS that still verifies is left
+            # alone. A tokenless entry on an OAuth-protected endpoint verifies via the
+            # challenge (the client holds the sign-in state, not the config).
+            check = verify_mcp(
+                os_info.mcp_url,
+                token=existing.token,
+                expect_oauth_challenge=oauth_mode and existing.token is None,
+            )
             if check.ok and (existing.token is not None or not minting):
                 result.update(status="already-connected", location=existing.location, verify=check.public_dict())
                 if legacy_name is not None and legacy is not None:
@@ -683,10 +730,20 @@ def _connect_one(
         )
         return
 
-    verify_result = verify_mcp(os_info.mcp_url, token=readback.token)
+    verify_result = verify_mcp(
+        os_info.mcp_url, token=readback.token, expect_oauth_challenge=oauth_mode and readback.token is None
+    )
     result["verify"] = verify_result.public_dict()
     if verify_result.ok:
-        result["status"] = "connected"
+        if verify_result.oauth_challenge:
+            # The entry is in place and the endpoint answers with an OAuth challenge:
+            # the last step -- the sign-in -- happens inside the client itself.
+            result["status"] = "needs-login"
+            step = OAUTH_SIGNIN_STEPS.get(adapter.key)
+            if step:
+                result["instructions"] = [step.replace("{server}", server_name)]
+        else:
+            result["status"] = "connected"
         if legacy_name is not None and legacy is not None:
             _remove_legacy_entry(adapter, os_info, legacy_name, result)
         # A client that was already configured with a *different* token still holds the
@@ -705,7 +762,7 @@ def _report(
     open_mcp_warning: Optional[str],
     json_mode: bool,
 ) -> None:
-    exit_code = exit_code_for(results, ("connected", "already-connected", "manual"))
+    exit_code = exit_code_for(results, ("connected", "already-connected", "needs-login", "manual"))
 
     if json_mode:
         emit_json(
@@ -726,6 +783,10 @@ def _report(
             tools = (r.get("verify") or {}).get("tools")
             suffix = " (" + str(tools) + " tools)" if tools else ""
             print_success("  connected      " + label + suffix + "  ->  " + str(r.get("location", "")))
+        elif r["status"] == "needs-login":
+            print_warning("  sign in        " + label + "  ->  " + str(r.get("location", "")))
+            for step in r.get("instructions", []):
+                print_info("                 - " + step)
         elif r["status"] == "already-connected":
             print_success("  already ok     " + label + "  ->  " + str(r.get("location", "")))
         elif r["status"] == "skipped":
@@ -748,14 +809,30 @@ def _report(
 
     # One summary + restart section: freshly wired clients hold no live MCP session yet,
     # and rotated ones keep using the previous (now revoked) token until they restart.
-    fresh = sorted({display_name(r["client"]) for r in results if r["status"] == "connected"})
+    fresh = sorted({display_name(r["client"]) for r in results if r["status"] in ("connected", "needs-login")})
     if fresh:
+        signin_pending = any(r["status"] == "needs-login" for r in results)
         os_label = ('"' + os_info.name + '"') if os_info.name else os_info.base_url
         count = str(len(fresh)) + (" app" if len(fresh) == 1 else " apps")
         loads = "so it loads" if len(fresh) == 1 else "so they load"
         print_info("")
-        print_success("Connected " + count + " to " + os_label + " as '" + server_name + "'.")
-        print_warning("Restart " + ", ".join(fresh) + " " + loads + " the new MCP server.")
+        verb = "Configured" if signin_pending else "Connected"
+        print_success(
+            verb
+            + " "
+            + count
+            + " "
+            + ("for" if signin_pending else "to")
+            + " "
+            + os_label
+            + " as '"
+            + server_name
+            + "'."
+        )
+        restart = "Restart " + ", ".join(fresh) + " " + loads + " the new MCP server."
+        if signin_pending:
+            restart += " Then complete the one-time sign-in above."
+        print_warning(restart)
         if any(r.get("rotated") for r in results):
             print_warning("A rotated client keeps using its previous (now revoked) token until it restarts.")
 

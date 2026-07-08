@@ -8,7 +8,7 @@ distinguishes the auth modes by status code and 401 detail wording.
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -57,17 +57,35 @@ ENV_FILES = (".env.production", ".env")
 
 
 @dataclass
+class McpOAuth:
+    """OAuth discovery details served on /info when AgentOS(mcp_auth=...) protects /mcp."""
+
+    authorization_servers: List[str] = field(default_factory=list)
+    resource: Optional[str] = None
+
+    def public_dict(self) -> Dict[str, Any]:
+        return {"authorization_servers": self.authorization_servers, "resource": self.resource}
+
+
+@dataclass
 class OSInfo:
     base_url: str
     version: Optional[str]
     mcp_enabled: bool
     mcp_path: Optional[str]
-    auth_mode: str  # "none" | "security_key" | "jwt" | "unknown"
+    auth_mode: str  # "none" | "security_key" | "jwt" | "oauth" | "unknown"
     discovered_via: str  # "info" | "probe"
     url_source: str = "default"  # "flag" | "env" | "env-file" | "default"
     url_source_file: Optional[str] = None  # env file AGENTOS_URL came from, when url_source == "env-file"
     name: Optional[str] = None  # AgentOS(name=...), served on /info by agno >= 2.8; None on older servers
     os_id: Optional[str] = None
+    oauth: Optional[McpOAuth] = None  # set when the MCP endpoint is OAuth-protected
+
+    @property
+    def oauth_enabled(self) -> bool:
+        """Whether /mcp is OAuth-protected: clients sign in through the authorization
+        server instead of carrying a minted bearer token."""
+        return self.oauth is not None or self.auth_mode == "oauth"
 
     @property
     def mcp_url(self) -> str:
@@ -84,7 +102,11 @@ class OSInfo:
             "name": self.name,
             "os_id": self.os_id,
             "version": self.version,
-            "mcp": {"enabled": self.mcp_enabled, "path": self.mcp_path},
+            "mcp": {
+                "enabled": self.mcp_enabled,
+                "path": self.mcp_path,
+                "oauth": self.oauth.public_dict() if self.oauth is not None else None,
+            },
             "auth_mode": self.auth_mode,
             "discovered_via": self.discovered_via,
             "url_source": self.url_source,
@@ -237,6 +259,18 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def _parse_mcp_oauth(mcp_field: Dict[str, Any]) -> Optional[McpOAuth]:
+    """The /info mcp.oauth object, when the server advertises OAuth on /mcp."""
+    raw = mcp_field.get("oauth")
+    if not isinstance(raw, dict):
+        return None
+    servers = raw.get("authorization_servers")
+    return McpOAuth(
+        authorization_servers=[s for s in servers if isinstance(s, str)] if isinstance(servers, list) else [],
+        resource=_str_or_none(raw.get("resource")),
+    )
+
+
 def _probe_candidate(candidate: str, url_source: str, url_source_file: Optional[str]) -> Optional[OSInfo]:
     """Probe one candidate URL; an OSInfo when a live AgentOS answers, else None."""
     try:
@@ -267,6 +301,7 @@ def _probe_candidate(candidate: str, url_source: str, url_source_file: Optional[
                 url_source_file=url_source_file,
                 name=_str_or_none(info.get("name")),
                 os_id=_str_or_none(info.get("os_id")),
+                oauth=_parse_mcp_oauth(mcp_field),
             )
 
         mcp_enabled = _probe_mcp(candidate)
