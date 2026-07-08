@@ -1201,23 +1201,26 @@ def _add_transport_security_middleware(
 def _mcp_server_is_open(os: "AgentOS") -> bool:
     """True when /mcp serves anonymous callers: no auth is effectively enforced.
 
-    Delegates to :func:`get_effective_auth_mode` -- the same detection the auth layer and
-    ``/info`` use -- so this agrees with them on every mode: ``AgentOS(authorization=True)``,
-    JWT env vars, a manually installed ``JWTMiddleware`` on a ``base_app``, and the security
-    key all count as authenticated. Only when it returns "none" does /mcp answer requests
-    carrying no bearer token (a service-account verifier alone does NOT close that path --
-    PATs are checked only when presented). That anonymous case is the one a rebound web page
-    could drive, so it is the case that needs default transport security. Authenticated
-    deployments rely on the bearer token instead, so their deployed hostname is not gated.
+    ``mcp_auth`` protects /mcp on its own (its RequireAuthMiddleware challenges every
+    unauthenticated request), so a deployment with it set is never open regardless of the
+    REST posture -- checked here directly rather than via ``get_effective_auth_mode``,
+    which now reports the REST/WS plane only. Otherwise this defers to that shared
+    detection: ``AgentOS(authorization=True)``, JWT env vars, a manually installed
+    ``JWTMiddleware`` on a ``base_app``, and the security key all count as authenticated.
+    Only the fully-anonymous case (no mcp_auth and REST mode "none") answers requests
+    carrying no bearer token -- the case a rebound web page could drive, so the one that
+    needs default transport security. A service-account verifier alone does NOT close that
+    path (PATs are checked only when presented).
     """
     from agno.os.auth import get_effective_auth_mode
 
+    if getattr(os, "mcp_auth", None) is not None:
+        return False
     return (
         get_effective_auth_mode(
             getattr(os, "settings", None),
             bool(getattr(os, "authorization", False)),
             getattr(os, "base_app", None),
-            mcp_auth=getattr(os, "mcp_auth", None),
         )
         == "none"
     )

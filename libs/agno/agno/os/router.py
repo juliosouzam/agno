@@ -300,7 +300,6 @@ def get_info_router(os: "AgentOS") -> APIRouter:
                 settings=os.settings,
                 authorization=os.authorization,
                 app=request.app,
-                mcp_auth=getattr(os, "mcp_auth", None),
             ),
         )
 

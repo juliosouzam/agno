@@ -177,10 +177,12 @@ async def test_tier2_token_cannot_forge_trust_markers():
     assert captured["authorization_enabled"] is True
 
 
-async def test_tier2_token_cannot_impersonate_reserved_principal():
-    """An external token claiming agno_mcp_internal_issuer + a reserved sub (oauth:/sa:)
-    must not bridge that identity: the marker is stripped, so the reserved-principal guard
-    fires and the caller's identity is left unset rather than impersonating the principal."""
+async def test_tier2_token_asserting_reserved_principal_is_rejected():
+    """An external token claiming a reserved sub (oauth:/sa:/__scheduler__) is rejected at
+    verify -- it never gets a session. A cryptographically-valid external token is not 401'd
+    by fastmcp, so if the bridge merely declined to stamp the reserved identity the request
+    would still reach the tools unauthenticated (custom tools running with user_id=None,
+    skipping the authorize() allowlist). Refusing it at verify closes that path."""
     captured: dict = {}
     tokens = {
         "impersonator": {
@@ -196,9 +198,9 @@ async def test_tier2_token_cannot_impersonate_reserved_principal():
             "/mcp", json=_MCP_INIT_BODY, headers={**_MCP_HEADERS, "Authorization": "Bearer impersonator"}
         )
 
-    assert response.status_code == 200
-    # The reserved sub was not honored (identity left unset), so no impersonation.
-    assert captured["user_id"] != "oauth:victim"
+    # Rejected at verify: no session, and certainly no impersonation.
+    assert response.status_code == 401
+    assert captured.get("user_id") in (None, "MISSING")
 
 
 async def test_tier2_required_scopes_do_not_block_pat(tmp_path):
@@ -265,7 +267,8 @@ async def test_tier2_info_reports_external_as():
     async with _http_client(_os(_tier2_provider())) as client:
         response = await client.get("/info")
     payload = response.json()
-    assert payload["auth_mode"] == "oauth"
+    # auth_mode is the REST/WS posture (open here); the external AS is reported under mcp.oauth.
+    assert payload["auth_mode"] == "none"
     assert [s.rstrip("/") for s in payload["mcp"]["oauth"]["authorization_servers"]] == [_EXTERNAL_AS.rstrip("/")]
 
 

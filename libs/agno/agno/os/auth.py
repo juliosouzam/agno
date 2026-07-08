@@ -158,32 +158,28 @@ def get_effective_auth_mode(
     settings: Optional[AgnoAPISettings],
     authorization: bool = False,
     app: Any = None,
-    mcp_auth: Any = None,
-) -> Literal["none", "security_key", "jwt", "oauth"]:
-    """Return the authentication mode effectively enforced by the OS.
+) -> Literal["none", "security_key", "jwt"]:
+    """Return the REST/WS authentication mode effectively enforced by the OS.
 
-    An ``mcp_auth`` provider takes precedence: it owns the MCP surface (the
-    connect-by-URL path clients discover through ``/info``) and composes PAT/JWT
-    verification for bearer clients, so "oauth" is the mode to advertise. After
-    that, the precedence mirrors ``get_authentication_dependency``: JWT (via
-    authorization=True on AgentOS, JWT environment variables, or a manually
-    installed ``JWTMiddleware``) takes precedence over the security key, which
-    takes precedence over no auth.
+    This describes the REST/WS plane only. ``mcp_auth`` is deliberately NOT consulted:
+    it protects the MCP endpoint alone (its own OAuth surface is described separately
+    under ``/info``'s ``mcp.oauth`` block), so folding it in here would mislabel a
+    deployment -- reporting "oauth" while REST is actually open, or masking a real "jwt"
+    REST posture. Consumers read this to pick REST/WS credentials, so it must reflect the
+    REST plane. The precedence mirrors ``get_authentication_dependency``: JWT (via
+    authorization=True on AgentOS, JWT environment variables, or a manually installed
+    ``JWTMiddleware``) over the security key over no auth.
 
     Args:
         settings: The API settings containing the security key and authorization flag
         authorization: The AgentOS authorization flag (JWT middleware enabled)
         app: The Starlette/FastAPI app instance; when provided, its middleware stack
             is inspected so a manually-installed ``JWTMiddleware`` is detected.
-        mcp_auth: The AgentOS ``mcp_auth`` provider, when one is set.
 
     Returns:
-        "oauth" when an ``mcp_auth`` provider protects the MCP endpoint, "jwt" when
-        JWT authorization is effectively active, "security_key" when only the OS
-        security key is enforced, "none" when authentication is disabled.
+        "jwt" when JWT authorization is effectively active, "security_key" when only the
+        OS security key is enforced, "none" when REST authentication is disabled.
     """
-    if mcp_auth is not None:
-        return "oauth"
     if (
         authorization
         or (settings is not None and settings.authorization_enabled)

@@ -166,13 +166,27 @@ def delete_code(engine: Engine, table: Any, code_hash: str) -> bool:
 
 
 def store_refresh(
-    engine: Engine, table: Any, *, token_hash: str, client_id: str, scopes: str, expires_at: int, now: int
+    engine: Engine,
+    table: Any,
+    *,
+    token_hash: str,
+    client_id: str,
+    scopes: str,
+    expires_at: int,
+    now: int,
+    family_id: str,
 ) -> None:
-    """Insert a hashed refresh token, sweeping expired rows first."""
+    """Insert a hashed refresh token (tagged with its rotation family), sweeping expired rows first."""
     with engine.connect() as conn:
         conn.execute(delete(table).where(table.c.expires_at < now))
         conn.execute(
-            insert(table).values(token_hash=token_hash, client_id=client_id, scopes=scopes, expires_at=expires_at)
+            insert(table).values(
+                token_hash=token_hash,
+                client_id=client_id,
+                scopes=scopes,
+                expires_at=expires_at,
+                family_id=family_id,
+            )
         )
         conn.commit()
 
@@ -193,6 +207,15 @@ def delete_refresh(engine: Engine, table: Any, token_hash: str) -> bool:
         result = conn.execute(delete(table).where(table.c.token_hash == token_hash))
         conn.commit()
     return result.rowcount == 1
+
+
+def delete_refresh_family(engine: Engine, table: Any, family_id: str) -> int:
+    """Delete every refresh token in a rotation family. Returns the number removed --
+    the reuse-detection revocation lever: one reused token invalidates the whole chain."""
+    with engine.connect() as conn:
+        result = conn.execute(delete(table).where(table.c.family_id == family_id))
+        conn.commit()
+    return int(result.rowcount or 0)
 
 
 # ==================== Signing keys ====================

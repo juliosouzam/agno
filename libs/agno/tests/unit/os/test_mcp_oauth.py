@@ -9,8 +9,9 @@ Phase 1 of the mcp_auth spec, proven against fastmcp's ``InMemoryOAuthProvider``
   3. The full DCR -> authorize -> token flow issues a token that runs MCP requests,
      with the identity bridged onto request.state.
   4. PAT coexistence: ``agno_pat_`` bearers still authenticate via MultiAuth.
-  5. An OAuth-only deployment is not treated as an open server (no localhost-only
-     host guard), and /info reports ``auth_mode="oauth"`` + discovery details.
+  5. An OAuth-only deployment is not treated as an open server (no localhost-only host
+     guard); /info keeps ``auth_mode`` reporting the REST/WS posture ("none" here) with the
+     OAuth discovery details under ``mcp.oauth``.
   6. ``mcp_auth`` unset leaves the existing paths byte-for-byte unchanged (covered by
      the pre-existing suites in test_mcp_server.py; asserted structurally here).
 """
@@ -842,13 +843,15 @@ async def test_oauth_deploy_serves_deployed_hostname():
 # ==================== /info discovery ====================
 
 
-async def test_info_reports_oauth_mode_and_discovery():
+async def test_info_reports_oauth_discovery_under_mcp():
     async with _http_client(_oauth_os()) as client:
         response = await client.get("/info")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["auth_mode"] == "oauth"
+    # auth_mode describes the REST/WS plane only (here open); the MCP OAuth signal lives
+    # under mcp.oauth so it does not mask the true REST posture.
+    assert payload["auth_mode"] == "none"
     assert payload["mcp"]["enabled"] is True
     oauth_info = payload["mcp"]["oauth"]
     assert [s.rstrip("/") for s in oauth_info["authorization_servers"]] == ["http://localhost"]

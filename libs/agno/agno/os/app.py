@@ -3,7 +3,7 @@ import warnings
 from contextlib import asynccontextmanager
 from functools import partial
 from os import getenv
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -82,6 +82,11 @@ from agno.team import RemoteTeam, Team, TeamFactory
 from agno.utils.log import log_debug, log_error, log_info, log_warning
 from agno.utils.string import generate_id, generate_id_from_name
 from agno.workflow import RemoteWorkflow, Workflow, WorkflowFactory
+
+if TYPE_CHECKING:
+    # Typed for static checkers only -- fastmcp is an optional extra, so importing it at
+    # runtime here would break `import agno.os` when the extra is not installed.
+    from fastmcp.server.auth import AuthProvider
 
 
 @asynccontextmanager
@@ -243,7 +248,7 @@ class AgentOS:
         settings: Optional[AgnoAPISettings] = None,
         lifespan: Optional[Any] = None,
         mcp_server: Union[bool, MCPServerConfig] = False,
-        mcp_auth: Optional[Any] = None,
+        mcp_auth: Optional["AuthProvider"] = None,
         base_app: Optional[FastAPI] = None,
         on_route_conflict: Literal["preserve_agentos", "preserve_base_app", "error"] = "preserve_agentos",
         tracing: bool = False,
@@ -386,9 +391,9 @@ class AgentOS:
                 )
         self.mcp_config: Optional[MCPServerConfig] = mcp_config
         self.mcp_server = mcp_server
-        self.mcp_auth = mcp_auth
+        self.mcp_auth: Optional["AuthProvider"] = mcp_auth
         # Resolved lazily (and once): the MultiAuth-wrapped provider handed to FastMCP.
-        self._resolved_mcp_auth: Optional[Any] = None
+        self._resolved_mcp_auth: Optional["AuthProvider"] = None
         if self.mcp_auth is not None and not self.mcp_server:
             raise ValueError(
                 "AgentOS(mcp_auth=...) requires the MCP server: pass mcp_server=True or an MCPServerConfig."
@@ -1267,7 +1272,7 @@ class AgentOS:
             )
         return self._service_account_verifier
 
-    def _get_mcp_auth_provider(self) -> Optional[Any]:
+    def _get_mcp_auth_provider(self) -> Optional["AuthProvider"]:
         """The resolved fastmcp auth provider for the MCP endpoint, or None.
 
         Resolution (type checks, ``MultiAuth`` composition with the service-account

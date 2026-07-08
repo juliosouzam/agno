@@ -125,8 +125,9 @@ agent_os = AgentOS(
 ```
 
 The same seam carries both tiers, so moving from built-in to an external AS is a config change.
-`/info` reports `auth_mode="oauth"` with the authorization server and resource URL so clients
-(and `agno connect`) can discover the mode.
+`/info` describes the OAuth surface under `mcp.oauth` (the authorization server and resource URL)
+so clients (and `agno connect`) can discover it; the top-level `auth_mode` reflects the REST/WS
+auth posture only.
 
 **Tier 2 scopes.** AgentOS enforces its scope map (`agents:run`, `teams:run`, `workflows:run`,
 `sessions:read`, `config:read`) on the external token, so configure your AS to emit agno-format

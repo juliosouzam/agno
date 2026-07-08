@@ -45,6 +45,12 @@ Security properties, deliberate and load-bearing:
   access *and* refresh (both are JWTs under the same key) -- forcing re-consent; deleting
   a refresh-token row stops renewal for that client. Rotating the connect secret gates
   future logins only -- it revokes nothing already issued.
+- **Refresh-token reuse detection:** refresh tokens rotate on every use and each carries a
+  ``family_id`` shared across its rotation chain. Presenting a token that verifies but has
+  no live row (i.e. one already rotated away) is treated as reuse and revokes the whole
+  family (OAuth 2.1 / RFC 9700), so a stolen chain and the legitimate client both lose
+  access and must re-consent. This bounds silent refresh-token theft without the blunt
+  key-rotation kill switch; a stolen access token still lives out its short TTL.
 - **Signing key:** env-primary (``AGENTOS_MCP_SIGNING_KEY``). Set it in production so the
   token trust root is env-managed; when unset, a key is generated and persisted in the
   same database (survives redeploy, shared across replicas) -- convenient, but then a
@@ -134,20 +140,54 @@ def _constant_time_equals(a: str, b: str) -> bool:
     return hmac.compare_digest(_hash(a), _hash(b))
 
 
+def _is_loopback_host(host: Optional[str]) -> bool:
+    return host is not None and host.lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _redirect_uri_matches_registered(requested: Any, registered: Any) -> bool:
+    """Whether ``requested`` matches a registered redirect URI: exact, or -- for a
+    registered loopback URI (RFC 8252) -- identical in everything but the port.
+
+    Reimplemented locally (rather than importing fastmcp's private
+    ``_matches_registered_redirect_uri``) so redirect validation -- a security control --
+    owns its logic and cannot break on an upstream rename/removal or drift silently.
+    """
+    from urllib.parse import urlparse
+
+    if str(requested) == str(registered):
+        return True
+    req = urlparse(str(requested))
+    reg = urlparse(str(registered))
+    # Never let credentials in the URI participate in matching.
+    if req.username or req.password or reg.username or reg.password:
+        return False
+    req_host = req.hostname.lower() if req.hostname else None
+    reg_host = reg.hostname.lower() if reg.hostname else None
+    if not _is_loopback_host(reg_host) or req_host != reg_host:
+        return False
+    # Loopback: only the port may vary; scheme/path/params/query/fragment must be identical.
+    return (
+        req.scheme.lower() == reg.scheme.lower()
+        and (req.path or "/") == (reg.path or "/")
+        and req.params == reg.params
+        and req.query == reg.query
+        and req.fragment == reg.fragment
+    )
+
+
 class _LoopbackTolerantClient(OAuthClientInformationFull):
     """A DCR client that permits a registered loopback redirect URI to vary its port.
 
     RFC 8252: native CLI clients (Claude Code, mcp-remote) register a client_id, then on
     a later authorization bind a fresh ephemeral callback port. Exact-match validation
     would reject the second run with "redirect_uri not registered". Non-loopback URIs
-    (claude.ai, ChatGPT) keep exact matching.
+    (claude.ai, ChatGPT) keep exact matching, and a non-registered redirect is refused by
+    the base class's strict validation below.
     """
 
     def validate_redirect_uri(self, redirect_uri: Any) -> Any:
         if redirect_uri is not None and self.redirect_uris:
-            from fastmcp.server.auth.oauth_proxy.models import _matches_registered_redirect_uri
-
-            if _matches_registered_redirect_uri(redirect_uri, self.redirect_uris):
+            if any(_redirect_uri_matches_registered(redirect_uri, r) for r in self.redirect_uris):
                 return redirect_uri
         return super().validate_redirect_uri(redirect_uri)
 
@@ -862,15 +902,22 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
 
     # ==================== Tokens ====================
 
-    async def _issue_tokens(self, client_id: str, scopes: List[str]) -> OAuthToken:
+    async def _issue_tokens(self, client_id: str, scopes: List[str], family_id: Optional[str] = None) -> OAuthToken:
         await self._run(self._ensure_ready)
+        # A rotation family: minted fresh at the auth-code grant, carried across every
+        # refresh so reuse of any token in the chain can revoke the whole family.
+        family_id = family_id or secrets.token_hex(16)
         access_token = self._issuer.issue_access_token(
             client_id=client_id, scopes=scopes, jti=secrets.token_hex(16), expires_in=self._access_token_ttl
         )
         refresh_token = self._issuer.issue_refresh_token(
-            client_id=client_id, scopes=scopes, jti=secrets.token_hex(16), expires_in=self._refresh_token_ttl
+            client_id=client_id,
+            scopes=scopes,
+            jti=secrets.token_hex(16),
+            expires_in=self._refresh_token_ttl,
+            upstream_claims={"family_id": family_id},
         )
-        await self._run(self._store_refresh_sync, refresh_token, client_id, scopes)
+        await self._run(self._store_refresh_sync, refresh_token, client_id, scopes, family_id)
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",
@@ -879,7 +926,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
             scope=" ".join(scopes),
         )
 
-    def _store_refresh_sync(self, refresh_token: str, client_id: str, scopes: List[str]) -> None:
+    def _store_refresh_sync(self, refresh_token: str, client_id: str, scopes: List[str], family_id: str) -> None:
         now = int(time.time())
         self._require_db().store_mcp_oauth_refresh(
             token_hash=_hash(refresh_token),
@@ -887,41 +934,81 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
             scopes=json.dumps(scopes),
             expires_at=now + self._refresh_token_ttl,
             now=now,
+            family_id=family_id,
         )
+
+    @staticmethod
+    def _family_id_of(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The rotation family_id embedded in a verified refresh token, if any."""
+        return (payload.get("upstream_claims") or {}).get("family_id") if payload else None
+
+    def _delete_refresh_family_sync(self, family_id: str) -> int:
+        return self._require_db().delete_mcp_oauth_refresh_family(family_id)
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> Optional[RefreshToken]:
         await self._run(self._ensure_ready)
-        if self._verify_any(refresh_token, "refresh") is None:
+        payload = self._verify_any(refresh_token, "refresh")
+        if payload is None:
             return None
         row = await self._run(self._load_refresh_sync, refresh_token)
         if row is None:
+            # Cryptographically valid and unexpired, but no live row *at all*: this token was
+            # already rotated away, so its presentation is reuse (theft or a stale retry).
+            # OAuth 2.1 / RFC 9700 reuse detection: revoke the whole rotation family so a
+            # stolen chain and the legitimate client both lose access and must re-consent.
+            # (An expired-but-present row is handled below -- benign, not reuse.)
+            await self._run(self._revoke_family_on_reuse, payload)
             return None
-        client_id, scopes, expires_at = row
+        client_id, scopes_json, expires_at = row
+        # An expired row is a benign lazy-sweep artifact, not reuse: reject quietly.
+        if expires_at < time.time():
+            return None
         if client_id != client.client_id:
             return None
-        return RefreshToken(token=refresh_token, client_id=client_id, scopes=scopes, expires_at=expires_at)
+        return RefreshToken(
+            token=refresh_token, client_id=client_id, scopes=json.loads(scopes_json), expires_at=expires_at
+        )
 
     def _load_refresh_sync(self, refresh_token: str) -> Optional[Any]:
-        row = self._require_db().get_mcp_oauth_refresh(_hash(refresh_token))
-        if row is None or row[2] < time.time():
-            return None
-        return row[0], json.loads(row[1]), row[2]
+        # The raw store row (client_id, scopes_json, expires_at) or None when truly absent.
+        # Expiry is checked by the caller so a benign expired row is not misread as reuse.
+        return self._require_db().get_mcp_oauth_refresh(_hash(refresh_token))
+
+    def _revoke_family_on_reuse(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Revoke the whole rotation family of a reused refresh token (RFC 9700)."""
+        family_id = self._family_id_of(payload)
+        if not family_id:
+            return
+        removed = self._delete_refresh_family_sync(family_id)
+        if removed:
+            log_warning(
+                f"Reused MCP OAuth refresh token detected; revoked the refresh-token family ({removed} token(s))."
+            )
 
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: List[str]
     ) -> OAuthToken:
         if scopes and not set(scopes).issubset(set(refresh_token.scopes)):
             raise TokenError("invalid_scope", "Requested scopes exceed those authorized by the refresh token.")
+        # Carry the rotation family forward so the new token stays in the same chain.
+        payload = self._verify_any(refresh_token.token, "refresh")
+        family_id = self._family_id_of(payload)
         # Rotation on every use: deleting the old row is atomic, so a replayed refresh
         # token fails on every replica after its first use.
         deleted = await self._run(self._delete_refresh_sync, refresh_token.token)
         if not deleted:
+            # A successful load (the SDK calls load_refresh_token first) followed by a
+            # failed delete means another request rotated this token away in between -- a
+            # concurrent second presentation of the same refresh token, i.e. reuse. Revoke
+            # the family too (RFC 9700), so a thief that wins the rotation race cannot
+            # outlive detection; the load-path detector alone would miss this interleaving.
+            await self._run(self._revoke_family_on_reuse, payload)
             raise TokenError("invalid_grant", "Refresh token not found or already used.")
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
-        return await self._issue_tokens(client.client_id, scopes or refresh_token.scopes)
+        return await self._issue_tokens(client.client_id, scopes or refresh_token.scopes, family_id=family_id)
 
     def _delete_refresh_sync(self, refresh_token: str) -> bool:
         return self._require_db().delete_mcp_oauth_refresh(_hash(refresh_token))
