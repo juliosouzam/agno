@@ -70,7 +70,7 @@ def test_verify_never_raises_on_malformed_result(monkeypatch):
 
 
 def test_verify_expect_oauth_challenge_accepts_401_with_www_authenticate(monkeypatch):
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
     result = verify_mcp("http://localhost:7777/mcp", token=None, expect_oauth_challenge=True)
     assert result.ok is True
@@ -90,7 +90,7 @@ def test_verify_expect_oauth_challenge_rejects_bare_401(monkeypatch):
 
 
 def test_verify_401_without_expectation_still_fails(monkeypatch):
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
     result = verify_mcp("http://localhost:7777/mcp", token=None)
     assert result.ok is False

@@ -73,7 +73,7 @@ class OSInfo:
     version: Optional[str]
     mcp_enabled: bool
     mcp_path: Optional[str]
-    auth_mode: str  # "none" | "security_key" | "jwt" | "oauth" | "unknown"
+    auth_mode: str  # REST/WS plane only: "none" | "security_key" | "jwt" | "unknown"; MCP OAuth is signaled by `oauth`
     discovered_via: str  # "info" | "probe"
     url_source: str = "default"  # "flag" | "env" | "env-file" | "default"
     url_source_file: Optional[str] = None  # env file AGENTOS_URL came from, when url_source == "env-file"
@@ -86,8 +86,9 @@ class OSInfo:
         """Whether /mcp is OAuth-protected AND apps can actually sign in: the OS must
         advertise at least one authorization server, or there is nothing to sign in
         through. A provider with none (e.g. a bare fastmcp TokenVerifier as mcp_auth)
-        still reports auth_mode "oauth", but its bearers are issued out of band, so
-        connect treats it like any other token-protected endpoint."""
+        still serves an mcp.oauth block, but its bearers are issued out of band, so
+        connect treats it like any other token-protected endpoint. auth_mode plays no
+        part here: it describes the REST/WS plane, which is independent of /mcp."""
         return self.oauth is not None and bool(self.oauth.authorization_servers)
 
     @property

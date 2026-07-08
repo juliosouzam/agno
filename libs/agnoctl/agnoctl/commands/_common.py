@@ -136,14 +136,15 @@ ADMIN_TOKEN_SOURCES = (
 def require_mint_capable(base_url: str, auth_mode: str, or_else: Optional[str] = None) -> None:
     """Fail fast when this AgentOS cannot mint tokens for anyone.
 
-    auth_mode "oauth" covers two very different deployments: OAuth composed with a REST
-    credential (OS_SECURITY_KEY / JWT -- minting works), and OAuth as the only auth,
-    leaving the REST plane open. The open one refuses every mint while accepting any
-    credential on reads, so resolving a credential would prompt for -- and appear to
-    accept -- a value the mint then rejects. Detect the open plane up front and name
-    the real problem: the server, not the credential.
+    auth_mode describes the REST plane; "none" means it is open, and an open server
+    refuses every mint (anonymous callers must never create durable credentials) while
+    accepting any credential on reads -- so resolving a credential would prompt for,
+    and appear to accept, a value the mint then rejects. The unauthenticated probe
+    confirms the service-accounts API really is open before failing (a proxy or a
+    manually installed auth layer that /info knows nothing about may guard it), and
+    stays the disambiguator for any server whose /info cannot be taken at its word.
     """
-    if auth_mode != "oauth":
+    if auth_mode not in ("none",):
         return
     from agnoctl.http import service_accounts_open
 
@@ -153,8 +154,8 @@ def require_mint_capable(base_url: str, auth_mode: str, or_else: Optional[str] =
     if or_else:
         hint += " " + or_else
     raise CLIError(
-        "This AgentOS cannot mint tokens: OAuth protects its MCP endpoint, but its REST API has "
-        "no authentication configured, and the server refuses to mint without an authenticated caller.",
+        "This AgentOS cannot mint tokens: its REST API has no authentication configured, "
+        "and the server refuses to mint without an authenticated caller.",
         hint=hint,
     )
 

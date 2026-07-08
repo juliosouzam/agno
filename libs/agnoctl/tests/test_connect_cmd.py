@@ -736,7 +736,7 @@ def test_connect_leaves_foreign_agno_entry_alone(monkeypatch, fake_os, fake_clie
 def test_connect_oauth_writes_tokenless_entries_and_mints_nothing(monkeypatch, fake_clients):
     """On an OAuth-protected /mcp, apps sign in themselves: entries carry no token, no
     service accounts are minted, and each result says how to complete the sign-in."""
-    fake = FakeAgentOS(auth_mode="oauth", name="OAuth OS")
+    fake = FakeAgentOS(auth_mode="none", oauth=True, name="OAuth OS")
     install_fake(monkeypatch, fake)
 
     result = _connect()
@@ -755,7 +755,7 @@ def test_connect_oauth_writes_tokenless_entries_and_mints_nothing(monkeypatch, f
 
 
 def test_connect_oauth_rerun_is_already_connected(monkeypatch, fake_clients):
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
     assert _connect(["--clients", "cursor"]).exit_code == 0
 
     result = _connect(["--clients", "cursor"])
@@ -765,8 +765,9 @@ def test_connect_oauth_rerun_is_already_connected(monkeypatch, fake_clients):
 
 def test_connect_oauth_pat_flag_mints_bearers(monkeypatch, fake_os, fake_clients):
     """--pat opts back into minted tokens on an OAuth OS (headless clients cannot run
-    a browser flow); the server accepts both kinds of credential."""
-    fake = FakeAgentOS(auth_mode="oauth")
+    a browser flow); the server accepts both kinds of credential. Minting needs a REST
+    credential, so this is the composed shape (security key + OAuth on /mcp)."""
+    fake = FakeAgentOS(auth_mode="security_key", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
 
@@ -781,7 +782,7 @@ def test_connect_oauth_pat_flag_mints_bearers(monkeypatch, fake_os, fake_clients
 def test_connect_oauth_existing_pat_entry_stays_connected(monkeypatch, fake_clients):
     """A round-1 PAT entry keeps verifying on an OAuth OS (the server accepts both), so
     a re-run without --pat reports already-connected instead of tearing it down."""
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="security_key", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
     assert _connect(["--clients", "cursor", "--pat"]).exit_code == 0
@@ -792,7 +793,7 @@ def test_connect_oauth_existing_pat_entry_stays_connected(monkeypatch, fake_clie
 
 
 def test_connect_oauth_rotate_converts_pat_entry_to_oauth(monkeypatch, fake_clients):
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
     fake_token_entry = {"mcpServers": {"agentos": {"url": MCP_URL, "headers": {"Authorization": "Bearer stale"}}}}
     (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(fake_token_entry))
 
@@ -806,7 +807,7 @@ def test_connect_oauth_rotate_converts_pat_entry_to_oauth(monkeypatch, fake_clie
 def test_connect_oauth_auto_surfaces_chat_apps(monkeypatch, fake_clients):
     """OAuth is exactly what the hosted Connectors UIs speak: a public HTTPS OAuth OS
     auto-surfaces claude.ai and ChatGPT setup steps (previously auth_mode none only)."""
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
     result = runner.invoke(app, ["connect", "--json", "--url", "https://os.example.com"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -817,13 +818,16 @@ def test_connect_oauth_auto_surfaces_chat_apps(monkeypatch, fake_clients):
 
 
 def test_connect_oauth_prints_signin_summary(monkeypatch, fake_clients):
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth", name="OAuth OS"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True, name="OAuth OS"))
     result = runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor"])
     assert result.exit_code == 0, _all_output(result)
     out = _all_output(result)
     assert "OAuth-protected" in out
     assert "sign in" in out
     assert "Restart" in out
+    # auth_mode "none" describes only the REST plane; saying authorization is disabled
+    # would misdescribe the OAuth-protected /mcp being connected.
+    assert "Authorization is disabled" not in out
 
 
 def test_connect_pat_on_oauth_only_os_fails_before_credentials(monkeypatch, fake_clients):
@@ -831,7 +835,7 @@ def test_connect_pat_on_oauth_only_os_fails_before_credentials(monkeypatch, fake
     must never create durable credentials), so --pat must fail up front naming the
     server's missing REST credential -- not accept a typed credential (any value passes
     the open read used by the preflight) and then blame it when the mint 401s."""
-    fake = FakeAgentOS(auth_mode="oauth", open_rest=True)
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
 
@@ -848,7 +852,7 @@ def test_connect_oauth_mint_shaping_flags_require_pat(monkeypatch, fake_clients)
     """--name/--scopes/--expires/--privileged shape minted tokens; an OAuth run mints
     nothing, so silently ignoring them would connect with different access than the
     operator asked for. Erroring names the flags and the way out."""
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
 
     result = _connect(["--clients", "cursor", "--scopes", "agents:run", "--expires", "7d"])
     assert result.exit_code == 1
@@ -858,7 +862,7 @@ def test_connect_oauth_mint_shaping_flags_require_pat(monkeypatch, fake_clients)
 
 
 def test_connect_oauth_shaping_flags_with_pat_still_mint(monkeypatch, fake_os, fake_clients):
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="security_key", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
 
@@ -871,7 +875,7 @@ def test_connect_oauth_rotate_notes_dangling_account(monkeypatch, fake_clients):
     """Converting a PAT entry to OAuth sign-in erases the bearer from disk but cannot
     revoke the account behind it (an OAuth run resolves no admin credential); the
     operator must be pointed at `agno tokens revoke`."""
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
     fake_token_entry = {"mcpServers": {"agentos": {"url": MCP_URL, "headers": {"Authorization": "Bearer stale"}}}}
     (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(fake_token_entry))
 
@@ -888,10 +892,10 @@ def test_connect_oauth_rotate_notes_dangling_account(monkeypatch, fake_clients):
 
 
 def test_connect_treats_oauth_without_authorization_servers_as_token_protected(monkeypatch, fake_os, fake_clients):
-    """A bare token verifier as mcp_auth reports auth_mode "oauth" with no authorization
+    """A bare token verifier as mcp_auth serves an mcp.oauth block with no authorization
     servers; there is nothing to sign in through, so connect mints as usual instead of
     writing a tokenless entry whose sign-in could never complete."""
-    fake = FakeAgentOS(auth_mode="oauth", oauth={"authorization_servers": None, "resource": None})
+    fake = FakeAgentOS(auth_mode="security_key", oauth={"authorization_servers": None, "resource": None})
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
 

@@ -281,7 +281,7 @@ def test_disconnect_partial_failure_exit_code(monkeypatch, fake_os, fake_clients
 def test_disconnect_oauth_os_removes_entry_without_token_note(monkeypatch, fake_clients):
     """Disconnecting from an OAuth OS: URL-matched removal works on tokenless entries,
     and no revoke reminder prints (nothing was minted; sign-in state lives in the app)."""
-    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
     assert _connect(["--clients", "cursor"]).exit_code == 0
 
     result = runner.invoke(app, ["disconnect"] + URL_ARGS + ["--clients", "cursor"])
@@ -297,7 +297,7 @@ def test_disconnect_oauth_os_reminds_when_removed_entry_carried_pat(monkeypatch,
     """connect --pat mints real accounts on an OAuth OS, so the revoke reminder must key
     on what the removed entries carried, not on the server's auth mode: this machine's
     entry holds a token whose account stays valid after the config removal."""
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="security_key", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
     assert _connect(["--clients", "cursor", "--pat"]).exit_code == 0

@@ -321,11 +321,12 @@ def test_discover_all_dedupes_loopback_aliases(monkeypatch, tmp_path):
 
 
 def test_discover_parses_mcp_oauth(monkeypatch, tmp_path):
+    """The MCP OAuth signal is mcp.oauth alone; auth_mode stays the REST plane."""
     monkeypatch.chdir(tmp_path)
-    fake = FakeAgentOS(auth_mode="oauth")
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
     info = discover("http://localhost:7777")
-    assert info.auth_mode == "oauth"
+    assert info.auth_mode == "none"
     assert info.oauth_enabled is True
     assert info.oauth is not None
     assert info.oauth.authorization_servers == ["http://localhost:7777/mcp/auth"]

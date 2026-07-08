@@ -2,21 +2,30 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 import pytest
+
+DEFAULT_OAUTH = {
+    "authorization_servers": ["http://localhost:7777/mcp/auth"],
+    "resource": "http://localhost:7777/mcp",
+}
 
 
 class FakeAgentOS:
     """Simulates the AgentOS endpoints the CLI touches.
 
-    auth_mode: "none" | "security_key" | "jwt" | "oauth"
+    auth_mode: the REST/WS plane only, "none" | "security_key" | "jwt" -- like the real
+        server, it says nothing about /mcp. "none" means the REST plane is OPEN: reads
+        and deletes answer any caller, while the server's anonymous-mint gate refuses
+        every POST /service-accounts (minted PATs must never come from anonymous calls).
+    oauth: the /info mcp.oauth block -- a dict, or True for a default authorization
+        server. When set, /mcp is OAuth-protected: unauthenticated requests get 401 +
+        a WWW-Authenticate challenge like fastmcp's middleware, and minted PATs still
+        pass (the server composes them via MultiAuth).
     info_discovery: serve the mcp/auth_mode fields on /info (newer servers)
     mcp_requires_token: enforce tokens on /mcp (False models servers predating enforcement)
-    open_rest: an OS whose ONLY auth is the mcp_auth provider on /mcp -- /info still says
-        "oauth", but no middleware guards the REST plane: reads and deletes answer any
-        caller, while the server's anonymous-mint gate refuses every POST /service-accounts
     """
 
     def __init__(
@@ -30,12 +39,11 @@ class FakeAgentOS:
         agno_version: str = "2.7.0",
         name: Optional[str] = None,
         os_id: Optional[str] = None,
-        oauth: Optional[Dict[str, Any]] = None,
-        open_rest: bool = False,
+        oauth: Union[bool, Dict[str, Any], None] = None,
     ):
+        assert auth_mode in ("none", "security_key", "jwt"), "auth_mode is the REST plane; use oauth= for MCP OAuth"
         self.auth_mode = auth_mode
         self.security_key = security_key
-        self.open_rest = open_rest
         self.mcp_enabled = mcp_enabled
         self.info_discovery = info_discovery
         self.mcp_requires_token = mcp_requires_token
@@ -43,14 +51,7 @@ class FakeAgentOS:
         self.agno_version = agno_version
         self.name = name
         self.os_id = os_id
-        # OAuth-protected /mcp (auth_mode "oauth"): served on /info, and unauthenticated
-        # MCP requests get 401 + a WWW-Authenticate challenge like fastmcp's middleware.
-        self.oauth = oauth
-        if auth_mode == "oauth" and oauth is None:
-            self.oauth = {
-                "authorization_servers": ["http://localhost:7777/mcp/auth"],
-                "resource": "http://localhost:7777/mcp",
-            }
+        self.oauth: Optional[Dict[str, Any]] = dict(DEFAULT_OAUTH) if oauth is True else (oauth or None)
 
         self.accounts: Dict[str, Dict[str, Any]] = {}  # name -> account dict (with plaintext token)
         self.create_calls = 0
@@ -128,7 +129,7 @@ class FakeAgentOS:
             return httpx.Response(200, json=payload)
 
         if path == "/config":
-            if self.auth_mode == "none" or self.open_rest:
+            if self.auth_mode == "none":
                 return httpx.Response(200, json={"os_id": "fake"})
             if self._bearer(request) == self.security_key:
                 return httpx.Response(200, json={"os_id": "fake"})
@@ -138,9 +139,10 @@ class FakeAgentOS:
             return httpx.Response(401, json={"detail": detail})
 
         if path == "/service-accounts" and method == "POST":
-            # With no auth middleware, no caller is ever "authenticated", so the real
-            # server's anonymous-mint gate refuses every mint regardless of the bearer.
-            if self.open_rest:
+            # An open REST plane ("none") installs no auth middleware, so no caller is
+            # ever "authenticated" and the real server's anonymous-mint gate refuses
+            # every mint regardless of the bearer.
+            if self.auth_mode == "none":
                 return httpx.Response(401, json={"detail": "JWT authentication is required to mint a service account."})
             if not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
@@ -177,7 +179,7 @@ class FakeAgentOS:
             return httpx.Response(201, json=self._account_response(account, include_token=True))
 
         if path == "/service-accounts" and method == "GET":
-            if not self.open_rest and not self._is_admin(request):
+            if not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             data = [self._account_response(a) for a in self.accounts.values()]
             return httpx.Response(
@@ -186,7 +188,7 @@ class FakeAgentOS:
             )
 
         if path.startswith("/service-accounts/") and method == "DELETE":
-            if not self.open_rest and not self._is_admin(request):
+            if not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             account_id = path.rsplit("/", 1)[1]
             for account in self.accounts.values():
@@ -198,20 +200,22 @@ class FakeAgentOS:
         if path == "/mcp":
             if not self.mcp_enabled:
                 return httpx.Response(404, json={"detail": "Not Found"})
-            if self.mcp_requires_token and self.auth_mode != "none":
+            if self.oauth is not None:
+                # OAuth-protected /mcp: fastmcp's middleware guards it regardless of the
+                # REST plane -- 401 + the RFC 9728 challenge for anything but a minted
+                # PAT (which the real server accepts via MultiAuth).
+                if self._bearer(request) not in self.active_tokens():
+                    return httpx.Response(
+                        401,
+                        json={"detail": "Unauthorized"},
+                        headers={
+                            "WWW-Authenticate": "Bearer resource_metadata="
+                            '"http://localhost:7777/.well-known/oauth-protected-resource/mcp"'
+                        },
+                    )
+            elif self.mcp_requires_token and self.auth_mode != "none":
                 token = self._bearer(request)
                 if token != self.security_key and token not in self.active_tokens():
-                    # An OAuth-protected /mcp answers with the RFC 9728 challenge (via
-                    # fastmcp's RequireAuthMiddleware); PATs still pass (MultiAuth).
-                    if self.auth_mode == "oauth":
-                        return httpx.Response(
-                            401,
-                            json={"detail": "Unauthorized"},
-                            headers={
-                                "WWW-Authenticate": "Bearer resource_metadata="
-                                '"http://localhost:7777/.well-known/oauth-protected-resource/mcp"'
-                            },
-                        )
                     return httpx.Response(401, json={"detail": "Invalid authentication token"})
             message = json.loads(request.content) if request.content else {}
             rpc_method = message.get("method")

@@ -189,7 +189,7 @@ def test_create_on_oauth_only_os_fails_naming_the_server_gap(monkeypatch, fake_o
     must fail before resolving a credential, naming what the server is missing."""
     from tests.conftest import FakeAgentOS, install_fake
 
-    fake = FakeAgentOS(auth_mode="oauth", open_rest=True)
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
 
