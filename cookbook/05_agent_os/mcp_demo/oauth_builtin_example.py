@@ -50,7 +50,7 @@ agent_os = AgentOS(
     description="Example app with OAuth on the MCP endpoint",
     agents=[web_research_agent],
     db=db,
-    enable_mcp_server=True,
+    mcp_server=True,
     mcp_auth=mcp_auth,
 )
 

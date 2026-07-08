@@ -83,10 +83,9 @@ def _oauth_os(provider=None, db=None, security_key=None, **config_kwargs) -> Age
     return AgentOS(
         agents=[_agent()],
         db=db,
-        enable_mcp_server=True,
         mcp_auth=provider or _oauth_provider(),
         settings=AgnoAPISettings(os_security_key=security_key),
-        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False, **config_kwargs),
+        mcp_server=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False, **config_kwargs),
     )
 
 
@@ -174,8 +173,8 @@ async def _obtain_oauth_token(client: httpx.AsyncClient, scope: str = "agents:ru
 # ==================== Constructor validation ====================
 
 
-def test_mcp_auth_requires_enable_mcp_server():
-    with pytest.raises(ValueError, match="enable_mcp_server=True"):
+def test_mcp_auth_requires_mcp_server():
+    with pytest.raises(ValueError, match="mcp_server=True"):
         AgentOS(agents=[_agent()], mcp_auth=_oauth_provider())
 
 
@@ -186,20 +185,20 @@ def test_mcp_auth_builtin_requires_postgres(monkeypatch):
 
     monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
     monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
+    os = AgentOS(agents=[_agent()], mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
     with pytest.raises(ValueError, match="Postgres"):
         os.get_app()
 
 
 def test_mcp_auth_string_rejected_with_hint():
     """The string form is gone: mcp_auth takes an object, and the error points at it."""
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="builtin")
+    os = AgentOS(agents=[_agent()], mcp_server=True, mcp_auth="builtin")
     with pytest.raises(TypeError, match="AgentOSBuiltinAuth"):
         os.get_app()
 
 
 def test_mcp_auth_rejects_non_provider():
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=object())
+    os = AgentOS(agents=[_agent()], mcp_server=True, mcp_auth=object())
     with pytest.raises(TypeError, match="AuthProvider"):
         os.get_app()
 
@@ -401,11 +400,10 @@ def _jwt_os(**os_kwargs) -> AgentOS:
 
     return AgentOS(
         agents=[_agent()],
-        enable_mcp_server=True,
         mcp_auth=_oauth_provider(),
         authorization=True,
         authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
-        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+        mcp_server=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
         **os_kwargs,
     )
 
@@ -427,11 +425,10 @@ async def test_jwt_bearer_still_works_with_mcp_auth():
 
     os = AgentOS(
         agents=[_agent()],
-        enable_mcp_server=True,
         mcp_auth=_oauth_provider(),
         authorization=True,
         authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
-        mcp_config=MCPServerConfig(
+        mcp_server=MCPServerConfig(
             tools=[_ok_tool], enable_builtin_tools=False, middleware=[Middleware(_CaptureState)]
         ),
     )
@@ -466,13 +463,12 @@ async def test_jwt_audience_falls_back_to_agent_os_id():
     os = AgentOS(
         id="mcp-audience-os",
         agents=[_agent()],
-        enable_mcp_server=True,
         mcp_auth=_oauth_provider(),
         authorization=True,
         authorization_config=AuthorizationConfig(
             verification_keys=["test-jwt-secret"], algorithm="HS256", verify_audience=True
         ),
-        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+        mcp_server=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
     )
     async with _http_client(os) as client:
         matching = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(aud="mcp-audience-os")))
@@ -605,7 +601,7 @@ async def test_rbac_off_jwt_bearer_runs_tools_under_mcp_auth(tmp_path):
     os = AgentOS(
         agents=[_agent()],
         db=db,
-        enable_mcp_server=True,
+        mcp_server=True,
         mcp_auth=_oauth_provider(),
         authorization=False,
         authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
@@ -819,8 +815,7 @@ async def test_pat_verifier_returns_none_on_failed_verification():
 def test_without_mcp_auth_nothing_is_attached():
     os = AgentOS(
         agents=[_agent()],
-        enable_mcp_server=True,
-        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+        mcp_server=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
     )
     assert os._get_mcp_auth_provider() is None
     mcp_app = get_mcp_server(os)
