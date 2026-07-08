@@ -281,6 +281,8 @@ def get_info_router(os: "AgentOS") -> APIRouter:
     async def get_info(request: Request) -> InfoResponse:
         mcp_enabled = bool(os.enable_mcp_server)
         return InfoResponse(
+            os_id=os.id or "Unnamed OS",
+            name=os.name,
             agno_version=agno_version,
             agent_count=len(os.agents or []),
             team_count=len(os.teams or []),

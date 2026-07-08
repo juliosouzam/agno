@@ -25,6 +25,8 @@ class FakeAgentOS:
         mcp_requires_token: bool = True,
         sse_responses: bool = False,
         agno_version: str = "2.7.0",
+        name: Optional[str] = None,
+        os_id: Optional[str] = None,
     ):
         self.auth_mode = auth_mode
         self.security_key = security_key
@@ -33,6 +35,8 @@ class FakeAgentOS:
         self.mcp_requires_token = mcp_requires_token
         self.sse_responses = sse_responses
         self.agno_version = agno_version
+        self.name = name
+        self.os_id = os_id
 
         self.accounts: Dict[str, Dict[str, Any]] = {}  # name -> account dict (with plaintext token)
         self.create_calls = 0
@@ -99,6 +103,10 @@ class FakeAgentOS:
             if self.info_discovery:
                 payload["mcp"] = {"enabled": self.mcp_enabled, "path": "/mcp" if self.mcp_enabled else None}
                 payload["auth_mode"] = self.auth_mode
+                if self.name is not None:
+                    payload["name"] = self.name
+                if self.os_id is not None:
+                    payload["os_id"] = self.os_id
             return httpx.Response(200, json=payload)
 
         if path == "/config":
@@ -215,6 +223,42 @@ def fake_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeAgentOS:
     install_fake(monkeypatch, fake)
     monkeypatch.chdir(tmp_path)
     return fake
+
+
+@pytest.fixture
+def fake_clients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Claude Code, Codex, and Cursor 'installed' under a tmp home, wired into every
+    command that builds adapters -- so no test can ever touch the developer's real
+    client configs."""
+    from agnoctl.clients.claude_code import ClaudeCodeAdapter
+    from agnoctl.clients.codex import CodexAdapter
+    from agnoctl.clients.cursor import CursorAdapter
+
+    (tmp_path / ".claude.json").write_text("{}")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".cursor").mkdir()
+
+    def build(home=None, cwd=None, project=False):
+        return {
+            "claude-code": ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None),
+            "codex": CodexAdapter(home=tmp_path),
+            "cursor": CursorAdapter(home=tmp_path, cwd=tmp_path, project=project),
+        }
+
+    import agnoctl.commands.connect as connect_module
+    import agnoctl.commands.disconnect as disconnect_module
+
+    monkeypatch.setattr(connect_module, "build_adapters", build)
+    monkeypatch.setattr(disconnect_module, "build_adapters", build)
+    return tmp_path
+
+
+def all_output(result) -> str:
+    """A CliRunner result's stdout plus stderr, whichever way this click version captures them."""
+    try:
+        return result.output + result.stderr
+    except (ValueError, AttributeError):
+        return result.output
 
 
 def install_fake(monkeypatch: pytest.MonkeyPatch, fake: FakeAgentOS) -> None:

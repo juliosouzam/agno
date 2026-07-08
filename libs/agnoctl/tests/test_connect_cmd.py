@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -13,29 +14,12 @@ from agnoctl.clients.cursor import CursorAdapter
 from agnoctl.errors import CLIError
 from agnoctl.main import app
 from tests.conftest import FakeAgentOS, install_fake
+from tests.conftest import all_output as _all_output
 
 runner = CliRunner()
 
 URL_ARGS = ["--url", "http://localhost:7777"]
 MCP_URL = "http://localhost:7777/mcp"
-
-
-@pytest.fixture
-def fake_clients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """All three clients 'installed' under a tmp home, wired into the connect command."""
-    (tmp_path / ".claude.json").write_text("{}")
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".cursor").mkdir()
-
-    def build(home=None, cwd=None, project=False):
-        return {
-            "claude-code": ClaudeCodeAdapter(home=tmp_path, cwd=tmp_path, which=lambda name: None),
-            "codex": CodexAdapter(home=tmp_path),
-            "cursor": CursorAdapter(home=tmp_path, cwd=tmp_path, project=project),
-        }
-
-    monkeypatch.setattr(connect_module, "build_adapters", build)
-    return tmp_path
 
 
 @pytest.fixture
@@ -72,11 +56,12 @@ def test_connect_happy_path(monkeypatch, fake_os, fake_clients):
     for account in fake_os.accounts.values():
         assert account["token"] not in result.output
 
-    # Tokens landed in the client configs (Claude user scope = ~/.claude.json).
+    # Tokens landed in the client configs (Claude user scope = ~/.claude.json), under
+    # the derived default entry name (the fake OS serves no name -> "agentos").
     claude_config = json.loads((fake_clients / ".claude.json").read_text())
-    assert claude_config["mcpServers"]["agno"]["url"] == MCP_URL
+    assert claude_config["mcpServers"]["agentos"]["url"] == MCP_URL
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
-    token = cursor_config["mcpServers"]["agno"]["headers"]["Authorization"]
+    token = cursor_config["mcpServers"]["agentos"]["headers"]["Authorization"]
     assert token == "Bearer " + fake_os.accounts["cursor"]["token"]
 
 
@@ -119,7 +104,7 @@ def test_connect_rotate_replaces_accounts(monkeypatch, fake_os, fake_clients):
     assert new_token != old_token
 
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
-    assert cursor_config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer " + new_token
+    assert cursor_config["mcpServers"]["agentos"]["headers"]["Authorization"] == "Bearer " + new_token
 
 
 def test_connect_rotate_flags_rotated_in_json(monkeypatch, fake_os, fake_clients):
@@ -171,7 +156,7 @@ def test_connect_no_auth_mode(monkeypatch, fake_clients):
     assert all(r["status"] == "connected" for r in payload["results"])
     assert fake.create_calls == 0
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
-    assert "headers" not in cursor_config["mcpServers"]["agno"]
+    assert "headers" not in cursor_config["mcpServers"]["agentos"]
 
 
 def test_connect_mcp_disabled(monkeypatch, fake_clients):
@@ -271,7 +256,9 @@ def test_connect_skip_existing_leaves_broken_entry(monkeypatch, fake_os, fake_cl
 def test_connect_skip_existing_never_touches_foreign_entry(monkeypatch, fake_os, fake_clients):
     """An entry pointing at a DIFFERENT AgentOS is untouchable under --skip-existing."""
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
-    foreign = {"mcpServers": {"agno": {"url": "http://other-os:9999/mcp", "headers": {"Authorization": "Bearer keep"}}}}
+    foreign = {
+        "mcpServers": {"agentos": {"url": "http://other-os:9999/mcp", "headers": {"Authorization": "Bearer keep"}}}
+    }
     (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(foreign))
 
     result = _connect(["--clients", "cursor", "--skip-existing"])
@@ -279,14 +266,14 @@ def test_connect_skip_existing_never_touches_foreign_entry(monkeypatch, fake_os,
     assert payload["results"][0]["status"] == "skipped"
     assert "other-os" in payload["results"][0]["error"]
     config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
-    assert config["mcpServers"]["agno"]["url"] == "http://other-os:9999/mcp"
-    assert config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer keep"
+    assert config["mcpServers"]["agentos"]["url"] == "http://other-os:9999/mcp"
+    assert config["mcpServers"]["agentos"]["headers"]["Authorization"] == "Bearer keep"
     assert fake_os.create_calls == 0
 
 
 def test_connect_replacing_foreign_entry_is_reported(monkeypatch, fake_os, fake_clients):
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
-    foreign = {"mcpServers": {"agno": {"url": "http://other-os:9999/mcp"}}}
+    foreign = {"mcpServers": {"agentos": {"url": "http://other-os:9999/mcp"}}}
     (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(foreign))
 
     result = _connect(["--clients", "cursor"])
@@ -314,7 +301,7 @@ def test_connect_detects_shadowing_claude_local_entry(monkeypatch, fake_os, fake
     """A stale local-scope entry shadows the user-scope write; connect must fail loudly, not lie."""
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
     (fake_clients / ".claude.json").write_text(
-        json.dumps({"projects": {str(fake_clients): {"mcpServers": {"agno": {"url": "http://stale:1/mcp"}}}}})
+        json.dumps({"projects": {str(fake_clients): {"mcpServers": {"agentos": {"url": "http://stale:1/mcp"}}}}})
     )
 
     result = _connect(["--clients", "claude-code", "--rotate"])
@@ -494,7 +481,7 @@ def test_connect_shared_account_reuses_token_for_new_client(monkeypatch, fake_os
     assert fake_os.create_calls == 1
 
     claude_config = json.loads((fake_clients / ".claude.json").read_text())
-    shared_token = claude_config["mcpServers"]["agno"]["headers"]["Authorization"].split(" ", 1)[1]
+    shared_token = claude_config["mcpServers"]["agentos"]["headers"]["Authorization"].split(" ", 1)[1]
 
     # A new client appears after the first run: cursor has no entry yet.
     (fake_clients / ".cursor" / "mcp.json").unlink(missing_ok=True)
@@ -510,4 +497,234 @@ def test_connect_shared_account_reuses_token_for_new_client(monkeypatch, fake_os
     assert fake_os.create_calls == 1
     assert fake_os.active_tokens() == [shared_token]
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
-    assert cursor_config["mcpServers"]["agno"]["headers"]["Authorization"] == "Bearer " + shared_token
+    assert cursor_config["mcpServers"]["agentos"]["headers"]["Authorization"] == "Bearer " + shared_token
+
+
+# -- multi-target selection, derived names, restart hints, legacy migration ------------
+
+
+def _install_two_hosts(monkeypatch, tmp_path):
+    """A deployed OS (env-file URL) and a local one, both live: the reported scenario."""
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    remote = FakeAgentOS(auth_mode="none", name="Live Railway")
+    local = FakeAgentOS(auth_mode="none", name="Local Dev")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.url.host + ":" + str(request.url.port)
+        if key == "prodhost:9000":
+            return remote.handler(request)
+        if key == "localhost:7777":
+            return local.handler(request)
+        raise httpx.ConnectError("connection refused", request=request)
+
+    import agnoctl.http as http_module
+
+    monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
+    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGENTOS_URL"):
+        monkeypatch.delenv(var, raising=False)
+    return remote, local
+
+
+def _make_interactive(monkeypatch):
+    import agnoctl.commands._common as common
+
+    monkeypatch.setattr(common, "stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(connect_module, "stdin_is_interactive", lambda: True)
+
+
+def test_connect_menu_pick_local_skips_trust_prompt(monkeypatch, tmp_path, fake_clients):
+    """Selecting the local OS from the menu connects silently: no env-file trust prompt."""
+    _install_two_hosts(monkeypatch, tmp_path)
+    _make_interactive(monkeypatch)
+
+    result = runner.invoke(app, ["connect", "--clients", "cursor"], input="2\n")
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "Which one do you want to connect?" in out
+    assert "Trust AGENTOS_URL" not in out
+
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["local-dev"]["url"] == MCP_URL
+
+
+def test_connect_menu_default_is_remote_and_trust_defaults_yes(monkeypatch, tmp_path, fake_clients):
+    """Enter-Enter targets the env-file (deployed) OS: the menu defaults to it, and the
+    trust prompt accepts on Enter ([Y/n])."""
+    _install_two_hosts(monkeypatch, tmp_path)
+    _make_interactive(monkeypatch)
+
+    result = runner.invoke(app, ["connect", "--clients", "cursor"], input="\n\n")
+    assert result.exit_code == 0, _all_output(result)
+    assert "Trust AGENTOS_URL=http://prodhost:9000" in _all_output(result)
+
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["live-railway"]["url"] == "http://prodhost:9000/mcp"
+
+
+def test_connect_menu_explicit_no_still_aborts_trust(monkeypatch, tmp_path, fake_clients):
+    _install_two_hosts(monkeypatch, tmp_path)
+    _make_interactive(monkeypatch)
+
+    result = runner.invoke(app, ["connect", "--clients", "cursor"], input="1\nn\n")
+    assert result.exit_code != 0
+    assert "did not trust" in _all_output(result)
+
+
+def test_connect_json_multi_candidate_is_deterministic(monkeypatch, tmp_path, fake_clients):
+    """--json never prompts: the single highest-priority (env-file) target is resolved,
+    and the remote env-file trust gate still requires --yes -- no automation regression."""
+    _install_two_hosts(monkeypatch, tmp_path)
+
+    refused = runner.invoke(app, ["connect", "--json", "--clients", "cursor"])
+    assert refused.exit_code == 1
+    assert "--yes" in json.loads(refused.output)["hint"]
+
+    result = runner.invoke(app, ["connect", "--json", "--clients", "cursor", "--yes"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["os"]["url"] == "http://prodhost:9000"
+    assert payload["server_name"] == "live-railway"
+
+
+def test_connect_json_dead_env_file_target_stays_a_hard_failure(monkeypatch, tmp_path, fake_clients):
+    """Automation must never be silently retargeted: with the env-file OS down and a
+    local OS up, --json fails like single-target discovery always has, instead of
+    minting against whatever else happens to be running."""
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    local = FakeAgentOS(auth_mode="none")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host + ":" + str(request.url.port) == "localhost:7777":
+            return local.handler(request)
+        raise httpx.ConnectError("connection refused", request=request)
+
+    import agnoctl.http as http_module
+
+    monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
+    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGENTOS_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = runner.invoke(app, ["connect", "--json", "--clients", "cursor", "--yes"])
+    assert result.exit_code == 1
+    assert "No running AgentOS" in json.loads(result.output)["error"]
+    cursor_config = (
+        json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+        if (fake_clients / ".cursor" / "mcp.json").exists()
+        else {"mcpServers": {}}
+    )
+    assert cursor_config.get("mcpServers", {}) == {}
+
+
+def test_connect_interactive_notes_dead_env_file_url(monkeypatch, tmp_path, fake_clients):
+    """Interactively, a dead env-file OS falls through to the local one -- with a note,
+    so the stale AGENTOS_URL does not go unnoticed forever."""
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    local = FakeAgentOS(auth_mode="none", name="Local Dev")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host + ":" + str(request.url.port) == "localhost:7777":
+            return local.handler(request)
+        raise httpx.ConnectError("connection refused", request=request)
+
+    import agnoctl.http as http_module
+
+    monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
+    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGENTOS_URL"):
+        monkeypatch.delenv(var, raising=False)
+    _make_interactive(monkeypatch)
+
+    result = runner.invoke(app, ["connect", "--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "did not answer" in out
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["local-dev"]["url"] == MCP_URL
+
+
+def test_connect_custom_scopes_skip_legacy_token_reuse(monkeypatch, fake_os, fake_clients):
+    """Explicit --scopes means the operator wants a freshly provisioned account, so the
+    legacy entry's old (differently scoped) token is not silently reused."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    assert _connect(["--server-name", "agno", "--clients", "cursor"]).exit_code == 0
+
+    result = _connect(["--clients", "cursor", "--scopes", "agents:run"])
+    assert result.exit_code == 1
+    assert "already exists" in (json.loads(result.output)["results"][0]["error"] or "")
+
+
+def test_connect_derives_server_name_from_os_name(monkeypatch, fake_clients):
+    fake = FakeAgentOS(name="Customer Support", os_id="os-123")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["server_name"] == "customer-support"
+    assert payload["os"]["name"] == "Customer Support"
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert "customer-support" in cursor_config["mcpServers"]
+
+
+def test_connect_server_name_flag_overrides_derived(monkeypatch, fake_clients):
+    fake = FakeAgentOS(name="Customer Support")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+
+    result = _connect(["--clients", "cursor", "--server-name", "custom"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["server_name"] == "custom"
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert "custom" in cursor_config["mcpServers"]
+    assert "customer-support" not in cursor_config["mcpServers"]
+
+
+def test_connect_fresh_connect_prints_restart_hint(monkeypatch, fake_os, fake_clients):
+    """A fresh connect (not just a rotation) tells the operator to restart the apps."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    result = runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "Restart" in out
+    assert "Cursor" in out
+
+
+def test_connect_renames_legacy_agno_entry(monkeypatch, fake_os, fake_clients):
+    """Round-1 configs hold an entry named "agno". A re-connect under the derived name
+    must rename it in place: reuse its working token (no re-mint, no revocation) and
+    drop the stale "agno" entry instead of leaving two servers behind."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    assert _connect(["--server-name", "agno"]).exit_code == 0
+    creates_after_round1 = fake_os.create_calls
+    old_tokens = set(fake_os.active_tokens())
+
+    result = _connect()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert all(r["status"] == "connected" for r in payload["results"])
+    assert all(r.get("replaced_legacy") == "agno" for r in payload["results"])
+
+    # Tokens were reused, not re-minted: no new accounts, nothing revoked.
+    assert fake_os.create_calls == creates_after_round1
+    assert set(fake_os.active_tokens()) == old_tokens
+
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert "agno" not in cursor_config["mcpServers"]
+    assert cursor_config["mcpServers"]["agentos"]["url"] == MCP_URL
+
+
+def test_connect_leaves_foreign_agno_entry_alone(monkeypatch, fake_os, fake_clients):
+    """An "agno" entry pointing at a DIFFERENT OS is not ours to clean up."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    foreign = {"mcpServers": {"agno": {"url": "http://other-os:9999/mcp"}}}
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(foreign))
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0].get("replaced_legacy") is None
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["agno"]["url"] == "http://other-os:9999/mcp"
+    assert cursor_config["mcpServers"]["agentos"]["url"] == MCP_URL

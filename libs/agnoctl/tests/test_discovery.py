@@ -3,9 +3,25 @@
 import httpx
 import pytest
 
-from agnoctl.discovery import _agentos_url_from_env_files, _read_env_value, discover
+from agnoctl.discovery import _agentos_url_from_env_files, _read_env_value, discover, discover_all
 from agnoctl.errors import CLIError
 from tests.conftest import FakeAgentOS, install_fake
+
+
+def _install_hosts(monkeypatch, live):
+    """Transport where only 'host:port' keys in `live` answer (with that fake AgentOS);
+    every other URL is connection-refused, like a dead localhost port."""
+    import agnoctl.http as http_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fake = live.get(request.url.host + ":" + str(request.url.port))
+        if fake is None:
+            raise httpx.ConnectError("connection refused", request=request)
+        return fake.handler(request)
+
+    monkeypatch.setattr(http_module, "_transport_override", httpx.MockTransport(handler))
+    for var in ("AGNO_ADMIN_TOKEN", "OS_SECURITY_KEY", "AGENTOS_URL"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_discover_via_info_fields(fake_os):
@@ -199,3 +215,106 @@ def test_discover_invalid_env_file_url_raises_clean_error(monkeypatch, tmp_path)
     with pytest.raises(CLIError) as exc_info:
         discover(None)
     assert "Invalid AgentOS URL" in exc_info.value.message
+
+
+# -- discover_all ------------------------------------------------------------------------
+
+
+def test_discover_all_unions_env_file_and_localhost(monkeypatch, tmp_path):
+    """A deploy's env-file URL must not mask a locally running OS: both are returned,
+    env-file first (it is the default the selection menu offers)."""
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(
+        monkeypatch,
+        {"prodhost:9000": FakeAgentOS(name="Live Railway"), "localhost:7777": FakeAgentOS()},
+    )
+    found = discover_all(None)
+    assert [i.base_url for i in found] == ["http://prodhost:9000", "http://localhost:7777"]
+    assert found[0].url_source == "env-file"
+    assert found[0].url_source_file == ".env.production"
+    assert found[0].name == "Live Railway"
+    assert found[1].url_source == "default"
+
+
+def test_discover_all_only_local_when_env_file_target_is_down(monkeypatch, tmp_path):
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(monkeypatch, {"localhost:7777": FakeAgentOS()})
+    found = discover_all(None)
+    assert [i.base_url for i in found] == ["http://localhost:7777"]
+
+
+def test_discover_all_explicit_url_is_single_target(monkeypatch, tmp_path):
+    """--url is authoritative: no localhost probing behind the operator's back."""
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(monkeypatch, {"flaghost:9000": FakeAgentOS(), "localhost:7777": FakeAgentOS()})
+    found = discover_all("http://flaghost:9000")
+    assert [i.base_url for i in found] == ["http://flaghost:9000"]
+    assert found[0].url_source == "flag"
+
+
+def test_discover_all_exported_env_var_is_single_target(monkeypatch, tmp_path):
+    """An exported AGENTOS_URL is deliberate (not ambient): it stays a single target."""
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(monkeypatch, {"envhost:9000": FakeAgentOS(), "localhost:7777": FakeAgentOS()})
+    monkeypatch.setenv("AGENTOS_URL", "http://envhost:9000")
+    found = discover_all(None)
+    assert [i.base_url for i in found] == ["http://envhost:9000"]
+    assert found[0].url_source == "env"
+
+
+def test_discover_all_env_file_url_equal_to_default_is_deduped(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text("AGENTOS_URL=http://localhost:7777\n")
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(monkeypatch, {"localhost:7777": FakeAgentOS()})
+    found = discover_all(None)
+    assert [i.base_url for i in found] == ["http://localhost:7777"]
+    assert found[0].url_source == "env-file"
+
+
+def test_discover_all_none_alive_raises(monkeypatch, tmp_path):
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://prodhost:9000\n")
+    monkeypatch.chdir(tmp_path)
+    _install_hosts(monkeypatch, {})
+    with pytest.raises(CLIError) as exc_info:
+        discover_all(None)
+    assert "No running AgentOS" in exc_info.value.message
+    assert "http://prodhost:9000" in exc_info.value.message
+
+
+def test_discover_invalid_env_file_url_raises_in_discover_all(monkeypatch, tmp_path):
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=http://host:${PORT}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTOS_URL", raising=False)
+    with pytest.raises(CLIError) as exc_info:
+        discover_all(None)
+    assert "Invalid AgentOS URL" in exc_info.value.message
+
+
+def test_discover_populates_name_and_os_id(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    fake = FakeAgentOS(name="Customer Support", os_id="os-123")
+    install_fake(monkeypatch, fake)
+    info = discover("http://localhost:7777")
+    assert info.name == "Customer Support"
+    assert info.os_id == "os-123"
+
+
+def test_discover_name_absent_on_older_servers(monkeypatch, tmp_path, fake_os):
+    """agno <= 2.7 serves no name/os_id on /info: the fields stay None (callers fall back)."""
+    info = discover("http://localhost:7777")
+    assert info.name is None
+    assert info.os_id is None
+
+
+def test_discover_all_dedupes_loopback_aliases(monkeypatch, tmp_path):
+    """AGENTOS_URL=http://127.0.0.1:7777 (the spelling uvicorn logs) and the
+    localhost:7777 default are the same server: one candidate, not a two-entry menu."""
+    (tmp_path / ".env").write_text("AGENTOS_URL=http://127.0.0.1:7777\n")
+    monkeypatch.chdir(tmp_path)
+    fake = FakeAgentOS()
+    _install_hosts(monkeypatch, {"127.0.0.1:7777": fake, "localhost:7777": fake})
+    found = discover_all(None)
+    assert [i.base_url for i in found] == ["http://127.0.0.1:7777"]
+    assert found[0].url_source == "env-file"

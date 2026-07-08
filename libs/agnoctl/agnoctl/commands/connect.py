@@ -12,21 +12,31 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 import typer
+from rich.status import Status
 
-from agnoctl.clients import CLIENT_ALIASES, build_adapters
+from agnoctl.clients import CLIENT_ALIASES, build_adapters, display_name
 from agnoctl.clients.base import ClientAdapter
 from agnoctl.commands._common import (
+    LEGACY_SERVER_NAME,
     _is_loopback_host,
+    derive_server_name,
     ensure_env_file_url_trusted,
     handle_cli_error,
     parse_expires,
     require_secure_url,
     resolve_admin_token,
+    stdin_is_interactive,
     validate_server_name,
 )
-from agnoctl.console import emit_json, print_error, print_info, print_success, print_warning
-from agnoctl.discovery import MCP_ENABLE_INSTRUCTIONS, OSInfo, discover
-from agnoctl.errors import CLIError, ConflictError
+from agnoctl.console import console, emit_json, print_error, print_info, print_success, print_warning
+from agnoctl.discovery import (
+    MCP_ENABLE_INSTRUCTIONS,
+    OSInfo,
+    _agentos_url_from_env_files,
+    discover,
+    discover_all,
+)
+from agnoctl.errors import APIError, CLIError, ConflictError
 from agnoctl.http import AgentOSAPI, ServiceAccount
 from agnoctl.mcp_client import verify_mcp
 
@@ -35,6 +45,24 @@ from agnoctl.mcp_client import verify_mcp
 EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_PARTIAL = 3
+
+DEFAULT_EXPIRES = "90d"
+
+
+def exit_code_for(results: List[Dict[str, Any]], ok_statuses: "tuple[str, ...]") -> int:
+    """0 = every result ok, 1 = every real result failed, 3 = mixed. "manual" rows
+    (chat-app instructions) count as ok but can neither rescue nor mask the real
+    adapters' outcomes: when every real adapter failed, appended manual entries must
+    not soften total failure into partial."""
+    ok_count = sum(1 for r in results if r["status"] in ok_statuses)
+    real_results = [r for r in results if r["status"] != "manual"]
+    real_ok = sum(1 for r in real_results if r["status"] in ok_statuses)
+    if ok_count == len(results):
+        return EXIT_OK
+    if real_results and real_ok == 0:
+        return EXIT_FAILURE
+    return EXIT_PARTIAL
+
 
 ROTATE_HINT = "Re-run with --rotate to revoke and re-mint it, or --skip-existing to leave it untouched."
 
@@ -163,10 +191,12 @@ def _mint(
     rotate: bool,
     skip_existing: bool,
     json_mode: bool,
+    status: Optional["Status"] = None,
 ) -> Optional[ServiceAccount]:
     """Mint a service account, resolving name conflicts per the idempotency policy.
 
     Returns None when the caller should skip this client (existing account kept).
+    A live progress spinner is paused around the conflict prompt so it can be read.
     """
     try:
         return api.create_service_account(
@@ -184,9 +214,14 @@ def _mint(
             if not interactive:
                 e.hint = ROTATE_HINT
                 raise
-            if not typer.confirm(
+            if status is not None:
+                status.stop()
+            confirmed = typer.confirm(
                 "Service account '" + account_name + "' already exists. Revoke and re-mint it?", default=False
-            ):
+            )
+            if status is not None:
+                status.start()
+            if not confirmed:
                 return None
         existing = api.find_service_account(account_name)
         if existing is not None:
@@ -219,11 +254,15 @@ def connect(
     scopes: List[str] = typer.Option(
         [], "--scopes", "-s", help="Scope to grant (repeatable). Default: the server's run + read scopes."
     ),
-    expires: str = typer.Option("90d", "--expires", help="Token lifetime in days ('90d', '30') or 'never'."),
+    expires: str = typer.Option(DEFAULT_EXPIRES, "--expires", help="Token lifetime in days ('90d', '30') or 'never'."),
     privileged: bool = typer.Option(
         False, "--privileged", help="Required when --scopes grants write/delete/admin or service_accounts scopes."
     ),
-    server_name: str = typer.Option("agno", "--server-name", help="MCP server entry name written to client configs."),
+    server_name: Optional[str] = typer.Option(
+        None,
+        "--server-name",
+        help="MCP server entry name written to client configs. Default: derived from the AgentOS name.",
+    ),
     project: bool = typer.Option(
         False, "--project", help="Write project-scoped configs (.mcp.json / .cursor/mcp.json) instead of user-level."
     ),
@@ -267,7 +306,7 @@ def _connect(
     scopes: Optional[List[str]],
     expires: str,
     privileged: bool,
-    server_name: str,
+    server_name: Optional[str],
     project: bool,
     rotate: bool,
     skip_existing: bool,
@@ -275,10 +314,23 @@ def _connect(
     assume_yes: bool,
     json_mode: bool,
 ) -> None:
-    validate_server_name(server_name)
+    if server_name is not None:
+        validate_server_name(server_name)
     expires_in_days, never_expires = parse_expires(expires)
 
-    os_info = discover(url)
+    # Interactive runs may choose among every live AgentOS; non-interactive runs
+    # (--json / no TTY) resolve the single highest-priority target, so automation is
+    # deterministic and a dead env-file OS is a hard failure, never a silent retarget.
+    interactive = not json_mode and stdin_is_interactive()
+    if interactive:
+        candidates = discover_all(url)
+        os_info = _select_os(candidates, verb="connect")
+        if url is None and not any(c.url_source == "env-file" for c in candidates):
+            file_url, file_name = _agentos_url_from_env_files()
+            if file_url:
+                print_warning("Note: AGENTOS_URL in " + str(file_name) + " (" + file_url + ") did not answer.")
+    else:
+        os_info = discover(url)
     # Before anything sensitive (minting, config writes), confirm an off-machine URL that
     # came from an ambient .env file -- it could be redirecting us from an untrusted dir.
     ensure_env_file_url_trusted(
@@ -291,10 +343,21 @@ def _connect(
             + ", but its MCP server is not enabled.\n\n"
             + MCP_ENABLE_INSTRUCTIONS
         )
+    # The entry name carries the OS's identity (its /info name) unless the operator chose
+    # one. legacy_name marks runs where entries named "agno" (agnoctl 0.1.x) that point at
+    # this OS get renamed in place; their token is reused only for a default mint (custom
+    # --scopes/--expires means the operator wants a freshly provisioned account).
+    legacy_name: Optional[str] = None
+    if server_name is None:
+        server_name = derive_server_name(os_info.name)
+        if server_name != LEGACY_SERVER_NAME and not skip_existing:
+            legacy_name = LEGACY_SERVER_NAME
+    legacy_token_reuse = scopes is None and expires == DEFAULT_EXPIRES
     if not json_mode:
         version = " (agno " + os_info.version + ")" if os_info.version else ""
         source = os_info.source_note()
-        print_info("AgentOS at " + os_info.base_url + version + source + ", MCP at " + os_info.mcp_url)
+        os_label = '"' + os_info.name + '" ' if os_info.name else ""
+        print_info("AgentOS " + os_label + "at " + os_info.base_url + version + source + ", MCP at " + os_info.mcp_url)
 
     adapters = build_adapters(project=project)
     clients_remaining, wanted_apps = _split_chat_apps(clients)
@@ -337,6 +400,20 @@ def _connect(
     results: List[Dict[str, Any]] = []
 
     try:
+        # Fail a bad credential fast: one cheap authed call before any minting or config
+        # writes, so a rejected paste surfaces immediately instead of reading like a
+        # hang. Human path only -- in --json the per-client results carry the failure.
+        if api is not None and not json_mode:
+            try:
+                with console.status("Checking the admin credential..."):
+                    api.check_admin_credential()
+                print_success("Credential accepted.")
+            except APIError as e:
+                # 403 means authenticated but not granted service_accounts:read; the
+                # mint itself needs only service_accounts:write, so keep going.
+                if e.status_code != 403:
+                    raise
+
         # Shared-account mode: resolve the token once, before any config is touched --
         # clients then only write configs, and none of them can hit a name conflict
         # that would re-mint (and revoke) the shared token mid-run.
@@ -358,7 +435,10 @@ def _connect(
             )
         for adapter in selected:
             result: Dict[str, Any] = {"client": adapter.key, "status": "failed", "error": None}
+            status = None if json_mode else console.status("Connecting " + display_name(adapter.key) + "...")
             try:
+                if status is not None:
+                    status.start()
                 _connect_one(
                     adapter=adapter,
                     result=result,
@@ -375,11 +455,17 @@ def _connect(
                     json_mode=json_mode,
                     minting=minting,
                     shared_token=shared_token,
+                    legacy_name=legacy_name,
+                    legacy_token_reuse=legacy_token_reuse,
+                    status=status,
                 )
             except CLIError as e:
-                result["error"] = e.message + ((" " + e.hint) if e.hint else "")
+                result["error"] = e.full_message
             except Exception as e:  # one client's failure must never abort the run
                 result["error"] = "Unexpected error (" + type(e).__name__ + "): " + str(e)
+            finally:
+                if status is not None:
+                    status.stop()
             results.append(result)
     finally:
         if api is not None:
@@ -439,6 +525,48 @@ def _resolve_shared_token(
     return account.token if account is not None else None
 
 
+def _select_os(candidates: List[OSInfo], verb: str) -> OSInfo:
+    """Pick the target when discovery finds more than one running AgentOS.
+
+    A numbered menu; Enter takes the first candidate, which _candidate_sources orders
+    as the env-file/env URL -- the target single-source discovery resolves. Trust is
+    not decided here: the chosen URL still flows through the env-file trust gate, so
+    picking a remote env-file URL prompts while picking local stays silent.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    print_info("Found multiple running AgentOS. Which one do you want to " + verb + "?")
+    print_info("")
+    width = max(len(c.base_url) for c in candidates)
+    for index, candidate in enumerate(candidates, start=1):
+        tag = "local " if _is_loopback_host(urlsplit(candidate.base_url).hostname) else "remote"
+        os_label = ' "' + candidate.name + '"' if candidate.name else ""
+        print_info(
+            "  " + str(index) + "  " + candidate.base_url.ljust(width) + "  " + tag + os_label + candidate.source_note()
+        )
+    print_info("")
+    prompt_label = {"connect": "Connect to", "disconnect": "Disconnect from"}.get(verb, "Select")
+    while True:
+        raw = str(typer.prompt(prompt_label, default="1")).strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(candidates):
+            return candidates[int(raw) - 1]
+        print_warning("Enter a number between 1 and " + str(len(candidates)) + ".")
+
+
+def _remove_legacy_entry(adapter: ClientAdapter, os_info: OSInfo, legacy_name: str, result: Dict[str, Any]) -> None:
+    """Drop the stale duplicate left by an entry rename: the "agno" entry (agnoctl
+    0.1.x naming) is removed from every scope where it points at this OS -- the URL
+    guard keeps a same-named entry for a different OS intact, in every scope. Cleanup
+    must never fail an otherwise successful connect: an error becomes a note."""
+    try:
+        removal = adapter.remove(legacy_name, matches=lambda entry_url: entry_url == os_info.mcp_url)
+        if removal.removed:
+            result["replaced_legacy"] = legacy_name
+    except Exception as e:
+        note = "Could not remove the legacy '" + legacy_name + "' entry: " + str(e)
+        result["note"] = (str(result["note"]) + " " + note) if result.get("note") else note
+
+
 def _connect_one(
     adapter: ClientAdapter,
     result: Dict[str, Any],
@@ -455,9 +583,13 @@ def _connect_one(
     json_mode: bool,
     minting: bool,
     shared_token: Optional[str],
+    legacy_name: Optional[str] = None,
+    legacy_token_reuse: bool = True,
+    status: Optional[Status] = None,
 ) -> None:
     account_name = name or adapter.key
     existing = adapter.read_existing(server_name)
+    legacy = adapter.read_existing(legacy_name) if legacy_name is not None else None
 
     if existing is not None:
         if existing.url == os_info.mcp_url and not rotate:
@@ -465,6 +597,8 @@ def _connect_one(
             check = verify_mcp(os_info.mcp_url, token=existing.token)
             if check.ok and (existing.token is not None or not minting):
                 result.update(status="already-connected", location=existing.location, verify=check.public_dict())
+                if legacy_name is not None and legacy is not None:
+                    _remove_legacy_entry(adapter, os_info, legacy_name, result)
                 return
             if skip_existing:
                 result.update(
@@ -486,28 +620,49 @@ def _connect_one(
     token: Optional[str] = None
     account: Optional[ServiceAccount] = None
     if minting and api is not None:
-        if name is not None:
-            if shared_token is None:
-                result.update(status="skipped", error="Service account exists; kept untouched.")
-                return
-            token = shared_token
-        else:
-            account = _mint(
-                api,
-                account_name,
-                scopes,
-                expires_in_days,
-                never_expires,
-                privileged=privileged,
-                rotate=rotate,
-                skip_existing=skip_existing,
-                json_mode=json_mode,
-            )
-            if account is None:
-                result.update(status="skipped", error="Service account exists; kept untouched.")
-                return
-            token = account.token
+        # Entry rename: a legacy "agno" entry pointing at this OS whose token verifies
+        # hands its token to the identity-named entry, keeping the account that backs it.
+        if (
+            legacy is not None
+            and legacy.url == os_info.mcp_url
+            and legacy.token is not None
+            and legacy_token_reuse
+            and existing is None
+            and name is None
+            and not rotate
+        ):
+            if status is not None:
+                status.update("Verifying the existing '" + str(legacy_name) + "' token...")
+            if verify_mcp(os_info.mcp_url, token=legacy.token).ok:
+                token = legacy.token
+        if token is None:
+            if name is not None:
+                if shared_token is None:
+                    result.update(status="skipped", error="Service account exists; kept untouched.")
+                    return
+                token = shared_token
+            else:
+                if status is not None:
+                    status.update("Minting token for " + display_name(adapter.key) + "...")
+                account = _mint(
+                    api,
+                    account_name,
+                    scopes,
+                    expires_in_days,
+                    never_expires,
+                    privileged=privileged,
+                    rotate=rotate,
+                    skip_existing=skip_existing,
+                    json_mode=json_mode,
+                    status=status,
+                )
+                if account is None:
+                    result.update(status="skipped", error="Service account exists; kept untouched.")
+                    return
+                token = account.token
 
+    if status is not None:
+        status.update("Writing config for " + display_name(adapter.key) + "...")
     write_result = adapter.write(server_name, os_info.mcp_url, token)
     result["location"] = write_result.location
     if write_result.note:
@@ -515,6 +670,8 @@ def _connect_one(
     if account is not None:
         result["account"] = account.public_dict()
 
+    if status is not None:
+        status.update("Verifying " + os_info.mcp_url + "...")
     # Verify what the client will actually use, not what we intended to write: the
     # read-back catches shadowing entries and writes that silently did not take effect.
     readback = adapter.read_existing(server_name)
@@ -530,6 +687,8 @@ def _connect_one(
     result["verify"] = verify_result.public_dict()
     if verify_result.ok:
         result["status"] = "connected"
+        if legacy_name is not None and legacy is not None:
+            _remove_legacy_entry(adapter, os_info, legacy_name, result)
         # A client that was already configured with a *different* token still holds the
         # old one in its live, in-process MCP connection: it keeps using the now-revoked
         # token until it is restarted. Flag it so the report can say so.
@@ -546,19 +705,7 @@ def _report(
     open_mcp_warning: Optional[str],
     json_mode: bool,
 ) -> None:
-    # "manual" (chat-app instructions) is not a failure: agnoctl did all it can. But it
-    # must not mask one either -- when every real adapter failed, appended manual
-    # entries cannot soften total failure into "partial".
-    ok_statuses = ("connected", "already-connected", "manual")
-    ok_count = sum(1 for r in results if r["status"] in ok_statuses)
-    real_results = [r for r in results if r["status"] != "manual"]
-    real_ok = sum(1 for r in real_results if r["status"] in ok_statuses)
-    if ok_count == len(results):
-        exit_code = EXIT_OK
-    elif real_results and real_ok == 0:
-        exit_code = EXIT_FAILURE
-    else:
-        exit_code = EXIT_PARTIAL
+    exit_code = exit_code_for(results, ("connected", "already-connected", "manual"))
 
     if json_mode:
         emit_json(
@@ -574,7 +721,7 @@ def _report(
 
     print_info("")
     for r in results:
-        label = r["client"]
+        label = display_name(r["client"])
         if r["status"] == "connected":
             tools = (r.get("verify") or {}).get("tools")
             suffix = " (" + str(tools) + " tools)" if tools else ""
@@ -584,7 +731,7 @@ def _report(
         elif r["status"] == "skipped":
             print_warning("  skipped        " + label + "  (" + str(r.get("error") or "") + ")")
         elif r["status"] == "manual":
-            ui_name = CHAT_APPS_SPEC[label][0] if label in CHAT_APPS_SPEC else label
+            ui_name = CHAT_APPS_SPEC[r["client"]][0] if r["client"] in CHAT_APPS_SPEC else label
             print_warning("  action needed  " + label + "  (set up in the " + ui_name + " UI)")
             for step in r.get("instructions", []):
                 print_info("                 - " + step)
@@ -596,18 +743,34 @@ def _report(
             print_warning("                 note: " + str(r["note"]))
         if r.get("replaced_url"):
             print_warning("                 replaced an entry that pointed at " + str(r["replaced_url"]))
+        if r.get("replaced_legacy"):
+            print_warning("                 renamed the legacy '" + str(r["replaced_legacy"]) + "' entry")
 
-    if any(r.get("rotated") for r in results):
+    # One summary + restart section: freshly wired clients hold no live MCP session yet,
+    # and rotated ones keep using the previous (now revoked) token until they restart.
+    fresh = sorted({display_name(r["client"]) for r in results if r["status"] == "connected"})
+    if fresh:
+        os_label = ('"' + os_info.name + '"') if os_info.name else os_info.base_url
+        count = str(len(fresh)) + (" app" if len(fresh) == 1 else " apps")
+        loads = "so it loads" if len(fresh) == 1 else "so they load"
         print_info("")
-        print_warning(
-            "A token was rotated. Restart the affected coding agent(s) so they reconnect with the "
-            "new token — a running client keeps using the previous (now revoked) token until it does."
-        )
+        print_success("Connected " + count + " to " + os_label + " as '" + server_name + "'.")
+        print_warning("Restart " + ", ".join(fresh) + " " + loads + " the new MCP server.")
+        if any(r.get("rotated") for r in results):
+            print_warning("A rotated client keeps using its previous (now revoked) token until it restarts.")
 
     accounts = sorted({r["account"]["name"] for r in results if r.get("account")})
     if accounts:
         print_info("")
-        print_info("Revoke any time with: agno tokens revoke <name>  (accounts: " + ", ".join(accounts) + ")")
+        # The --url pin matters: tokens resolves its own target, which may differ from
+        # the OS this run connected (e.g. after picking the local OS off the menu).
+        print_info(
+            "Revoke any time with: agno tokens revoke <name> --url "
+            + os_info.base_url
+            + "  (accounts: "
+            + ", ".join(accounts)
+            + ")"
+        )
     if open_mcp_warning:
         print_info("")
         print_warning(open_mcp_warning)

@@ -20,6 +20,18 @@ CLIENT_ALIASES = {
     "cursor": "cursor",
 }
 
+# Human-facing names for report lines and restart hints; JSON output keeps the raw keys.
+CLIENT_DISPLAY_NAMES = {
+    "claude-code": "Claude Code",
+    "claude-desktop": "Claude Desktop",
+    "codex": "Codex",
+    "cursor": "Cursor",
+}
+
+
+def display_name(client_key: str) -> str:
+    return CLIENT_DISPLAY_NAMES.get(client_key, client_key)
+
 
 def build_adapters(
     home: Optional[Path] = None,

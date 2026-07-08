@@ -273,6 +273,8 @@ class McpInfo(BaseModel):
 class InfoResponse(BaseModel):
     """Response schema for the /info endpoint returning lightweight OS metadata."""
 
+    os_id: str = Field(..., description="Unique identifier for the OS instance")
+    name: Optional[str] = Field(None, description="Name of the OS instance")
     agno_version: str = Field(..., description="Version of the agno framework")
     agent_count: int = Field(0, description="Number of agents registered in the OS")
     team_count: int = Field(0, description="Number of teams registered in the OS")
