@@ -291,3 +291,76 @@ def test_disconnect_oauth_os_removes_entry_without_token_note(monkeypatch, fake_
     assert "stay valid" not in out
     cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
     assert cursor_config["mcpServers"] == {}
+
+
+def test_matches_targets_respects_base_path():
+    """Path-routed deployments: two AgentOS on one host must never match each other,
+    and a path prefix only matches on a segment boundary."""
+    from agnoctl.commands.disconnect import _matches_targets
+
+    assert _matches_targets("https://os.example.com/customer-a/mcp", ["https://os.example.com/customer-a"])
+    assert not _matches_targets("https://os.example.com/customer-b/mcp", ["https://os.example.com/customer-a"])
+    assert not _matches_targets("https://os.example.com/customer-abc/mcp", ["https://os.example.com/customer-a"])
+    # A pathless target (the usual base URL) matches any path on that host.
+    assert _matches_targets("http://localhost:7777/mcp", ["http://localhost:7777"])
+    assert _matches_targets("http://localhost:7777/custom/mcp", ["http://localhost:7777"])
+    assert not _matches_targets("http://localhost:7778/mcp", ["http://localhost:7777"])
+
+
+def test_disconnect_path_routed_os_leaves_sibling_entries(monkeypatch, tmp_path, fake_clients):
+    """Disconnecting a path-routed OS (--url https://host/customer-a) must not remove a
+    sibling tenant's entry on the same host."""
+    (fake_clients / ".cursor" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "customer-a": {"url": "https://os.example.com/customer-a/mcp"},
+                    "customer-b": {"url": "https://os.example.com/customer-b/mcp"},
+                }
+            }
+        )
+    )
+    _refuse_all(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app, ["disconnect", "--json", "--url", "https://os.example.com/customer-a", "--clients", "cursor"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["removed"] == ["customer-a"]
+    kept = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())["mcpServers"]
+    assert list(kept) == ["customer-b"]
+
+
+def test_disconnect_removes_target_entry_shadowed_by_foreign_same_name(monkeypatch, fake_os, fake_clients):
+    """A project-scope entry for ANOTHER OS shadows the global entry for the target OS
+    under the same name: the target's entry must still be removed (per-scope URL guard),
+    and the foreign shadowing entry must survive."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    (fake_clients / ".cursor").joinpath("mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentos": {"url": MCP_URL}}})
+    )
+    # fake_clients uses one directory as both home and cwd, so the project scope is
+    # cwd/.cursor/mcp.json == home/.cursor/mcp.json; build a distinct project dir.
+    import agnoctl.commands.disconnect as disconnect_module
+    from agnoctl.clients.cursor import CursorAdapter
+
+    proj = fake_clients / "proj"
+    (proj / ".cursor").mkdir(parents=True)
+    (proj / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentos": {"url": "http://other-os:9999/mcp"}}})
+    )
+
+    def build(home=None, cwd=None, project=False):
+        return {"cursor": CursorAdapter(home=fake_clients, cwd=proj)}
+
+    monkeypatch.setattr(disconnect_module, "build_adapters", build)
+
+    result = _disconnect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["removed"] == ["agentos"]
+    # The target's global entry is gone; the foreign project entry survives.
+    global_servers = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())["mcpServers"]
+    assert "agentos" not in global_servers
+    project_servers = json.loads((proj / ".cursor" / "mcp.json").read_text())["mcpServers"]
+    assert project_servers["agentos"]["url"] == "http://other-os:9999/mcp"

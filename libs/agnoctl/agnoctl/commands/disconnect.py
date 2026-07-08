@@ -85,14 +85,22 @@ def disconnect(
 
 
 def _matches_targets(entry_url: str, targets: List[str]) -> bool:
-    """Whether an entry's MCP URL points at one of the target base URLs (scheme+host+port)."""
+    """Whether an entry's MCP URL points at one of the target base URLs.
+
+    Same scheme+host+port AND the entry's path lives under the target's base path, so
+    two AgentOS path-routed on one host (/customer-a, /customer-b) never match each
+    other. A target with no path (the usual base URL) matches any path on that host.
+    """
     entry = urlsplit(entry_url)
     for target in targets:
         parts = urlsplit(target)
-        if (
-            entry.scheme.lower() == parts.scheme.lower()
-            and (entry.netloc or "").lower() == (parts.netloc or "").lower()
-        ):
+        if entry.scheme.lower() != parts.scheme.lower():
+            continue
+        if (entry.netloc or "").lower() != (parts.netloc or "").lower():
+            continue
+        base_path = parts.path.rstrip("/")
+        entry_path = entry.path or "/"
+        if not base_path or entry_path == base_path or entry_path.startswith(base_path + "/"):
             return True
     return False
 
@@ -164,7 +172,11 @@ def _disconnect(
             if server_name is not None:
                 names = [server_name]
             elif matcher is not None:
-                names = [entry_name for entry_name, entry in adapter.list_entries().items() if matcher(entry.url)]
+                # Every known name is a removal candidate, not just those whose
+                # RESOLVING entry matches: precedence can hide the target's entry behind
+                # a same-named one for another OS in a higher-precedence scope. remove()
+                # applies the URL guard per scope, so non-matching names are no-ops.
+                names = list(adapter.list_entries())
             else:
                 names = []
             removed_names: List[str] = []
