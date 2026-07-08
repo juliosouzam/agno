@@ -14,6 +14,9 @@ class FakeAgentOS:
     auth_mode: "none" | "security_key" | "jwt" | "oauth"
     info_discovery: serve the mcp/auth_mode fields on /info (newer servers)
     mcp_requires_token: enforce tokens on /mcp (False models servers predating enforcement)
+    open_rest: an OS whose ONLY auth is the mcp_auth provider on /mcp -- /info still says
+        "oauth", but no middleware guards the REST plane: reads and deletes answer any
+        caller, while the server's anonymous-mint gate refuses every POST /service-accounts
     """
 
     def __init__(
@@ -28,9 +31,11 @@ class FakeAgentOS:
         name: Optional[str] = None,
         os_id: Optional[str] = None,
         oauth: Optional[Dict[str, Any]] = None,
+        open_rest: bool = False,
     ):
         self.auth_mode = auth_mode
         self.security_key = security_key
+        self.open_rest = open_rest
         self.mcp_enabled = mcp_enabled
         self.info_discovery = info_discovery
         self.mcp_requires_token = mcp_requires_token
@@ -123,7 +128,7 @@ class FakeAgentOS:
             return httpx.Response(200, json=payload)
 
         if path == "/config":
-            if self.auth_mode == "none":
+            if self.auth_mode == "none" or self.open_rest:
                 return httpx.Response(200, json={"os_id": "fake"})
             if self._bearer(request) == self.security_key:
                 return httpx.Response(200, json={"os_id": "fake"})
@@ -133,6 +138,10 @@ class FakeAgentOS:
             return httpx.Response(401, json={"detail": detail})
 
         if path == "/service-accounts" and method == "POST":
+            # With no auth middleware, no caller is ever "authenticated", so the real
+            # server's anonymous-mint gate refuses every mint regardless of the bearer.
+            if self.open_rest:
+                return httpx.Response(401, json={"detail": "JWT authentication is required to mint a service account."})
             if not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             body = json.loads(request.content)
@@ -168,7 +177,7 @@ class FakeAgentOS:
             return httpx.Response(201, json=self._account_response(account, include_token=True))
 
         if path == "/service-accounts" and method == "GET":
-            if not self._is_admin(request):
+            if not self.open_rest and not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             data = [self._account_response(a) for a in self.accounts.values()]
             return httpx.Response(
@@ -177,7 +186,7 @@ class FakeAgentOS:
             )
 
         if path.startswith("/service-accounts/") and method == "DELETE":
-            if not self._is_admin(request):
+            if not self.open_rest and not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             account_id = path.rsplit("/", 1)[1]
             for account in self.accounts.values():

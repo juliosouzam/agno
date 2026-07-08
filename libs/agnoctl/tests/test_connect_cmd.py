@@ -824,3 +824,78 @@ def test_connect_oauth_prints_signin_summary(monkeypatch, fake_clients):
     assert "OAuth-protected" in out
     assert "sign in" in out
     assert "Restart" in out
+
+
+def test_connect_pat_on_oauth_only_os_fails_before_credentials(monkeypatch, fake_clients):
+    """An OS whose ONLY auth is the OAuth provider refuses every mint (anonymous callers
+    must never create durable credentials), so --pat must fail up front naming the
+    server's missing REST credential -- not accept a typed credential (any value passes
+    the open read used by the preflight) and then blame it when the mint 401s."""
+    fake = FakeAgentOS(auth_mode="oauth", open_rest=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
+
+    result = _connect(["--clients", "cursor", "--pat"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "no authentication configured" in payload["error"]
+    assert "OS_SECURITY_KEY" in payload["hint"]
+    assert "drop --pat" in payload["hint"]
+    assert fake.create_calls == 0
+
+
+def test_connect_oauth_mint_shaping_flags_require_pat(monkeypatch, fake_clients):
+    """--name/--scopes/--expires/--privileged shape minted tokens; an OAuth run mints
+    nothing, so silently ignoring them would connect with different access than the
+    operator asked for. Erroring names the flags and the way out."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+
+    result = _connect(["--clients", "cursor", "--scopes", "agents:run", "--expires", "7d"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "--scopes" in payload["error"] and "--expires" in payload["error"]
+    assert "--pat" in payload["hint"]
+
+
+def test_connect_oauth_shaping_flags_with_pat_still_mint(monkeypatch, fake_os, fake_clients):
+    fake = FakeAgentOS(auth_mode="oauth")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+
+    result = _connect(["--clients", "cursor", "--pat", "--scopes", "agents:run"])
+    assert result.exit_code == 0, result.output
+    assert fake.accounts["cursor"]["scopes"] == ["agents:run"]
+
+
+def test_connect_oauth_rotate_notes_dangling_account(monkeypatch, fake_clients):
+    """Converting a PAT entry to OAuth sign-in erases the bearer from disk but cannot
+    revoke the account behind it (an OAuth run resolves no admin credential); the
+    operator must be pointed at `agno tokens revoke`."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="oauth"))
+    fake_token_entry = {"mcpServers": {"agentos": {"url": MCP_URL, "headers": {"Authorization": "Bearer stale"}}}}
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(fake_token_entry))
+
+    result = _connect(["--clients", "cursor", "--rotate"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["replaced_token_entry"] is True
+
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps(fake_token_entry))
+    human = runner.invoke(app, ["connect"] + URL_ARGS + ["--clients", "cursor", "--rotate"])
+    assert human.exit_code == 0, _all_output(human)
+    out = _all_output(human)
+    assert "stay valid" in out
+    assert "agno tokens revoke" in out
+
+
+def test_connect_treats_oauth_without_authorization_servers_as_token_protected(monkeypatch, fake_os, fake_clients):
+    """A bare token verifier as mcp_auth reports auth_mode "oauth" with no authorization
+    servers; there is nothing to sign in through, so connect mints as usual instead of
+    writing a tokenless entry whose sign-in could never complete."""
+    fake = FakeAgentOS(auth_mode="oauth", oauth={"authorization_servers": None, "resource": None})
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "connected"
+    assert list(fake.accounts.keys()) == ["cursor"]

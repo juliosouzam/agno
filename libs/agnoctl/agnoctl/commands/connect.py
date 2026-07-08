@@ -23,6 +23,7 @@ from agnoctl.commands._common import (
     ensure_env_file_url_trusted,
     handle_cli_error,
     parse_expires,
+    require_mint_capable,
     require_secure_url,
     resolve_admin_token,
     stdin_is_interactive,
@@ -290,7 +291,14 @@ def connect(
     project: bool = typer.Option(
         False, "--project", help="Write project-scoped configs (.mcp.json / .cursor/mcp.json) instead of user-level."
     ),
-    rotate: bool = typer.Option(False, "--rotate", help="Revoke and re-mint existing accounts without asking."),
+    rotate: bool = typer.Option(
+        False,
+        "--rotate",
+        help=(
+            "Rewrite existing entries without asking: revoke and re-mint their accounts, "
+            "or convert them to OAuth sign-in on an OAuth-protected OS."
+        ),
+    ),
     skip_existing: bool = typer.Option(
         False, "--skip-existing", help="Never touch existing accounts or config entries."
     ),
@@ -385,6 +393,29 @@ def _connect(
     # --pat opts back into minted bearers (the server accepts both) for headless clients.
     oauth_mode = os_info.oauth_enabled and not pat
 
+    # Mint-shaping flags describe a token an OAuth run never mints; erroring beats
+    # silently writing tokenless entries whose effective access comes from the
+    # authorization server's grant instead of the flags.
+    if oauth_mode:
+        shaping = [
+            flag
+            for flag, used in (
+                ("--name", name is not None),
+                ("--scopes", scopes is not None),
+                ("--expires", expires != DEFAULT_EXPIRES),
+                ("--privileged", privileged),
+            )
+            if used
+        ]
+        if shaping:
+            raise CLIError(
+                ", ".join(shaping) + " only shape minted tokens, but this AgentOS's MCP endpoint is "
+                "OAuth-protected: apps sign in through the authorization server and nothing is minted.",
+                hint="Add --pat to mint service-account tokens anyway (for headless clients), or drop "
+                + ", ".join(shaping)
+                + ".",
+            )
+
     if not json_mode:
         version = " (agno " + os_info.version + ")" if os_info.version else ""
         source = os_info.source_note()
@@ -418,6 +449,13 @@ def _connect(
     # over plaintext HTTP to a non-loopback host unless the operator opted in.
     if minting:
         require_secure_url(os_info.base_url, allow_http=allow_http, what="the admin credential and minted tokens")
+        # Before any credential is resolved (or prompted for): an OS whose only auth is
+        # the OAuth provider on /mcp refuses every mint, so no credential can help.
+        require_mint_capable(
+            os_info.base_url,
+            os_info.auth_mode,
+            or_else="Or drop --pat to use the OAuth sign-in flow." if pat else None,
+        )
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
     if not minting and selected and not json_mode and os_info.auth_mode == "none":
         print_info("Authorization is disabled on this AgentOS; connecting without credentials.")
@@ -751,6 +789,15 @@ def _connect_one(
         # token until it is restarted. Flag it so the report can say so.
         if existing is not None and existing.token is not None and token is not None and existing.token != token:
             result["rotated"] = True
+        # A tokenless write that replaced a token-carrying entry (OAuth conversion via
+        # --rotate, or a legacy-entry rename) erases the bearer from disk but not the
+        # service account behind it: nothing here holds a credential to revoke with.
+        # Flag it so the report can point at `agno tokens revoke`.
+        if token is None and (
+            (existing is not None and existing.token is not None)
+            or (result.get("replaced_legacy") and legacy is not None and legacy.token is not None)
+        ):
+            result["replaced_token_entry"] = True
     else:
         result["error"] = verify_result.error
 
@@ -848,6 +895,16 @@ def _report(
             + ", ".join(accounts)
             + ")"
         )
+
+    replaced_tokens = sorted({display_name(r["client"]) for r in results if r.get("replaced_token_entry")})
+    if replaced_tokens:
+        print_info("")
+        print_warning(
+            "The replaced entries for "
+            + ", ".join(replaced_tokens)
+            + " carried tokens; the service accounts behind them stay valid until they expire."
+        )
+        print_info("Revoke them with: agno tokens revoke <name> --url " + os_info.base_url)
     if open_mcp_warning:
         print_info("")
         print_warning(open_mcp_warning)
