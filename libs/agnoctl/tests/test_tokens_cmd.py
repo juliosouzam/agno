@@ -181,3 +181,21 @@ def test_revoke_yes_skips_confirmation(monkeypatch, fake_os):
     result = _run(["tokens", "revoke", "ci-runner", "--yes"] + URL_ARGS)
     assert result.exit_code == 0, result.output
     assert fake_os.accounts["ci-runner"]["revoked_at"] is not None
+
+
+def test_create_on_oauth_only_os_fails_naming_the_server_gap(monkeypatch, fake_os):
+    """An OS whose only auth is the OAuth provider on /mcp refuses every mint, and its
+    open REST plane would "accept" any credential right up to the failing POST; create
+    must fail before resolving a credential, naming what the server is missing."""
+    from tests.conftest import FakeAgentOS, install_fake
+
+    fake = FakeAgentOS(auth_mode="oauth", open_rest=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
+
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "no authentication configured" in payload["error"]
+    assert "OS_SECURITY_KEY" in payload["hint"]
+    assert fake.create_calls == 0

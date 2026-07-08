@@ -166,9 +166,14 @@ def _disconnect(
     )
 
     results: List[Dict[str, Any]] = []
+    removed_token_entry = False
     for adapter in selected:
         result: Dict[str, Any] = {"client": adapter.key, "status": "not-found", "error": None}
         try:
+            # The resolving entries, read before removal: whether a removed entry carried
+            # a token decides the revoke reminder below (an OAuth OS holds sign-in state
+            # in the client, but a --pat run minted a real account there too).
+            entries = adapter.list_entries()
             if server_name is not None:
                 names = [server_name]
             elif matcher is not None:
@@ -176,7 +181,7 @@ def _disconnect(
                 # RESOLVING entry matches: precedence can hide the target's entry behind
                 # a same-named one for another OS in a higher-precedence scope. remove()
                 # applies the URL guard per scope, so non-matching names are no-ops.
-                names = list(adapter.list_entries())
+                names = list(entries)
             else:
                 names = []
             removed_names: List[str] = []
@@ -185,6 +190,9 @@ def _disconnect(
                 removal = adapter.remove(candidate, matches=matcher)
                 if removal.removed:
                     removed_names.append(candidate)
+                    entry = entries.get(candidate)
+                    if entry is not None and entry.token is not None:
+                        removed_token_entry = True
                     if removal.location and removal.location not in locations:
                         locations.append(removal.location)
             if removed_names:
@@ -229,7 +237,7 @@ def _disconnect(
                     revocation.update(status="failed", error="Unexpected error (" + type(e).__name__ + "): " + str(e))
                 revocations.append(revocation)
 
-    _report(os_info, server_name, target_urls, results, revocations, revoke, json_mode)
+    _report(os_info, server_name, target_urls, results, revocations, revoke, removed_token_entry, json_mode)
 
 
 def _report(
@@ -239,6 +247,7 @@ def _report(
     results: List[Dict[str, Any]],
     revocations: List[Dict[str, Any]],
     revoke: bool,
+    removed_token_entry: bool,
     json_mode: bool,
 ) -> None:
     # not-found is a clean outcome: nothing to undo.
@@ -294,9 +303,11 @@ def _report(
     if cleared:
         print_info("")
         print_warning("Restart " + ", ".join(cleared) + " to drop the connection.")
-        # On an auth-less or OAuth-protected OS connect minted nothing (OAuth sign-in
-        # state lives inside the clients), so there is nothing to revoke.
-        if not revoke and (os_info is None or os_info.auth_mode not in ("none", "oauth")):
+        # The reminder keys on what was actually removed, not the server's auth mode:
+        # tokenless entries (OAuth sign-in, auth-less OS) have nothing to revoke, while
+        # a token-carrying entry backs a still-valid account even on an OAuth OS
+        # (connect --pat mints there too).
+        if not revoke and removed_token_entry:
             url_hint = (" --url " + os_info.base_url) if os_info is not None else ""
             print_info(
                 "Tokens minted for these apps stay valid. Revoke them with: agno tokens revoke <name>" + url_hint

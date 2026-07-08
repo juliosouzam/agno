@@ -133,6 +133,32 @@ ADMIN_TOKEN_SOURCES = (
 )
 
 
+def require_mint_capable(base_url: str, auth_mode: str, or_else: Optional[str] = None) -> None:
+    """Fail fast when this AgentOS cannot mint tokens for anyone.
+
+    auth_mode "oauth" covers two very different deployments: OAuth composed with a REST
+    credential (OS_SECURITY_KEY / JWT -- minting works), and OAuth as the only auth,
+    leaving the REST plane open. The open one refuses every mint while accepting any
+    credential on reads, so resolving a credential would prompt for -- and appear to
+    accept -- a value the mint then rejects. Detect the open plane up front and name
+    the real problem: the server, not the credential.
+    """
+    if auth_mode != "oauth":
+        return
+    from agnoctl.http import service_accounts_open
+
+    if not service_accounts_open(base_url):
+        return
+    hint = "Set " + SECURITY_KEY_ENV + " (or configure JWT auth) on the server to enable minting."
+    if or_else:
+        hint += " " + or_else
+    raise CLIError(
+        "This AgentOS cannot mint tokens: OAuth protects its MCP endpoint, but its REST API has "
+        "no authentication configured, and the server refuses to mint without an authenticated caller.",
+        hint=hint,
+    )
+
+
 def resolve_admin_token(auth_mode: str, json_mode: bool) -> Optional[str]:
     """Resolve the admin credential used to call the service-accounts API.
 

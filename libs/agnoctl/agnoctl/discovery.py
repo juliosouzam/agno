@@ -83,9 +83,12 @@ class OSInfo:
 
     @property
     def oauth_enabled(self) -> bool:
-        """Whether /mcp is OAuth-protected: clients sign in through the authorization
-        server instead of carrying a minted bearer token."""
-        return self.oauth is not None or self.auth_mode == "oauth"
+        """Whether /mcp is OAuth-protected AND apps can actually sign in: the OS must
+        advertise at least one authorization server, or there is nothing to sign in
+        through. A provider with none (e.g. a bare fastmcp TokenVerifier as mcp_auth)
+        still reports auth_mode "oauth", but its bearers are issued out of band, so
+        connect treats it like any other token-protected endpoint."""
+        return self.oauth is not None and bool(self.oauth.authorization_servers)
 
     @property
     def mcp_url(self) -> str:

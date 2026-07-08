@@ -293,6 +293,34 @@ def test_disconnect_oauth_os_removes_entry_without_token_note(monkeypatch, fake_
     assert cursor_config["mcpServers"] == {}
 
 
+def test_disconnect_oauth_os_reminds_when_removed_entry_carried_pat(monkeypatch, fake_clients):
+    """connect --pat mints real accounts on an OAuth OS, so the revoke reminder must key
+    on what the removed entries carried, not on the server's auth mode: this machine's
+    entry holds a token whose account stays valid after the config removal."""
+    fake = FakeAgentOS(auth_mode="oauth")
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.security_key)
+    assert _connect(["--clients", "cursor", "--pat"]).exit_code == 0
+
+    result = runner.invoke(app, ["disconnect"] + URL_ARGS + ["--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    assert "stay valid" in _all_output(result)
+
+
+def test_disconnect_no_token_note_for_tokenless_entries_on_protected_os(monkeypatch, fake_clients):
+    """The inverse direction of keying the reminder on removed tokens: a token-protected
+    OS whose removed entry carries no token (written when auth was off) has nothing to
+    revoke, so no reminder prints."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="security_key"))
+    (fake_clients / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"agentos": {"url": MCP_URL}}}))
+
+    result = runner.invoke(app, ["disconnect"] + URL_ARGS + ["--clients", "cursor"])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    assert "Restart" in out
+    assert "stay valid" not in out
+
+
 def test_matches_targets_respects_base_path():
     """Path-routed deployments: two AgentOS on one host must never match each other,
     and a path prefix only matches on a segment boundary."""
