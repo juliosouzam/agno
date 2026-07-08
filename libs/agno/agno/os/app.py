@@ -1173,6 +1173,12 @@ class AgentOS:
             effective_key = None if (self.authorization or jwt_env_configured) else security_key
             self._add_auth_middleware(fastapi_app, security_key=effective_key)
 
+        # Under mcp_auth, the OAuth flow routes must be reachable without an agno bearer.
+        # AgentOS exempts them on the AuthMiddleware it installs itself, but a JWT/auth
+        # middleware installed MANUALLY on a base_app carries its own exclusions that agno
+        # cannot amend. Fail fast (with the exact paths) rather than 401 connector discovery.
+        self._check_mcp_auth_middleware_composition(fastapi_app)
+
         # Add trailing slash normalization middleware
         from agno.os.middleware.trailing_slash import TrailingSlashMiddleware
 
@@ -1214,6 +1220,60 @@ class AgentOS:
 
             self._resolved_mcp_auth = resolve_mcp_auth(self)
         return self._resolved_mcp_auth
+
+    def mcp_auth_exempt_paths(self) -> List[str]:
+        """The MCP OAuth routes that must be public (exempt from any auth middleware).
+
+        When ``mcp_auth`` is set, connector clients (claude.ai, ChatGPT) hit discovery,
+        ``/register``, ``/authorize``, ``/token`` and the ``/mcp`` challenge with no agno
+        bearer, so those paths must not be behind the parent auth layer. AgentOS exempts
+        them automatically on the middleware it installs; if you install your own JWT/auth
+        middleware on a ``base_app``, pass these to its ``excluded_route_paths``. Returns
+        ``[]`` when ``mcp_auth`` is unset.
+        """
+        provider = self._get_mcp_auth_provider()
+        if provider is None:
+            return []
+        from agno.os.mcp_auth import mcp_auth_route_paths
+
+        return mcp_auth_route_paths(provider)
+
+    def _check_mcp_auth_middleware_composition(self, app: FastAPI) -> None:
+        """Reject an mcp_auth deployment whose OAuth routes a manual auth middleware blocks.
+
+        A JWT/auth middleware installed via ``app.add_middleware(JWTMiddleware, ...)`` on a
+        ``base_app`` carries its own ``excluded_route_paths``, which AgentOS cannot amend.
+        If it does not exempt the OAuth routes, connector discovery / DCR / the ``/mcp``
+        challenge 401 before FastMCP runs -- and silently, so it reads as a token problem.
+        The AuthMiddleware AgentOS installs itself already carries the exemptions (so it is
+        skipped here); this catches only a manual one that would break the flow.
+        """
+        exempt_paths = self.mcp_auth_exempt_paths()
+        if not exempt_paths:
+            return
+        from agno.os.middleware.jwt import AuthMiddleware, jwt_kwargs_have_key_source
+
+        exempt = set(exempt_paths)
+        for mw in getattr(app, "user_middleware", None) or []:
+            cls = getattr(mw, "cls", None)
+            if not (isinstance(cls, type) and issubclass(cls, AuthMiddleware)):
+                continue
+            kwargs = getattr(mw, "kwargs", None) or {}
+            # A plain security-key / service-account layer (no JWT source) does not
+            # 401 an unauthenticated request when no bearer is present the way a
+            # JWT-validating one does; only the latter blocks the browser-driven flow.
+            if not jwt_kwargs_have_key_source(kwargs):
+                continue
+            if exempt.issubset(set(kwargs.get("excluded_route_paths") or [])):
+                continue  # this middleware already exempts the OAuth routes
+            raise ValueError(
+                "AgentOS(mcp_auth=...) with a manually-installed JWT/auth middleware requires the OAuth "
+                "flow routes to be exempted from it, or connector discovery (claude.ai / ChatGPT) is blocked "
+                "with a 401 before it runs. Add these to your middleware's excluded_route_paths: "
+                f"{sorted(exempt)} (get them from os.mcp_auth_exempt_paths() or "
+                "agno.os.mcp_auth.mcp_auth_route_paths(provider)). Or let AgentOS manage auth via "
+                "authorization=True instead of installing the middleware yourself."
+            )
 
     def _add_auth_middleware(self, fastapi_app: FastAPI, security_key: Optional[str]) -> None:
         """Install the single AgentOS auth layer on the parent app.

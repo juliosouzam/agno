@@ -212,6 +212,84 @@ def test_mcp_auth_string_rejected_with_hint():
         os.get_app()
 
 
+# ==================== Manual auth middleware on base_app ====================
+
+
+def _manual_jwt_base_app(**mw_kwargs):
+    from fastapi import FastAPI
+
+    from agno.os.middleware.jwt import JWTMiddleware
+
+    base = FastAPI()
+    base.add_middleware(JWTMiddleware, verification_keys=["a-secret"], algorithm="HS256", **mw_kwargs)
+    return base
+
+
+def _base_app_oauth_os(base_app, provider=None):
+    return AgentOS(
+        base_app=base_app,
+        agents=[_agent()],
+        enable_mcp_server=True,
+        mcp_auth=provider or _oauth_provider(),
+        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+    )
+
+
+def test_manual_auth_middleware_without_exemptions_fails_fast():
+    """A JWT/auth middleware installed manually on a base_app carries its own exclusions
+    that AgentOS can't amend; without the OAuth routes exempted it 401s connector discovery
+    silently. Fail fast at get_app with the exact paths, not a broken flow."""
+    os = _base_app_oauth_os(_manual_jwt_base_app())
+    with pytest.raises(ValueError, match="excluded_route_paths"):
+        os.get_app()
+
+
+async def test_manual_auth_middleware_with_exemptions_works():
+    """The documented fix: wiring os's exempt paths into the manual middleware's
+    excluded_route_paths makes the OAuth flow work -- while REST stays protected."""
+    provider = _oauth_provider()
+    exempt = mcp_auth_route_paths(provider)
+    defaults = ["/", "/health", "/info", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"]
+    base = _manual_jwt_base_app(excluded_route_paths=[*defaults, *exempt])
+    os = _base_app_oauth_os(base, provider=provider)
+
+    async with _http_client(os) as client:
+        well_known = await client.get("/.well-known/oauth-authorization-server")
+        token, _ = await _obtain_oauth_token(client)
+        mcp = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(token))
+        challenge = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_MCP_HEADERS)
+        rest_unauthed = await client.get("/agents")  # manual JWT still guards REST
+
+    assert well_known.status_code == 200
+    assert mcp.status_code == 200
+    assert challenge.status_code == 401 and "www-authenticate" in challenge.headers
+    assert rest_unauthed.status_code == 401
+
+
+def test_mcp_auth_exempt_paths_helper():
+    """The public helper lists the routes to exempt; empty when mcp_auth is unset."""
+    os = _oauth_os()
+    paths = os.mcp_auth_exempt_paths()
+    for expected in ("/mcp", "/authorize", "/token", "/register"):
+        assert expected in paths
+
+    no_oauth = AgentOS(
+        agents=[_agent()],
+        enable_mcp_server=True,
+        mcp_config=MCPServerConfig(tools=[_ok_tool], enable_builtin_tools=False),
+    )
+    assert no_oauth.mcp_auth_exempt_paths() == []
+
+
+def test_agentos_managed_auth_does_not_trip_the_guard(tmp_path):
+    """When AgentOS installs the auth middleware itself (security key / JWT), it already
+    carries the exemptions, so the composition guard must not fire."""
+    db = _sqlite_db(tmp_path)
+    os = _oauth_os(db=db, security_key="k")
+    os.get_app()  # no raise; exemptions are on AgentOS's own middleware
+    assert any(m.cls.__name__ == "AuthMiddleware" for m in os.get_app().user_middleware)
+
+
 def test_mcp_auth_rejects_non_provider():
     os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=object())
     with pytest.raises(TypeError, match="AuthProvider"):
