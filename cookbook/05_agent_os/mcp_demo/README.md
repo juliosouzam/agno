@@ -129,6 +129,22 @@ scopes in the token's `scope`/`scp` claim per user — a token carrying only OID
 authenticates but is denied every tool. Mapping users to agno scopes at the AS *is* the Tier-2
 per-user RBAC story. (The built-in Tier-1 server issues these scopes itself.)
 
+**Own auth middleware on a `base_app`.** If you embed AgentOS in an existing FastAPI app and
+install your own `JWTMiddleware`, the OAuth flow routes must be public or connector discovery is
+blocked. Pass the exempt paths to your middleware's `excluded_route_paths`:
+
+```python
+from agno.os.mcp_auth import mcp_auth_route_paths
+
+provider = AgentOSBuiltinAuth.from_env()
+base.add_middleware(JWTMiddleware, verification_keys=[...],
+                    excluded_route_paths=[*my_public_routes, *mcp_auth_route_paths(provider)])
+agent_os = AgentOS(base_app=base, db=db, enable_mcp_server=True, mcp_auth=provider)
+```
+
+AgentOS raises at `get_app()` (listing the exact paths) if a manual auth middleware would block
+them, so this never fails silently. `os.mcp_auth_exempt_paths()` returns the same list.
+
 ## Prerequisites
 - Load environment variables with `direnv allow` (requires `.envrc`).
 - Run examples with `.venvs/demo/bin/python <path-to-file>.py`.
