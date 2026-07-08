@@ -1085,10 +1085,13 @@ def test_mounted_mcp_middleware_layer_position():
 
 
 def test_enable_mcp_server_alias_still_enables_and_warns():
-    with pytest.warns(DeprecationWarning, match="enable_mcp_server"):
+    with pytest.warns(DeprecationWarning, match="enable_mcp_server") as rec:
         os = AgentOS(agents=[_agent()], enable_mcp_server=True)
     assert os.mcp_server is True
     assert os.enable_mcp_server is True
+    # stacklevel=2 must attribute the warning to the caller, not agno internals
+    deprecations = [w for w in rec.list if "enable_mcp_server" in str(w.message)]
+    assert deprecations and deprecations[0].filename == __file__
 
 
 def test_enable_mcp_server_alias_false_stays_disabled():
@@ -1122,6 +1125,24 @@ def test_mcp_server_config_wins_over_mcp_config_alias():
     assert os.mcp_config.include_tags == {"core"}
 
 
+def test_mcp_server_wins_over_enable_mcp_server_alias():
+    with pytest.warns(DeprecationWarning, match="enable_mcp_server"):
+        os = AgentOS(agents=[_agent()], mcp_server=True, enable_mcp_server=False)
+    assert os.mcp_server is True
+
+
+def test_mcp_server_config_wins_over_enable_mcp_server_false():
+    with pytest.warns(DeprecationWarning, match="enable_mcp_server"):
+        os = AgentOS(
+            agents=[_agent()],
+            mcp_server=MCPServerConfig(include_tags={"core"}),
+            enable_mcp_server=False,
+        )
+    assert os.mcp_server is True
+    assert os.mcp_config is not None
+    assert os.mcp_config.include_tags == {"core"}
+
+
 def test_enable_mcp_server_attribute_read_and_write():
     os = AgentOS(agents=[_agent()], mcp_server=True)
     assert os.enable_mcp_server is True
@@ -1129,3 +1150,15 @@ def test_enable_mcp_server_attribute_read_and_write():
     assert os.mcp_server is False
     os.enable_mcp_server = True
     assert os.mcp_server is True
+
+
+async def test_assigning_config_to_mcp_server_attribute_applies_config():
+    def ping() -> str:
+        """Return pong."""
+        return "pong"
+
+    os = AgentOS(agents=[_agent()])
+    os.mcp_server = MCPServerConfig(tools=[ping], enable_builtin_tools=False)
+    assert os.mcp_server is True
+    assert os.mcp_config is not None
+    assert await _tool_names(os) == {"ping"}

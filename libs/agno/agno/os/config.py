@@ -20,8 +20,8 @@ class MCPServerConfig(BaseModel):
 
     Pass this as ``AgentOS(mcp_server=MCPServerConfig(...))`` to register your own
     tools, scope the built-in tools, gate the server, and add middleware.
-    With plain ``mcp_server=True`` the MCP server behaves exactly as before: all
-    built-in tools are registered and no extra gate or middleware is added.
+    With plain ``mcp_server=True``, all built-in tools are registered and no extra
+    gate or middleware is added.
 
     The built-in tools are tagged so they can be scoped as a group. See
     ``MCP_BUILTIN_TAGS`` for the canonical set; current values:
