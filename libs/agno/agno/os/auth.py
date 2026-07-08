@@ -158,24 +158,32 @@ def get_effective_auth_mode(
     settings: Optional[AgnoAPISettings],
     authorization: bool = False,
     app: Any = None,
-) -> Literal["none", "security_key", "jwt"]:
+    mcp_auth: Any = None,
+) -> Literal["none", "security_key", "jwt", "oauth"]:
     """Return the authentication mode effectively enforced by the OS.
 
-    Mirrors the precedence used by ``get_authentication_dependency``:
-    JWT (via authorization=True on AgentOS, JWT environment variables, or a manually
-    installed ``JWTMiddleware``) takes precedence over the security key, which takes
-    precedence over no auth.
+    An ``mcp_auth`` provider takes precedence: it owns the MCP surface (the
+    connect-by-URL path clients discover through ``/info``) and composes PAT/JWT
+    verification for bearer clients, so "oauth" is the mode to advertise. After
+    that, the precedence mirrors ``get_authentication_dependency``: JWT (via
+    authorization=True on AgentOS, JWT environment variables, or a manually
+    installed ``JWTMiddleware``) takes precedence over the security key, which
+    takes precedence over no auth.
 
     Args:
         settings: The API settings containing the security key and authorization flag
         authorization: The AgentOS authorization flag (JWT middleware enabled)
         app: The Starlette/FastAPI app instance; when provided, its middleware stack
             is inspected so a manually-installed ``JWTMiddleware`` is detected.
+        mcp_auth: The AgentOS ``mcp_auth`` provider, when one is set.
 
     Returns:
-        "jwt" when JWT authorization is effectively active, "security_key" when
-        only the OS security key is enforced, "none" when authentication is disabled.
+        "oauth" when an ``mcp_auth`` provider protects the MCP endpoint, "jwt" when
+        JWT authorization is effectively active, "security_key" when only the OS
+        security key is enforced, "none" when authentication is disabled.
     """
+    if mcp_auth is not None:
+        return "oauth"
     if (
         authorization
         or (settings is not None and settings.authorization_enabled)

@@ -39,17 +39,24 @@ INTERNAL_SCHEDULER_USER_ID = "__scheduler__"
 _AUTH_COMPLETE_ATTR = "_agno_auth_complete"
 
 
+# Server-assigned identity namespaces a human JWT must never claim as its subject.
+# Service accounts live in ``sa:``, the scheduler is ``__scheduler__``, and the built-in
+# MCP OAuth server assigns ``oauth:`` to its connected clients.
+RESERVED_PRINCIPAL_PREFIXES = (SERVICE_ACCOUNT_PRINCIPAL_PREFIX, "oauth:")
+
+
 def is_reserved_principal(user_id: Any) -> bool:
     """Whether a JWT subject is trying to claim a system-reserved identity.
 
-    Service-account principals live in the ``sa:`` namespace and the scheduler runs as
-    ``__scheduler__``; both are first-party identities the server assigns, never something
-    a human JWT should present. Copying such a ``sub`` into ``request.state.user_id`` would
-    let any JWT holder impersonate a service account (or the scheduler) in run attribution,
-    session-ownership checks, and audit trails. Callers reject the token instead.
+    Service-account principals live in the ``sa:`` namespace, the scheduler runs as
+    ``__scheduler__``, and MCP-OAuth clients live in ``oauth:``; all are first-party
+    identities the server assigns, never something a human JWT should present. Copying
+    such a ``sub`` into ``request.state.user_id`` would let any JWT holder impersonate
+    that principal in run attribution, session-ownership checks, and audit trails.
+    Callers reject the token instead.
     """
     return isinstance(user_id, str) and (
-        user_id.startswith(SERVICE_ACCOUNT_PRINCIPAL_PREFIX) or user_id == INTERNAL_SCHEDULER_USER_ID
+        user_id.startswith(RESERVED_PRINCIPAL_PREFIXES) or user_id == INTERNAL_SCHEDULER_USER_ID
     )
 
 

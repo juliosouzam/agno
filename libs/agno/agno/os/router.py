@@ -280,6 +280,14 @@ def get_info_router(os: "AgentOS") -> APIRouter:
     )
     async def get_info(request: Request) -> InfoResponse:
         mcp_enabled = bool(os.enable_mcp_server)
+        mcp_oauth = None
+        if mcp_enabled and getattr(os, "mcp_auth", None) is not None:
+            from agno.os.mcp_auth import describe_mcp_auth
+            from agno.os.schema import McpOAuthInfo
+
+            provider = os._get_mcp_auth_provider()
+            if provider is not None:
+                mcp_oauth = McpOAuthInfo(**describe_mcp_auth(provider))
         return InfoResponse(
             os_id=os.id or "Unnamed OS",
             name=os.name,
@@ -287,8 +295,13 @@ def get_info_router(os: "AgentOS") -> APIRouter:
             agent_count=len(os.agents or []),
             team_count=len(os.teams or []),
             workflow_count=len(os.workflows or []),
-            mcp=McpInfo(enabled=mcp_enabled, path="/mcp" if mcp_enabled else None),
-            auth_mode=get_effective_auth_mode(settings=os.settings, authorization=os.authorization, app=request.app),
+            mcp=McpInfo(enabled=mcp_enabled, path="/mcp" if mcp_enabled else None, oauth=mcp_oauth),
+            auth_mode=get_effective_auth_mode(
+                settings=os.settings,
+                authorization=os.authorization,
+                app=request.app,
+                mcp_auth=getattr(os, "mcp_auth", None),
+            ),
         )
 
     return router
