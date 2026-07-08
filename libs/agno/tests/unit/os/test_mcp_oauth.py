@@ -185,7 +185,7 @@ def test_mcp_auth_builtin_requires_postgres(monkeypatch):
     from agno.os import AgentOSBuiltinAuth
 
     monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
-    monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", "test-connect-secret")
     os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
     with pytest.raises(ValueError, match="needs a database"):
         os.get_app()
@@ -198,7 +198,7 @@ def test_mcp_auth_builtin_never_binds_an_agent_db(tmp_path, monkeypatch):
     from agno.os import AgentOSBuiltinAuth
 
     monkeypatch.setenv("AGENTOS_URL", "https://my-os.example.com")
-    monkeypatch.setenv("MCP_CONNECT_SECRET", "s")
+    monkeypatch.setenv("MCP_CONNECT_SECRET", "test-connect-secret")
     agent_with_db = Agent(id="a", name="A", db=_sqlite_db(tmp_path))
     os = AgentOS(agents=[agent_with_db], enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env())
     with pytest.raises(ValueError, match="needs a database"):
@@ -539,6 +539,91 @@ async def test_invalid_jwt_rejected_with_mcp_auth():
     async with _http_client(_jwt_os()) as client:
         response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(_mint_jwt(secret="wrong")))
     assert response.status_code == 401
+
+
+async def test_jwt_cannot_smuggle_trust_markers():
+    """A signature-valid deployment JWT that carries agno's internal trust markers
+    (agno_service_account / agno_mcp_internal_issuer / agno_authorization_enabled) must not
+    have them reach the identity bridge: they are stripped before the payload is bridged,
+    so the caller cannot forge a service-account identity or flip the RBAC-off flag."""
+    captured: dict = {}
+
+    class _CaptureState(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            response = await call_next(request)
+            if request.url.path == "/mcp":
+                captured["user_id"] = getattr(request.state, "user_id", None)
+                captured["service_account_name"] = getattr(request.state, "service_account_name", None)
+                captured["authorization_enabled"] = getattr(request.state, "authorization_enabled", None)
+                captured["claims"] = getattr(request.state, "claims", None)
+            return response
+
+    from agno.os.config import AuthorizationConfig
+
+    os = AgentOS(
+        agents=[_agent()],
+        enable_mcp_server=True,
+        mcp_auth=_oauth_provider(),
+        authorization=True,
+        authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
+        mcp_config=MCPServerConfig(
+            tools=[_ok_tool], enable_builtin_tools=False, middleware=[Middleware(_CaptureState)]
+        ),
+    )
+    token = _mint_jwt(
+        sub="user-42",
+        agno_service_account="admin",
+        agno_mcp_internal_issuer=True,
+        agno_authorization_enabled=False,
+    )
+    async with _http_client(os) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(token))
+
+    assert response.status_code == 200
+    assert captured["user_id"] == "user-42"
+    # None of the smuggled markers took effect.
+    assert captured["service_account_name"] is None
+    assert captured["authorization_enabled"] is True
+    assert "agno_service_account" not in (captured["claims"] or {})
+    assert "agno_mcp_internal_issuer" not in (captured["claims"] or {})
+
+
+async def test_subless_jwt_bridges_to_none_user_id():
+    """A JWT with no sub bridges to user_id=None -- matching the parent REST AuthMiddleware
+    -- rather than collapsing every sub-less caller onto the shared "agno-jwt" principal
+    (which user-isolation would treat as a single shared identity)."""
+    captured: dict = {}
+
+    class _CaptureState(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
+            response = await call_next(request)
+            if request.url.path == "/mcp":
+                captured["user_id"] = getattr(request.state, "user_id", "MISSING")
+            return response
+
+    from agno.os.config import AuthorizationConfig
+
+    os = AgentOS(
+        agents=[_agent()],
+        enable_mcp_server=True,
+        mcp_auth=_oauth_provider(),
+        authorization=True,
+        authorization_config=AuthorizationConfig(verification_keys=["test-jwt-secret"], algorithm="HS256"),
+        mcp_config=MCPServerConfig(
+            tools=[_ok_tool], enable_builtin_tools=False, middleware=[Middleware(_CaptureState)]
+        ),
+    )
+    import jwt as pyjwt
+
+    # A JWT with the sub claim absent entirely (pyjwt rejects an explicit null sub).
+    subless = pyjwt.encode(
+        {"scopes": ["agents:run"], "exp": int(time.time()) + 3600}, "test-jwt-secret", algorithm="HS256"
+    )
+    async with _http_client(os) as client:
+        response = await client.post("/mcp", json=_MCP_INIT_BODY, headers=_bearer(subless))
+
+    assert response.status_code == 200
+    assert captured["user_id"] is None
 
 
 @pytest.mark.parametrize("reserved_sub", ["sa:deploy", "oauth:evil", "__scheduler__"])

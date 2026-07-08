@@ -54,6 +54,13 @@ AUTHORIZATION_ENABLED_CLAIM = "agno_authorization_enabled"
 # token is rejected rather than honored (impersonation guard).
 INTERNAL_ISSUER_CLAIM = "agno_mcp_internal_issuer"
 
+# The trust markers the identity bridge acts on. They are set ONLY by first-party sources
+# (the PAT verifier, the agno-JWT verifier, and the built-in AS) in a controlled claims
+# dict. Any of them appearing on a token verified by an external Tier-2 provider -- or
+# smuggled through the agno-JWT verifier's payload -- is untrusted and stripped, so the
+# markers are trustworthy by construction rather than by where the bridge happens to look.
+RESERVED_MARKER_CLAIMS = (SERVICE_ACCOUNT_CLAIM, AUTHORIZATION_ENABLED_CLAIM, INTERNAL_ISSUER_CLAIM)
+
 
 class ServiceAccountTokenVerifier(TokenVerifier):
     """Verifies ``agno_pat_`` bearers against the AgentOS service-account store.
@@ -124,12 +131,20 @@ class JWTBearerTokenVerifier(TokenVerifier):
         if is_reserved_principal(user_id):
             log_warning(f"Rejected JWT claiming a reserved principal on the MCP endpoint: {user_id!r}")
             return None
+        # Strip agno's trust markers from the incoming payload before re-asserting the
+        # ones this verifier owns (sub, the authorization flag). Otherwise a signature-valid
+        # JWT that happens to carry ``agno_service_account`` / ``agno_mcp_internal_issuer``
+        # (common when the trusted key is an IdP that reflects user-influenced custom claims)
+        # would reach the identity bridge as a first-party trust signal. ``sub`` is set to
+        # user_id here and client_id below falls back to "agno-jwt" only as the pydantic-
+        # required client_id string -- the bridge keys identity off ``sub``.
+        safe_claims = {k: v for k, v in payload.items() if k not in RESERVED_MARKER_CLAIMS}
         return AccessToken(
             token=token,
             client_id=str(user_id) if user_id is not None else "agno-jwt",
             scopes=list(claims.get("scopes") or []),
             expires_at=payload.get("exp"),
-            claims={**payload, "sub": user_id, AUTHORIZATION_ENABLED_CLAIM: self._authorization},
+            claims={**safe_claims, "sub": user_id, AUTHORIZATION_ENABLED_CLAIM: self._authorization},
         )
 
 
@@ -153,7 +168,16 @@ class MCPIdentityBridgeMiddleware:
             access_token = getattr(scope.get("user"), "access_token", None)
             if access_token is not None:
                 claims = getattr(access_token, "claims", None) or {}
-                user_id = claims.get("sub") or getattr(access_token, "client_id", None)
+                # Fall back to client_id only when the token has no ``sub`` KEY at all
+                # (external Tier-2 tokens). The agno-JWT verifier always sets ``sub`` (as
+                # None when the JWT has no subject), so a subject-less agno JWT bridges to
+                # user_id=None -- exactly as it does on the parent REST AuthMiddleware --
+                # instead of collapsing every such caller onto the shared "agno-jwt"
+                # client_id principal (which user-isolation would treat as one identity).
+                if "sub" in claims:
+                    user_id = claims.get("sub")
+                else:
+                    user_id = getattr(access_token, "client_id", None)
                 service_account_name = claims.get(SERVICE_ACCOUNT_CLAIM)
                 # A token must not claim a server-reserved principal (sa:/oauth:/scheduler)
                 # unless it comes from a trusted first-party source that owns that
@@ -184,6 +208,58 @@ class MCPIdentityBridgeMiddleware:
                     # claims for factory ctx.trusted.claims (the PAT path does not).
                     state["claims"] = claims
         await self.app(scope, receive, send)
+
+
+class _MarkerScrubbingProvider(AuthProvider):
+    """Wraps an external (Tier-2) ``AuthProvider`` so its verified tokens cannot carry
+    agno's internal trust markers into the identity bridge.
+
+    fastmcp providers copy the entire decoded IdP payload into ``AccessToken.claims``. An
+    IdP that reflects a user-influenced claim named ``agno_mcp_internal_issuer`` (the
+    reserved-principal bypass), ``agno_authorization_enabled`` (the RBAC-off flag), or
+    ``agno_service_account`` would otherwise reach the bridge as a first-party trust
+    signal. Those markers are legitimately set only by the built-in AS and the PAT/JWT
+    verifiers, so this wrapper strips them from any token the external provider verifies.
+
+    Everything else -- routes, discovery metadata, resource URL, required-scope
+    enforcement -- is delegated to the wrapped provider unchanged (fastmcp drives auth
+    through the composed provider, never branching on its concrete type).
+    """
+
+    def __init__(self, wrapped: AuthProvider) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        super().__init__(
+            base_url=getattr(wrapped, "base_url", None),
+            required_scopes=getattr(wrapped, "required_scopes", None),
+            resource_base_url=getattr(wrapped, "resource_base_url", None),
+        )
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        access_token = await self._wrapped.verify_token(token)
+        if access_token is None:
+            return None
+        claims = getattr(access_token, "claims", None)
+        if claims and any(marker in claims for marker in RESERVED_MARKER_CLAIMS):
+            scrubbed = {k: v for k, v in claims.items() if k not in RESERVED_MARKER_CLAIMS}
+            return access_token.model_copy(update={"claims": scrubbed})
+        return access_token
+
+    def get_routes(self, mcp_path: Optional[str] = None) -> Any:
+        return self._wrapped.get_routes(mcp_path)
+
+    def get_well_known_routes(self, mcp_path: Optional[str] = None) -> Any:
+        return self._wrapped.get_well_known_routes(mcp_path)
+
+    def set_mcp_path(self, mcp_path: Optional[str]) -> None:
+        self._wrapped.set_mcp_path(mcp_path)
+
+    def __getattr__(self, name: str) -> Any:
+        # Reached only for attributes not defined on this wrapper (e.g. authorization_servers,
+        # _get_resource_url); delegate them to the wrapped provider. _wrapped itself is set
+        # via object.__setattr__ before super().__init__, so it never routes back here.
+        if name == "_wrapped":
+            raise AttributeError(name)
+        return getattr(self._wrapped, name)
 
 
 def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]:
@@ -247,6 +323,7 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     # data store, not the platform's OAuth state.
     from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
 
+    is_builtin = isinstance(raw, AgentOSBuiltinAuth)
     if isinstance(raw, AgentOSBuiltinAuth) and not raw.is_db_bound():
         db = getattr(os, "db", None)
         if db is None:
@@ -256,6 +333,11 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
                 "AgentOSBuiltinAuth directly. It stores clients, codes, and refresh-token state there."
             )
         raw.bind_db(db)
+    # An external (Tier-2) provider copies the full decoded IdP payload into
+    # AccessToken.claims, so wrap it to strip agno's trust markers -- the built-in AS is
+    # first-party and sets them itself, so it is used unwrapped. This holds whether or not
+    # the deployment adds first-party verifiers below (the MultiAuth-less return path too).
+    server: AuthProvider = raw if is_builtin else _MarkerScrubbingProvider(raw)
     verifiers: List[TokenVerifier] = []
     service_account_verifier = os._get_service_account_verifier()
     if service_account_verifier is not None:
@@ -264,8 +346,14 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     if jwt_verifier is not None:
         verifiers.append(jwt_verifier)
     if not verifiers:
-        return raw
-    return MultiAuth(server=raw, verifiers=verifiers)
+        return server
+    # required_scopes=[] so the route-level RequireAuthMiddleware does not apply the
+    # server provider's required_scopes to every verified token: a PAT carries agno
+    # resource scopes (config:read, agents:run) and an agno JWT carries deployment scopes,
+    # never the provider's OAuth scopes, so inheriting them would 403 those bearers on
+    # /mcp. Each provider/verifier still enforces its own required_scopes inside
+    # verify_token, and the agno tool gates still enforce agno scopes.
+    return MultiAuth(server=server, verifiers=verifiers, required_scopes=[])
 
 
 def mcp_auth_route_paths(provider: AuthProvider, mcp_path: str = "/mcp") -> List[str]:
