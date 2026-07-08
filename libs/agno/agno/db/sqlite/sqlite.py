@@ -84,6 +84,11 @@ class SqliteDb(BaseDb):
         approvals_table: Optional[str] = None,
         auth_tokens_table: Optional[str] = None,
         service_accounts_table: Optional[str] = None,
+        mcp_oauth_clients_table: Optional[str] = None,
+        mcp_oauth_transactions_table: Optional[str] = None,
+        mcp_oauth_codes_table: Optional[str] = None,
+        mcp_oauth_refresh_tokens_table: Optional[str] = None,
+        mcp_oauth_keys_table: Optional[str] = None,
         id: Optional[str] = None,
     ):
         """
@@ -114,6 +119,11 @@ class SqliteDb(BaseDb):
             learnings_table (Optional[str]): Name of the table to store learning records.
             schedules_table (Optional[str]): Name of the table to store cron schedules.
             schedule_runs_table (Optional[str]): Name of the table to store schedule run history.
+            mcp_oauth_clients_table (Optional[str]): Name of the table to store MCP OAuth client registrations.
+            mcp_oauth_transactions_table (Optional[str]): Name of the table to store MCP OAuth transactions.
+            mcp_oauth_codes_table (Optional[str]): Name of the table to store MCP OAuth authorization codes.
+            mcp_oauth_refresh_tokens_table (Optional[str]): Name of the table to store MCP OAuth refresh tokens.
+            mcp_oauth_keys_table (Optional[str]): Name of the table to store MCP OAuth signing keys.
             id (Optional[str]): ID of the database.
 
         Raises:
@@ -143,6 +153,11 @@ class SqliteDb(BaseDb):
             approvals_table=approvals_table,
             auth_tokens_table=auth_tokens_table,
             service_accounts_table=service_accounts_table,
+            mcp_oauth_clients_table=mcp_oauth_clients_table,
+            mcp_oauth_transactions_table=mcp_oauth_transactions_table,
+            mcp_oauth_codes_table=mcp_oauth_codes_table,
+            mcp_oauth_refresh_tokens_table=mcp_oauth_refresh_tokens_table,
+            mcp_oauth_keys_table=mcp_oauth_keys_table,
         )
 
         _engine: Optional[Engine] = db_engine
