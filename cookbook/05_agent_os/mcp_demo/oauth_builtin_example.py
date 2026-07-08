@@ -8,7 +8,14 @@ open: connecting requires the deployer secret on a consent page.
 Setup:
 
     export AGENTOS_URL=https://your-deployment.example.com   # the public origin
-    export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the login secret
+    export MCP_CONNECT_SECRET=$(openssl rand -base64 32)            # the login secret (>= 16 chars)
+    export AGENTOS_MCP_SIGNING_KEY=$(openssl rand -base64 32)       # optional: env-pinned token key (>= 32 chars)
+
+AGENTOS_URL must be the public origin the client actually connects to (every advertised
+OAuth URL and the token audience derive from it) -- so behind a tunnel or proxy, set it to
+the external HTTPS URL, not localhost. AGENTOS_MCP_SIGNING_KEY is optional but recommended
+in production: set it so the token trust root is env-managed and survives redeploys / is
+shared across replicas; when unset, a key is generated and persisted in the database.
 
 Then, in claude.ai (Settings -> Connectors) or ChatGPT (custom connector), paste your
 public /mcp URL, sign in with the connect secret on the consent page, and connect.
@@ -39,11 +46,12 @@ web_research_agent = Agent(
 
 # AgentOSBuiltinAuth makes this AgentOS its own OAuth server; it binds to the Postgres db
 # passed to AgentOS below. Existing agno_pat_ and JWT clients keep working alongside it.
-# The two inputs are spelled out here so the example documents itself; the shorthand
-# AgentOSBuiltinAuth.from_env() reads the same two env vars.
+# The inputs are spelled out here so the example documents itself; the shorthand
+# AgentOSBuiltinAuth.from_env() reads these same env vars.
 mcp_auth = AgentOSBuiltinAuth(
     url=os.environ["AGENTOS_URL"],
     secret=os.environ["MCP_CONNECT_SECRET"],
+    signing_key_material=os.environ.get("AGENTOS_MCP_SIGNING_KEY"),
 )
 
 agent_os = AgentOS(

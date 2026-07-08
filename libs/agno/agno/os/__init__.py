@@ -6,7 +6,7 @@ from agno.os.config import MCP_BUILTIN_TAGS, MCPBuiltinTag, MCPServerConfig
 if TYPE_CHECKING:
     from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
 
-__all__ = ["AgentOS", "MCPServerConfig", "MCPBuiltinTag", "MCP_BUILTIN_TAGS", "AgentOSBuiltinAuth"]
+__all__ = ["AgentOS", "MCPServerConfig", "MCPBuiltinTag", "MCP_BUILTIN_TAGS"]
 
 
 def __getattr__(name: str) -> Any:
