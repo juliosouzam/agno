@@ -139,7 +139,7 @@ from agno.os.mcp_auth import mcp_auth_route_paths
 provider = AgentOSBuiltinAuth.from_env()
 base.add_middleware(JWTMiddleware, verification_keys=[...],
                     excluded_route_paths=[*my_public_routes, *mcp_auth_route_paths(provider)])
-agent_os = AgentOS(base_app=base, db=db, enable_mcp_server=True, mcp_auth=provider)
+agent_os = AgentOS(base_app=base, db=db, mcp_server=True, mcp_auth=provider)
 ```
 
 AgentOS raises at `get_app()` (listing the exact paths) if a manual auth middleware would block
