@@ -87,12 +87,14 @@ own OAuth authorization server, backed by its Postgres db. No external accounts.
 connecting requires the deployer secret on a consent page.
 
 ```python
+import os
+
 from agno.os import AgentOS, AgentOSBuiltinAuth
 
-# reads AGENTOS_URL + MCP_CONNECT_SECRET from the env; binds to the AgentOS db below
-agent_os = AgentOS(
-    agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth=AgentOSBuiltinAuth.from_env()
-)
+# The two inputs are spelled out so the config documents itself; the shorthand
+# AgentOSBuiltinAuth.from_env() reads the same two env vars.
+mcp_auth = AgentOSBuiltinAuth(url=os.environ["AGENTOS_URL"], secret=os.environ["MCP_CONNECT_SECRET"])
+agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth=mcp_auth)
 ```
 
 ```bash

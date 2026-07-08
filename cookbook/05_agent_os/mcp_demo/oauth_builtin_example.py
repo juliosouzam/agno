@@ -17,6 +17,8 @@ Requires a Postgres database (the built-in server stores clients, codes, and ref
 state there). Run one with: ./cookbook/scripts/run_pgvector.sh
 """
 
+import os
+
 from agno.agent import Agent
 from agno.db.postgres import PostgresDb
 from agno.models.anthropic import Claude
@@ -35,10 +37,14 @@ web_research_agent = Agent(
     markdown=True,
 )
 
-# AgentOSBuiltinAuth.from_env() reads AGENTOS_URL + MCP_CONNECT_SECRET from the
-# environment and makes this AgentOS its own OAuth server; it binds to the Postgres db
+# AgentOSBuiltinAuth makes this AgentOS its own OAuth server; it binds to the Postgres db
 # passed to AgentOS below. Existing agno_pat_ and JWT clients keep working alongside it.
-mcp_auth = AgentOSBuiltinAuth.from_env()
+# The two inputs are spelled out here so the example documents itself; the shorthand
+# AgentOSBuiltinAuth.from_env() reads the same two env vars.
+mcp_auth = AgentOSBuiltinAuth(
+    url=os.environ["AGENTOS_URL"],
+    secret=os.environ["MCP_CONNECT_SECRET"],
+)
 
 agent_os = AgentOS(
     description="Example app with OAuth on the MCP endpoint",

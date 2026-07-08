@@ -147,13 +147,15 @@ class AgentOSBuiltinAuth(OAuthProvider):
     """A self-hosted OAuth 2.1 authorization server backed by the AgentOS database.
 
     Args:
-        base_url: The deployment's public origin (e.g. ``https://my-os.up.railway.app``).
-            Every advertised metadata URL derives from it -- it must be exact.
+        url: The deployment's public origin (e.g. ``https://my-os.up.railway.app``), the
+            value of ``AGENTOS_URL``. Every advertised OAuth metadata URL derives from it
+            -- it must be exact.
+        secret: The deployer secret typed on the consent page (``MCP_CONNECT_SECRET``).
+            Use a dedicated secret, not a root credential.
         db: The AgentOS database (``PostgresDb`` in production; ``SqliteDb`` is accepted
-            for development with a warning). Stores clients, pending authorizations,
-            single-use code hashes, and refresh-token state.
-        connect_secret: The deployer secret typed on the consent page. Use a dedicated
-            secret (``MCP_CONNECT_SECRET``), not a root credential.
+            for development with a warning). Optional -- when omitted, AgentOS binds its
+            own db. Stores clients, pending authorizations, single-use code hashes, and
+            refresh-token state.
         scopes: The server-decided grant for every connected client (default: the
             run+read connector set). Client-requested scopes can never expand this.
         access_token_ttl / refresh_token_ttl / auth_code_ttl: Token lifetimes in
@@ -168,8 +170,8 @@ class AgentOSBuiltinAuth(OAuthProvider):
     def __init__(
         self,
         *,
-        base_url: str,
-        connect_secret: str,
+        url: str,
+        secret: str,
         db: Any = None,
         scopes: Optional[List[str]] = None,
         access_token_ttl: int = DEFAULT_ACCESS_TOKEN_TTL,
@@ -183,15 +185,15 @@ class AgentOSBuiltinAuth(OAuthProvider):
         enable_cimd: bool = True,
     ):
         super().__init__(
-            base_url=base_url,
+            base_url=url,
             client_registration_options=ClientRegistrationOptions(enabled=True),
             revocation_options=RevocationOptions(enabled=True),
         )
-        if not connect_secret:
+        if not secret:
             raise ValueError(
-                "AgentOSBuiltinAuth requires a connect secret: set MCP_CONNECT_SECRET (or pass "
-                "connect_secret=). It is the login credential on the consent page -- use a "
-                "dedicated secret, not a root credential."
+                "AgentOSBuiltinAuth requires a secret: set MCP_CONNECT_SECRET (or pass secret=). "
+                "It is the login credential on the consent page -- use a dedicated secret, not a "
+                "root credential."
             )
         # db may be bound now (explicit) or later by AgentOS (``bind_db``), so passing
         # AgentOSBuiltinAuth.from_env() to AgentOS(db=...) just works -- the store binds
@@ -200,7 +202,7 @@ class AgentOSBuiltinAuth(OAuthProvider):
         # the engine is unbound, so the .connect() sites downstream never see None.
         self._db = db
         self._engine: Any = self._resolve_engine(db) if db is not None else None
-        self._connect_secret = connect_secret
+        self._secret = secret
         self._grant_scopes = list(scopes) if scopes is not None else list(DEFAULT_GRANT_SCOPES)
         self._access_token_ttl = access_token_ttl
         self._refresh_token_ttl = refresh_token_ttl
@@ -243,23 +245,23 @@ class AgentOSBuiltinAuth(OAuthProvider):
         """
         from os import getenv
 
-        base_url = getenv("AGENTOS_URL")
-        if not base_url:
+        url = getenv("AGENTOS_URL")
+        if not url:
             raise ValueError(
                 "AgentOSBuiltinAuth.from_env() requires AGENTOS_URL: the deployment's public "
                 "origin (e.g. https://my-os.up.railway.app). Every advertised OAuth metadata URL derives "
-                "from it. (Pass base_url=... to construct it directly instead.)"
+                "from it. (Pass url=... to construct it directly instead.)"
             )
-        connect_secret = getenv("MCP_CONNECT_SECRET")
-        if not connect_secret:
+        secret = getenv("MCP_CONNECT_SECRET")
+        if not secret:
             raise ValueError(
                 "AgentOSBuiltinAuth.from_env() requires MCP_CONNECT_SECRET: the deployer secret typed on "
                 "the consent page when a client connects. Generate a strong one, e.g. `openssl rand -base64 32`."
             )
         return cls(
-            base_url=base_url,
+            url=url,
             db=db,
-            connect_secret=connect_secret,
+            secret=secret,
             signing_key_material=getenv("AGENTOS_MCP_SIGNING_KEY"),
             server_name=server_name,
         )
@@ -892,7 +894,7 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
         # unauthenticated, so anyone can drive the consent POST) cannot lock the deployer
         # out of approving a connection. Mirrors ServiceAccountVerifier's limiter.
         client_key = request.client.host if request.client else "unknown"
-        if _constant_time_equals(str(form.get("secret", "")), self._connect_secret):
+        if _constant_time_equals(str(form.get("secret", "")), self._secret):
             secret_ok = True
         else:
             secret_ok = False

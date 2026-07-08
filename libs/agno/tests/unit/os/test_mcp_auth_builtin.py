@@ -67,8 +67,8 @@ def _db(tmp_path):
 
 
 def _provider(db, **kwargs) -> AgentOSBuiltinAuth:
-    kwargs.setdefault("base_url", "http://localhost")
-    kwargs.setdefault("connect_secret", _SECRET)
+    kwargs.setdefault("url", "http://localhost")
+    kwargs.setdefault("secret", _SECRET)
     return AgentOSBuiltinAuth(db=db, **kwargs)
 
 
@@ -427,7 +427,7 @@ def test_plaintext_deployment_cannot_be_constructed(tmp_path):
     """A plaintext (http, non-localhost) origin is refused at construction by the SDK's
     issuer-URL validation, so the consent page is inherently served over a secure origin
     -- no per-request HTTPS gate needed (which would misfire behind a TLS proxy)."""
-    provider = _provider(_db(tmp_path), base_url="http://my-os.example.com")
+    provider = _provider(_db(tmp_path), url="http://my-os.example.com")
     with pytest.raises(ValueError, match="HTTPS"):
         provider.get_routes(mcp_path="/mcp")
 
@@ -437,7 +437,7 @@ def test_consent_cookie_is_secure_for_https_deployment(tmp_path):
     the deployer-declared base_url, so it holds even when the app sees plain http from a
     TLS-terminating proxy (Railway/PaaS). A localhost dev deploy gets a non-Secure cookie
     so the dev flow works."""
-    https_provider = _provider(_db(tmp_path), base_url="https://my-os.up.railway.app")
+    https_provider = _provider(_db(tmp_path), url="https://my-os.up.railway.app")
     assert https_provider._deployment_is_https() is True
     payload = {"client_id": "c", "redirect_uri": _REDIRECT_URI, "state": "s"}
     https_cookie = https_provider._render_consent_page(
@@ -446,7 +446,7 @@ def test_consent_cookie_is_secure_for_https_deployment(tmp_path):
     assert "Secure" in https_cookie
     assert "HttpOnly" in https_cookie
 
-    local_provider = _provider(_db(tmp_path / "local"), base_url="http://localhost")
+    local_provider = _provider(_db(tmp_path / "local"), url="http://localhost")
     (tmp_path / "local").mkdir(exist_ok=True)
     assert local_provider._deployment_is_https() is False
     local_cookie = local_provider._render_consent_page(
@@ -460,7 +460,7 @@ async def test_consent_served_on_proxy_terminated_https_deploy(tmp_path):
     consent page must still serve -- gating on the per-request scheme would 400 the whole
     connector flow on the primary production target."""
     db = _db(tmp_path)
-    provider = _provider(db, base_url="https://my-os.up.railway.app")
+    provider = _provider(db, url="https://my-os.up.railway.app")
     os = _os(provider, db=db)
     async with _http_client(os) as client:
         registration = await _register(client)
@@ -670,9 +670,9 @@ async def test_env_signing_key_is_primary(tmp_path, monkeypatch):
 # ==================== Construction ====================
 
 
-def test_requires_connect_secret(tmp_path):
-    with pytest.raises(ValueError, match="connect secret"):
-        AgentOSBuiltinAuth(base_url="http://localhost", db=_db(tmp_path), connect_secret="")
+def test_requires_secret(tmp_path):
+    with pytest.raises(ValueError, match="requires a secret"):
+        AgentOSBuiltinAuth(url="http://localhost", db=_db(tmp_path), secret="")
 
 
 async def test_from_env_binds_agentos_db_and_runs(tmp_path, monkeypatch):
