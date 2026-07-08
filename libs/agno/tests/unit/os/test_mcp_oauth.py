@@ -179,8 +179,8 @@ def test_mcp_auth_requires_enable_mcp_server():
         AgentOS(agents=[_agent()], mcp_auth=_oauth_provider())
 
 
-def test_mcp_auth_bundled_requires_postgres():
-    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="bundled")
+def test_mcp_auth_builtin_requires_postgres():
+    os = AgentOS(agents=[_agent()], enable_mcp_server=True, mcp_auth="builtin")
     with pytest.raises(ValueError, match="Postgres"):
         os.get_app()
 
@@ -754,7 +754,7 @@ async def test_identity_bridge_rejects_external_token_claiming_reserved_principa
         assert "user_id" not in state, f"{reserved} should not be bridged"
         assert "authenticated" not in state
 
-    # But a first-party bundled-AS token (marked with the internal-issuer claim) is trusted
+    # But a first-party built-in-AS token (marked with the internal-issuer claim) is trusted
     # to carry its own oauth: principal.
     trusted = AccessToken(
         token="t", client_id="c", scopes=["agents:run"], claims={"sub": "oauth:c", INTERNAL_ISSUER_CLAIM: True}

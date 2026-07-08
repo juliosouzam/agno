@@ -1,15 +1,15 @@
 # Test Log: mcp_demo
 
-### oauth_bundled_example.py
+### oauth_builtin_example.py
 
 **Status:** PASS (2026-07-07, construction + full flow via unit harness)
 
-**Description:** `AgentOS(mcp_auth="bundled")` — the bundled OAuth authorization server.
+**Description:** `AgentOS(mcp_auth="builtin")` — the built-in OAuth authorization server.
 Requires Postgres + `AGENTOS_PUBLIC_URL`/`MCP_CONNECT_SECRET` to run as a server.
 
 **Result:** The end-to-end connector flow it demonstrates (DCR → consent → PKCE token →
 `/mcp`, refresh rotation, redeploy/second-replica verification, hash-at-rest) is proven
-by `tests/unit/os/test_mcp_auth_bundled.py` (18 tests, pass) over the same code paths on
+by `tests/unit/os/test_mcp_auth_builtin.py` (18 tests, pass) over the same code paths on
 SQLite. The example file itself is syntax- and lint-clean; a live Postgres run behind
 HTTPS against a real claude.ai/ChatGPT connector is a deployment test.
 

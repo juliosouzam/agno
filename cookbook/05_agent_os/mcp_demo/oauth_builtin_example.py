@@ -1,4 +1,4 @@
-"""AgentOS with OAuth on the MCP endpoint — the bundled authorization server (Tier 1).
+"""AgentOS with OAuth on the MCP endpoint — the built-in authorization server (Tier 1).
 
 claude.ai and ChatGPT connect to a custom MCP server over OAuth only; there is no field
 to paste a bearer token. This makes AgentOS its own OAuth authorization server, so those
@@ -13,7 +13,7 @@ Setup:
 Then, in claude.ai (Settings -> Connectors) or ChatGPT (custom connector), paste your
 public /mcp URL, sign in with the connect secret on the consent page, and connect.
 
-Requires a Postgres database (the bundled server stores clients, codes, and refresh-token
+Requires a Postgres database (the built-in server stores clients, codes, and refresh-token
 state there). Run one with: ./cookbook/scripts/run_pgvector.sh
 """
 
@@ -35,7 +35,7 @@ web_research_agent = Agent(
     markdown=True,
 )
 
-# mcp_auth="bundled" reads AGENTOS_PUBLIC_URL + MCP_CONNECT_SECRET from the environment
+# mcp_auth="builtin" reads AGENTOS_PUBLIC_URL + MCP_CONNECT_SECRET from the environment
 # and makes this AgentOS its own OAuth server on the Postgres db above. Existing
 # agno_pat_ and JWT clients keep working alongside it.
 agent_os = AgentOS(
@@ -43,7 +43,7 @@ agent_os = AgentOS(
     agents=[web_research_agent],
     db=db,
     enable_mcp_server=True,
-    mcp_auth="bundled",
+    mcp_auth="builtin",
 )
 
 app = agent_os.get_app()
@@ -54,4 +54,4 @@ if __name__ == "__main__":
     Deploy behind HTTPS at AGENTOS_PUBLIC_URL, then add the /mcp URL as a custom
     connector in claude.ai or ChatGPT.
     """
-    agent_os.serve(app="oauth_bundled_example:app")
+    agent_os.serve(app="oauth_builtin_example:app")

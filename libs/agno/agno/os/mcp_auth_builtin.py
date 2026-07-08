@@ -1,6 +1,6 @@
-"""The Bundled Authorization Server for the AgentOS MCP endpoint (Tier 1 of mcp_auth).
+"""The Built-in Authorization Server for the AgentOS MCP endpoint (Tier 1 of mcp_auth).
 
-``AgentOSBundledAuth`` makes a self-deployed AgentOS its own OAuth 2.1 authorization
+``AgentOSBuiltinAuth`` makes a self-deployed AgentOS its own OAuth 2.1 authorization
 server, so claude.ai / ChatGPT / Claude Code connect by pasting the ``/mcp`` URL with
 zero external accounts -- and the endpoint is never open: every authorization requires
 the deployer's connect secret on a login+consent page, over HTTPS.
@@ -21,16 +21,14 @@ What the SDK/fastmcp provide vs what lives here:
 Security properties, deliberate and load-bearing:
 
 - **Public clients only.** Connector clients (claude.ai, ChatGPT, Claude Code,
-  mcp-remote) all register as public clients and prove possession via PKCE; a
-  confidential registration is rejected rather than storing a client secret.
+  mcp-remote) register as public clients and prove possession via PKCE. DCR normalizes
+  an omitted client-auth method to ``none`` and rejects an explicit confidential method,
+  so no client secret is ever minted or stored.
 - **Hash-at-rest.** Authorization codes and refresh tokens are stored SHA-256-hashed
   (matching the service-account PAT model); a database read yields nothing replayable.
 - **Server-decided scopes.** The grant is a fixed, deployer-configured scope set,
   stamped onto the auth code at mint time -- client-requested DCR/authorize scopes are
   overwritten, not merely validated, so they can never expand it.
-- **Public clients only.** DCR normalizes an omitted client-auth method to ``none`` and
-  rejects an explicit confidential method, so no client secret is ever minted or stored;
-  possession is proven by PKCE.
 - **Single-use, short-lived codes; refresh rotation on every use.** Code exchange and
   refresh rotation are atomic DELETE-then-act, so a replayed code/refresh token fails
   on every replica.
@@ -77,7 +75,7 @@ try:
     from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 except ImportError as e:  # pragma: no cover - exercised only without the extra installed
     raise ImportError(
-        "`fastmcp>=3.4.3` is required for the bundled MCP authorization server. "
+        "`fastmcp>=3.4.3` is required for the built-in MCP authorization server. "
         "Please install it using `pip install 'fastmcp>=3.4.3'`."
     ) from e
 
@@ -145,7 +143,7 @@ class _LoopbackTolerantClient(OAuthClientInformationFull):
         return super().validate_redirect_uri(redirect_uri)
 
 
-class AgentOSBundledAuth(OAuthProvider):
+class AgentOSBuiltinAuth(OAuthProvider):
     """A self-hosted OAuth 2.1 authorization server backed by the AgentOS database.
 
     Args:
@@ -191,7 +189,7 @@ class AgentOSBundledAuth(OAuthProvider):
         )
         if not connect_secret:
             raise ValueError(
-                "AgentOSBundledAuth requires a connect secret: set MCP_CONNECT_SECRET (or pass "
+                "AgentOSBuiltinAuth requires a connect secret: set MCP_CONNECT_SECRET (or pass "
                 "connect_secret=). It is the login credential on the consent page -- use a "
                 "dedicated secret, not a root credential."
             )
@@ -230,7 +228,7 @@ class AgentOSBundledAuth(OAuthProvider):
             self._cimd_manager = CIMDClientManager(enable_cimd=True, default_scope=" ".join(self._grant_scopes))
 
     @classmethod
-    def from_env(cls, db: Any, server_name: Optional[str] = None) -> "AgentOSBundledAuth":
+    def from_env(cls, db: Any, server_name: Optional[str] = None) -> "AgentOSBuiltinAuth":
         """Build from the deployment environment: ``AGENTOS_PUBLIC_URL`` (the public
         origin), ``MCP_CONNECT_SECRET`` (the login secret), and optionally
         ``AGENTOS_MCP_SIGNING_KEY`` (env-primary signing key material)."""
@@ -239,13 +237,13 @@ class AgentOSBundledAuth(OAuthProvider):
         base_url = getenv("AGENTOS_PUBLIC_URL")
         if not base_url:
             raise ValueError(
-                'mcp_auth="bundled" requires AGENTOS_PUBLIC_URL: the deployment\'s public origin '
+                'mcp_auth="builtin" requires AGENTOS_PUBLIC_URL: the deployment\'s public origin '
                 "(e.g. https://my-os.up.railway.app). Every advertised OAuth metadata URL derives from it."
             )
         connect_secret = getenv("MCP_CONNECT_SECRET")
         if not connect_secret:
             raise ValueError(
-                'mcp_auth="bundled" requires MCP_CONNECT_SECRET: the deployer secret typed on the '
+                'mcp_auth="builtin" requires MCP_CONNECT_SECRET: the deployer secret typed on the '
                 "consent page when a client connects. Generate a strong one, e.g. `openssl rand -base64 32`."
             )
         return cls(
@@ -263,7 +261,7 @@ class AgentOSBundledAuth(OAuthProvider):
         engine = getattr(db, "db_engine", None)
         if engine is None:
             raise ValueError(
-                f"AgentOSBundledAuth requires a SQLAlchemy-backed database (PostgresDb in production); "
+                f"AgentOSBuiltinAuth requires a SQLAlchemy-backed database (PostgresDb in production); "
                 f"got {type(db).__name__}."
             )
         # Async adapters (AsyncPostgresDb / AsyncSqliteDb) expose a db_engine too, but it
@@ -273,12 +271,12 @@ class AgentOSBundledAuth(OAuthProvider):
 
         if isinstance(engine, AsyncEngine):
             raise ValueError(
-                f"AgentOSBundledAuth does not support async databases yet ({type(db).__name__}); "
+                f"AgentOSBuiltinAuth does not support async databases yet ({type(db).__name__}); "
                 "pass a synchronous PostgresDb (production) or SqliteDb (development)."
             )
         if engine.dialect.name == "sqlite":
             log_warning(
-                "AgentOSBundledAuth is running on SQLite -- fine for development, but production "
+                "AgentOSBuiltinAuth is running on SQLite -- fine for development, but production "
                 "deployments should use PostgresDb (restart-safe and shared across replicas)."
             )
         return engine
@@ -405,7 +403,7 @@ class AgentOSBundledAuth(OAuthProvider):
                     )
                     conn.commit()
                     log_info(
-                        "Generated and persisted the bundled MCP OAuth signing key. For production, set "
+                        "Generated and persisted the built-in MCP OAuth signing key. For production, set "
                         "AGENTOS_MCP_SIGNING_KEY so the token trust root is env-managed, not stored in the database."
                     )
                     rows = [("default", material)]
@@ -752,7 +750,7 @@ class AgentOSBundledAuth(OAuthProvider):
 
         The MCP SDK already guarantees the consent page is served over a secure origin:
         ``create_auth_routes`` rejects any ``base_url`` that is not HTTPS or localhost at
-        construction (``validate_issuer_url``), so a plaintext non-localhost bundled AS
+        construction (``validate_issuer_url``), so a plaintext non-localhost built-in AS
         cannot be stood up. This derives the CSRF cookie's ``Secure`` flag from that same
         deployer-declared origin -- correct behind a TLS-terminating proxy (Railway/PaaS),
         where the app sees plain http from the edge though the user's connection is https,
@@ -1106,6 +1104,6 @@ button {{ padding: .5rem 1.25rem; border-radius: 6px; border: 0; cursor: pointer
             return
         deleted = await self._run(self._delete_refresh_sync, value)
         if deleted:
-            log_info("Revoked a bundled MCP OAuth refresh token")
+            log_info("Revoked a built-in MCP OAuth refresh token")
         else:
             log_debug("Revocation no-op: access tokens are stateless (rotate the signing key to invalidate)")

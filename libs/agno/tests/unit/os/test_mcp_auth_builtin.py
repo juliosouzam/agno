@@ -1,4 +1,4 @@
-"""Unit tests for the Bundled Authorization Server (Tier 1 of mcp_auth).
+"""Unit tests for the Built-in Authorization Server (Tier 1 of mcp_auth).
 
 Phase 2 of the mcp_auth spec, exercised over the full AgentOS app on SQLite (the same
 SQLAlchemy store code paths as Postgres):
@@ -35,7 +35,7 @@ from sqlalchemy import text  # noqa: E402
 
 from agno.agent import Agent  # noqa: E402
 from agno.os import AgentOS, MCPServerConfig  # noqa: E402
-from agno.os.mcp_auth_bundled import CONSENT_PATH, DEFAULT_GRANT_SCOPES, AgentOSBundledAuth  # noqa: E402
+from agno.os.mcp_auth_builtin import CONSENT_PATH, DEFAULT_GRANT_SCOPES, AgentOSBuiltinAuth  # noqa: E402
 
 _MCP_INIT_BODY = {
     "jsonrpc": "2.0",
@@ -63,13 +63,13 @@ async def _ok_tool(message: str) -> str:
 def _db(tmp_path):
     from agno.db.sqlite import SqliteDb
 
-    return SqliteDb(db_file=str(tmp_path / "bundled_as.db"))
+    return SqliteDb(db_file=str(tmp_path / "built-in_as.db"))
 
 
-def _provider(db, **kwargs) -> AgentOSBundledAuth:
+def _provider(db, **kwargs) -> AgentOSBuiltinAuth:
     kwargs.setdefault("base_url", "http://localhost")
     kwargs.setdefault("connect_secret", _SECRET)
-    return AgentOSBundledAuth(db=db, **kwargs)
+    return AgentOSBuiltinAuth(db=db, **kwargs)
 
 
 def _os(provider, db=None, security_key=None) -> AgentOS:
@@ -208,7 +208,7 @@ async def test_discovery_and_challenge(tmp_path):
 
 
 async def test_full_flow_behind_active_parent_auth_middleware(tmp_path):
-    """The spec's #1 failure mode: with a parent security key installed, the bundled AS's
+    """The spec's #1 failure mode: with a parent security key installed, the built-in AS's
     own routes (/register, /authorize, /token, the consent page) must be exempt from the
     parent AuthMiddleware -- otherwise a JWT/security-key deploy 401s the OAuth flow
     before the provider runs. Drive the whole flow and assert provider-level statuses."""
@@ -626,7 +626,7 @@ async def test_unconsummated_registration_is_pruned(tmp_path):
         stale = await _register(client)
         stale_id = stale.json()["client_id"]
         # Backdate the pending row well past the unconsummated TTL.
-        from agno.os.mcp_auth_bundled import DEFAULT_UNCONSUMED_CLIENT_TTL
+        from agno.os.mcp_auth_builtin import DEFAULT_UNCONSUMED_CLIENT_TTL
 
         old = int(time.time()) - DEFAULT_UNCONSUMED_CLIENT_TTL - 60
         with db.db_engine.connect() as conn:
@@ -672,21 +672,21 @@ async def test_env_signing_key_is_primary(tmp_path, monkeypatch):
 
 def test_requires_connect_secret(tmp_path):
     with pytest.raises(ValueError, match="connect secret"):
-        AgentOSBundledAuth(base_url="http://localhost", db=_db(tmp_path), connect_secret="")
+        AgentOSBuiltinAuth(base_url="http://localhost", db=_db(tmp_path), connect_secret="")
 
 
 def test_from_env_requires_public_url(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENTOS_PUBLIC_URL", raising=False)
     monkeypatch.delenv("MCP_CONNECT_SECRET", raising=False)
     with pytest.raises(ValueError, match="AGENTOS_PUBLIC_URL"):
-        AgentOSBundledAuth.from_env(db=_db(tmp_path))
+        AgentOSBuiltinAuth.from_env(db=_db(tmp_path))
 
 
 def test_from_env_requires_connect_secret(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTOS_PUBLIC_URL", "https://my-os.example.com")
     monkeypatch.delenv("MCP_CONNECT_SECRET", raising=False)
     with pytest.raises(ValueError, match="MCP_CONNECT_SECRET"):
-        AgentOSBundledAuth.from_env(db=_db(tmp_path))
+        AgentOSBuiltinAuth.from_env(db=_db(tmp_path))
 
 
 def test_async_db_rejected_at_construction(tmp_path):
@@ -843,7 +843,7 @@ async def test_signing_key_rotation_overlap(tmp_path):
 
 
 def test_oauth_principal_is_reserved():
-    """A deployment JWT must not be able to claim an oauth: principal the bundled AS
+    """A deployment JWT must not be able to claim an oauth: principal the built-in AS
     assigns to its connected clients."""
     from agno.os.middleware.jwt import is_reserved_principal
 

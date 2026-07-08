@@ -5,7 +5,7 @@ Examples for `mcp_demo` in AgentOS.
 ## Files
 - `enable_mcp_example.py` — Example AgentOS app with MCP enabled.
 - `custom_mcp_tool_example.py` — Expose ONE custom MCP tool routed through an agent, with the built-in tools disabled (uses `MCPServerConfig`).
-- `oauth_bundled_example.py` — Add OAuth so claude.ai / ChatGPT can connect by pasting the `/mcp` URL, using the bundled authorization server (`mcp_auth="bundled"`).
+- `oauth_builtin_example.py` — Add OAuth so claude.ai / ChatGPT can connect by pasting the `/mcp` URL, using the built-in authorization server (`mcp_auth="builtin"`).
 - `oauth_authkit_example.py` — Same, but with an external authorization server (WorkOS AuthKit) for production / multi-user.
 - `mcp_tools_advanced_example.py` — Example AgentOS app where the agent has MCPTools.
 - `mcp_tools_example.py` — Example AgentOS app where the agent has MCPTools.
@@ -82,12 +82,12 @@ a token. `AgentOS(mcp_auth=...)` adds OAuth to `/mcp` so those clients connect b
 URL. It is opt-in: with `mcp_auth` unset, nothing changes. Existing `agno_pat_` and JWT clients
 keep working alongside it.
 
-**Tier 1 — bundled server (out of the box, `oauth_bundled_example.py`).** AgentOS becomes its
+**Tier 1 — built-in server (out of the box, `oauth_builtin_example.py`).** AgentOS becomes its
 own OAuth authorization server, backed by its Postgres db. No external accounts. Never open:
 connecting requires the deployer secret on a consent page.
 
 ```python
-agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth="bundled")
+agent_os = AgentOS(agents=[my_agent], db=postgres_db, enable_mcp_server=True, mcp_auth="builtin")
 ```
 
 ```bash
@@ -113,7 +113,7 @@ agent_os = AgentOS(
 )
 ```
 
-The same seam carries both tiers, so moving from bundled to an external AS is a config change.
+The same seam carries both tiers, so moving from built-in to an external AS is a config change.
 `/info` reports `auth_mode="oauth"` with the authorization server and resource URL so clients
 (and `agno connect`) can discover the mode.
 
@@ -121,7 +121,7 @@ The same seam carries both tiers, so moving from bundled to an external AS is a 
 `sessions:read`, `config:read`) on the external token, so configure your AS to emit agno-format
 scopes in the token's `scope`/`scp` claim per user — a token carrying only OIDC scopes
 authenticates but is denied every tool. Mapping users to agno scopes at the AS *is* the Tier-2
-per-user RBAC story. (The bundled Tier-1 server issues these scopes itself.)
+per-user RBAC story. (The built-in Tier-1 server issues these scopes itself.)
 
 ## Prerequisites
 - Load environment variables with `direnv allow` (requires `.envrc`).

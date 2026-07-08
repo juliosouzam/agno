@@ -40,7 +40,7 @@ _AUTH_COMPLETE_ATTR = "_agno_auth_complete"
 
 
 # Server-assigned identity namespaces a human JWT must never claim as its subject.
-# Service accounts live in ``sa:``, the scheduler is ``__scheduler__``, and the bundled
+# Service accounts live in ``sa:``, the scheduler is ``__scheduler__``, and the built-in
 # MCP OAuth server assigns ``oauth:`` to its connected clients.
 RESERVED_PRINCIPAL_PREFIXES = (SERVICE_ACCOUNT_PRINCIPAL_PREFIX, "oauth:")
 

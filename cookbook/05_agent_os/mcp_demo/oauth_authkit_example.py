@@ -1,6 +1,6 @@
 """AgentOS with OAuth on the MCP endpoint — bring-your-own authorization server (Tier 2).
 
-For production / multi-user: instead of the bundled server, pass any fastmcp AuthProvider.
+For production / multi-user: instead of the built-in server, pass any fastmcp AuthProvider.
 WorkOS AuthKit is the documented default (free to 1M MAU) and gives real per-user
 identity, RBAC, and SSO. The same mcp_auth seam carries both tiers, so this is a config
 change, not a rewrite.

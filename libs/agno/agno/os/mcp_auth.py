@@ -48,7 +48,7 @@ SERVICE_ACCOUNT_CLAIM = "agno_service_account"
 # os.authorization), while PAT and OAuth-provider scopes are always enforced.
 AUTHORIZATION_ENABLED_CLAIM = "agno_authorization_enabled"
 
-# Marks a token minted by a trusted first-party agno source (the bundled AS) so the
+# Marks a token minted by a trusted first-party agno source (the built-in AS) so the
 # identity bridge permits it to carry a server-assigned reserved principal (``oauth:``).
 # An external Tier-2 provider's token never carries it, so a reserved ``sub`` from such a
 # token is rejected rather than honored (impersonation guard).
@@ -158,7 +158,7 @@ class MCPIdentityBridgeMiddleware:
                 service_account_name = claims.get(SERVICE_ACCOUNT_CLAIM)
                 # A token must not claim a server-reserved principal (sa:/oauth:/scheduler)
                 # unless it comes from a trusted first-party source that owns that
-                # namespace: the PAT verifier (sa:) or the bundled AS (oauth:). An
+                # namespace: the PAT verifier (sa:) or the built-in AS (oauth:). An
                 # external Tier-2 provider's token carrying such a sub is an impersonation
                 # attempt -- leave the identity unset so the fail-closed tool gates deny.
                 trusted_internal = service_account_name is not None or bool(claims.get(INTERNAL_ISSUER_CLAIM))
@@ -218,23 +218,23 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     )
 
 
-def _resolve_bundled(os: "AgentOS") -> AuthProvider:
-    """Resolve ``mcp_auth="bundled"``: the built-in AS on the deployment's Postgres db.
+def _resolve_builtin(os: "AgentOS") -> AuthProvider:
+    """Resolve ``mcp_auth="builtin"``: the built-in AS on the deployment's Postgres db.
 
     Configuration comes from the environment (``AGENTOS_PUBLIC_URL``,
     ``MCP_CONNECT_SECRET``, optional ``AGENTOS_MCP_SIGNING_KEY``) so a template deploy
     enables it with env vars alone.
     """
-    from agno.os.mcp_auth_bundled import AgentOSBundledAuth
+    from agno.os.mcp_auth_builtin import AgentOSBuiltinAuth
 
     db = _first_postgres_db(os)
     if db is None:
         raise ValueError(
-            'mcp_auth="bundled" requires a Postgres database on the AgentOS (the bundled authorization '
+            'mcp_auth="builtin" requires a Postgres database on the AgentOS (the built-in authorization '
             "server stores clients, codes, and refresh-token state there). Pass db=PostgresDb(...), or "
-            "construct AgentOSBundledAuth(db=...) explicitly -- it accepts SqliteDb for development."
+            "construct AgentOSBuiltinAuth(db=...) explicitly -- it accepts SqliteDb for development."
         )
-    return AgentOSBundledAuth.from_env(db=db, server_name=getattr(os, "name", None))
+    return AgentOSBuiltinAuth.from_env(db=db, server_name=getattr(os, "name", None))
 
 
 def _first_postgres_db(os: "AgentOS") -> Optional[Any]:
@@ -272,12 +272,12 @@ def resolve_mcp_auth(os: "AgentOS") -> Optional[AuthProvider]:
     if raw is None:
         return None
     if isinstance(raw, str):
-        if raw != "bundled":
+        if raw != "builtin":
             raise ValueError(
-                f'Unknown mcp_auth value {raw!r}: use "bundled" for the built-in authorization server, '
+                f'Unknown mcp_auth value {raw!r}: use "builtin" for the built-in authorization server, '
                 "or pass a fastmcp AuthProvider instance (e.g. AuthKitProvider)."
             )
-        raw = _resolve_bundled(os)
+        raw = _resolve_builtin(os)
     if not isinstance(raw, AuthProvider):
         raise TypeError(
             f"mcp_auth must be a fastmcp AuthProvider, got {type(raw).__name__!r}. "
