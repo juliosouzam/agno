@@ -102,22 +102,21 @@ class JWTBearerTokenVerifier(TokenVerifier):
     def __init__(
         self,
         validator: Any,
-        verify_audience: bool = False,
-        audience: Any = None,
+        expected_audience: Any = None,
         authorization: bool = False,
     ) -> None:
         super().__init__()
         self._validator = validator
-        self._verify_audience = verify_audience
-        self._audience = audience
+        # Already resolved (configured audience or the AgentOS id) by the caller via
+        # jwt.resolve_expected_audience, so REST and /mcp cannot disagree on it.
+        self._expected_audience = expected_audience
         self._authorization = authorization
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         from agno.os.middleware.jwt import is_reserved_principal
 
         try:
-            expected_audience = (self._audience or None) if self._verify_audience else None
-            payload = self._validator.validate_token(token, expected_audience)
+            payload = self._validator.validate_token(token, self._expected_audience)
         except Exception:
             return None
         claims = self._validator.extract_claims(payload)
@@ -191,7 +190,7 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     """A verifier for the deployment's existing JWT config, or None when none is configured."""
     from os import getenv
 
-    from agno.os.middleware.jwt import JWTValidator, build_jwt_middleware_kwargs
+    from agno.os.middleware.jwt import JWTValidator, build_jwt_middleware_kwargs, resolve_expected_audience
 
     kwargs = build_jwt_middleware_kwargs(
         getattr(os, "authorization_config", None),
@@ -209,11 +208,13 @@ def _build_jwt_token_verifier(os: "AgentOS") -> Optional[JWTBearerTokenVerifier]
     )
     return JWTBearerTokenVerifier(
         validator,
-        verify_audience=bool(kwargs.get("verify_audience")),
-        # The parent AuthMiddleware falls back to the AgentOS id as the expected
-        # audience; without the same fallback here, verify_audience with no explicit
-        # audience would enforce on REST but not on /mcp.
-        audience=kwargs.get("audience") or (getattr(os, "id", None) if kwargs.get("verify_audience") else None),
+        # Shared with the parent AuthMiddleware and the WS path, so verify_audience with no
+        # explicit audience enforces the AgentOS id on /mcp exactly as it does on REST.
+        expected_audience=resolve_expected_audience(
+            verify_audience=bool(kwargs.get("verify_audience")),
+            audience=kwargs.get("audience"),
+            os_id=getattr(os, "id", None),
+        ),
         authorization=bool(getattr(os, "authorization", False)),
     )
 

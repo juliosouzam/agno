@@ -60,6 +60,26 @@ def is_reserved_principal(user_id: Any) -> bool:
     )
 
 
+def resolve_expected_audience(
+    *,
+    verify_audience: bool,
+    audience: Optional[Union[str, Iterable[str]]],
+    os_id: Optional[str],
+) -> Optional[Union[str, Iterable[str]]]:
+    """The expected JWT audience for ``JWTValidator.validate_token``.
+
+    The configured audience, falling back to the AgentOS id, and only when audience
+    verification is enabled. Single source of this rule so every JWT-verifying surface --
+    the parent ``AuthMiddleware`` (REST), the MCP ``JWTBearerTokenVerifier``, and the
+    WebSocket auth path -- resolves it identically. (The MCP copy once lacked the fallback,
+    enforcing ``verify_audience=True`` on REST but not ``/mcp``; keeping it here stops that
+    class of drift recurring across the three call sites.)
+    """
+    if not verify_audience:
+        return None
+    return audience or os_id
+
+
 class TokenSource(str, Enum):
     """Enum for JWT token source options."""
 
@@ -1002,9 +1022,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         try:
             # Validate token and extract claims (with audience verification if configured)
-            expected_audience = None
-            if self.verify_audience:
-                expected_audience = self.audience or agent_os_id
+            expected_audience = resolve_expected_audience(
+                verify_audience=self.verify_audience, audience=self.audience, os_id=agent_os_id
+            )
             payload: Dict[str, Any] = self.validator.validate_token(token, expected_audience)  # type: ignore
 
             # Extract standard claims and store in request.state
