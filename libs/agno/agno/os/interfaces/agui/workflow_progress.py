@@ -29,6 +29,7 @@ from ag_ui.core import (
     StepStartedEvent,
 )
 
+from agno.os.interfaces.agui import activity
 from agno.os.interfaces.agui.state import StreamState
 from agno.os.interfaces.agui.workflow_handlers import _event_value, _render_content
 from agno.run.base import BaseRunOutputEvent, RunStatus
@@ -124,7 +125,10 @@ def error_snapshot(state: StreamState) -> List[BaseEvent]:
         if step["status"] in ("running", "paused"):
             step["status"] = "error"
     state.set_state_snapshot(state.run_state)
-    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))]
+    events: List[BaseEvent] = [
+        StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))
+    ]
+    return events + activity.terminal_snapshot(state)
 
 
 def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
@@ -169,4 +173,4 @@ def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
     # workflow_started initialises progress above; container/agent events are no-ops (their inner
     # step_started/completed populate the flat list). step_output carries no step_id and only restates
     # content the immediately-following step_completed sets authoritatively, so it needs no branch here.
-    return events + _emit_delta(state)
+    return events + _emit_delta(state) + activity.on_progress(state)

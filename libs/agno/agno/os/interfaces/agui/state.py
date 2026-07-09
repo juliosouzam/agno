@@ -54,6 +54,13 @@ class StreamState:
     # State delta tracking
     _last_snapshot: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
+    # Opt-in AG-UI ACTIVITY channel for workflow progress (dual-emitted beside
+    # STATE, see activity.py). activity_baseline is the content ACTIVITY_DELTA
+    # diffs against -- rooted at the progress dict itself, NOT at run_state
+    # (whose baseline _last_snapshot serves the STATE channel).
+    emit_activity: bool = False
+    activity_baseline: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
     # Run context
     thread_id: str = ""
     run_id: str = ""

@@ -25,6 +25,7 @@ class AGUI(BaseInterface):
         workflow: Optional[Union[Workflow, RemoteWorkflow]] = None,
         prefix: str = "",
         tags: Optional[List[str]] = None,
+        emit_activity: bool = False,
     ):
         """
         Initialize the AGUI interface.
@@ -35,12 +36,17 @@ class AGUI(BaseInterface):
             workflow: The workflow to expose via AG-UI
             prefix: Custom prefix for the router (e.g., "/agui/v1", "/chat/public")
             tags: Custom tags for the router (e.g., ["AGUI", "Chat"], defaults to ["AGUI"])
+            emit_activity: Also emit workflow progress as AG-UI ACTIVITY events
+                (ACTIVITY_SNAPSHOT/ACTIVITY_DELTA), additive beside the STATE channel.
+                Off by default: older AG-UI clients without the Activity schemas
+                reject unknown event types, and off keeps the wire unchanged.
         """
         self.agent = agent
         self.team = team
         self.workflow = workflow
         self.prefix = prefix
         self.tags = tags or ["AGUI"]
+        self.emit_activity = emit_activity
 
         provided = [entity for entity in (self.agent, self.team, self.workflow) if entity is not None]
         if not provided:
@@ -51,7 +57,13 @@ class AGUI(BaseInterface):
     def get_router(self) -> APIRouter:
         self.router = APIRouter(prefix=self.prefix, tags=self.tags)  # type: ignore
 
-        self.router = attach_routes(router=self.router, agent=self.agent, team=self.team, workflow=self.workflow)
+        self.router = attach_routes(
+            router=self.router,
+            agent=self.agent,
+            team=self.team,
+            workflow=self.workflow,
+            emit_activity=self.emit_activity,
+        )
 
         return self.router
 
