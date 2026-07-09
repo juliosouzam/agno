@@ -6,7 +6,8 @@ No registry file is kept — commands operate on the current directory.
 
 Bare `agno create` (no args) is interactive: pick a starter template, then a project
 directory name. Flags and positional args skip the prompts. Automation (`--json` or a
-non-TTY) requires an explicit name (and template or `--url`).
+non-TTY) requires an explicit name; the default template is used unless `--template`
+or `--url` is provided.
 """
 
 import shutil
@@ -122,8 +123,8 @@ def _resolve_create_inputs(
             template = DEFAULT_TEMPLATE
         else:
             raise CLIError(
-                "A project name and starter template are required in non-interactive mode.",
-                hint="Pass a directory name and --template / -t (one of: "
+                "A project name is required in non-interactive mode.",
+                hint="Pass a directory name, and optionally --template / -t (one of: "
                 + ", ".join(TEMPLATE_ORDER)
                 + "), or run `agno create` in a terminal.",
             )

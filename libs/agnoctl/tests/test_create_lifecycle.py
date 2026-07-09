@@ -112,6 +112,7 @@ def test_create_bare_json_requires_name(fake_git):
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert "project name" in payload["error"].lower()
+    assert "optionally --template" in payload["hint"]
     assert fake_git.calls == []
 
 
