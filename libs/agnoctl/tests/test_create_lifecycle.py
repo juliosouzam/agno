@@ -142,7 +142,7 @@ def test_create_interactive_template_only_prompts_name(fake_git, monkeypatch):
     result = runner.invoke(app, ["create", "-t", "agentos-fly"], input="fly-os\n")
     assert result.exit_code == 0, result.output
     assert "Select starter template" not in result.output
-    assert "Project Directory" in result.output
+    assert "Project Name" in result.output
     assert create_module.TEMPLATES["agentos-fly"] in fake_git.calls[0]
     assert (Path.cwd() / "fly-os" / "docker-compose.yml").exists()
 

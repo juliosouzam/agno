@@ -85,9 +85,9 @@ def _prompt_template() -> str:
 
 
 def _prompt_project_name(default: str) -> str:
-    """Ask for the project directory name, validating until the name is usable."""
+    """Ask for the project name, validating until the name is usable."""
     while True:
-        name = str(typer.prompt("Project Directory", default=default)).strip()
+        name = str(typer.prompt("Project Name", default=default)).strip()
         try:
             validate_project_name(name)
             return name
