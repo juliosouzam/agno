@@ -77,6 +77,34 @@ class FakeAgentOS:
             return True
         return self._bearer(request) == self.security_key
 
+    def _account_for_bearer(self, request: httpx.Request) -> Optional[Dict[str, Any]]:
+        token = self._bearer(request)
+        for account in self.accounts.values():
+            if account["token"] == token and not account.get("revoked_at"):
+                return account
+        return None
+
+    def seed_account(self, name: str, scopes: List[str]) -> str:
+        """Insert a service account directly (as if minted in an earlier, protected era)
+        and return its plaintext token -- for scenarios where minting is impossible now
+        (open REST plane) but a durable credential survives."""
+        token = "agno_pat_" + (name.replace("-", "") + str(self._next_id) + "y" * 40)[:43]
+        self.accounts[name] = {
+            "id": "sa-" + str(self._next_id),
+            "name": name,
+            "principal": "sa:" + name,
+            "token_prefix": token[:16],
+            "scopes": scopes,
+            "created_at": 1780000000,
+            "expires_at": 1790000000,
+            "last_used_at": None,
+            "revoked_at": None,
+            "created_by": None,
+            "token": token,
+        }
+        self._next_id += 1
+        return token
+
     def _account_response(self, account: Dict[str, Any], include_token: bool = False) -> Dict[str, Any]:
         payload = {k: v for k, v in account.items() if k != "token"}
         # Render scopes in the parsed RBAC shape the server returns; the store keeps raw strings.
@@ -139,12 +167,19 @@ class FakeAgentOS:
             return httpx.Response(401, json={"detail": detail})
 
         if path == "/service-accounts" and method == "POST":
-            # An open REST plane ("none") installs no auth middleware, so no caller is
-            # ever "authenticated" and the real server's anonymous-mint gate refuses
-            # every mint regardless of the bearer.
+            # An open REST plane ("none") installs no auth middleware, so anonymous
+            # mints are refused -- but like the real server, a VERIFIED service-account
+            # bearer still authenticates by prefix, and one holding admin or
+            # service_accounts:write may mint.
             if self.auth_mode == "none":
-                return httpx.Response(401, json={"detail": "JWT authentication is required to mint a service account."})
-            if not self._is_admin(request):
+                minter = self._account_for_bearer(request)
+                if minter is None:
+                    return httpx.Response(
+                        401, json={"detail": "JWT authentication is required to mint a service account."}
+                    )
+                if not set(minter.get("scopes") or []) & {"admin", "service_accounts:write"}:
+                    return httpx.Response(403, json={"detail": "Missing required scope: service_accounts:write"})
+            elif not self._is_admin(request):
                 return httpx.Response(401, json={"detail": "Invalid authentication token"})
             body = json.loads(request.content)
             name = body["name"]
@@ -284,9 +319,11 @@ def fake_clients(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     import agnoctl.commands.connect as connect_module
     import agnoctl.commands.disconnect as disconnect_module
+    import agnoctl.commands.status as status_module
 
     monkeypatch.setattr(connect_module, "build_adapters", build)
     monkeypatch.setattr(disconnect_module, "build_adapters", build)
+    monkeypatch.setattr(status_module, "build_adapters", build)
     return tmp_path
 
 

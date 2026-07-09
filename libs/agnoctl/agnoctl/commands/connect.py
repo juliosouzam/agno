@@ -17,10 +17,13 @@ from rich.status import Status
 from agnoctl.clients import CLIENT_ALIASES, build_adapters, display_name
 from agnoctl.clients.base import ClientAdapter
 from agnoctl.commands._common import (
+    ADMIN_TOKEN_ENV,
     LEGACY_SERVER_NAME,
+    PAT_PREFIX,
     _is_loopback_host,
     derive_server_name,
     ensure_env_file_url_trusted,
+    env_admin_credential,
     handle_cli_error,
     parse_expires,
     require_mint_capable,
@@ -422,7 +425,14 @@ def _connect(
         os_label = '"' + os_info.name + '" ' if os_info.name else ""
         print_info("AgentOS " + os_label + "at " + os_info.base_url + version + source + ", MCP at " + os_info.mcp_url)
         if oauth_mode:
-            servers = os_info.oauth.authorization_servers if os_info.oauth is not None else []
+            # Name the authorization server only when it is a separate system (an
+            # external IdP); the builtin AS is the OS itself, and repeating its URL
+            # with a trailing slash reads like a mystery third party.
+            servers = [
+                s.rstrip("/")
+                for s in (os_info.oauth.authorization_servers if os_info.oauth is not None else [])
+                if s.rstrip("/") != os_info.base_url.rstrip("/")
+            ]
             issuer = (" via " + ", ".join(servers)) if servers else ""
             print_info("The MCP endpoint is OAuth-protected: apps complete a one-time sign-in" + issuer + ".")
 
@@ -443,26 +453,49 @@ def _connect(
         else []
     )
 
-    # Minting needs a REST plane that can authenticate the caller: auth_mode is that
-    # plane (the MCP OAuth posture lives in os_info.oauth and never enables minting).
-    minting = os_info.auth_mode not in ("none",) and bool(selected) and not oauth_mode
-    # --pat explicitly asks for minted bearers; against an open REST plane ("none") the
-    # server refuses every mint, so silently writing the tokenless entries the operator
-    # opted out of would be a lie. Fail up front naming the server-side gap.
-    if pat and os_info.oauth_enabled and not minting and selected:
-        require_mint_capable(
-            os_info.base_url, os_info.auth_mode, or_else="Or drop --pat to use the OAuth sign-in flow."
+    # Minting needs a credential the server can authenticate: a protected REST plane
+    # (auth_mode is that plane; the MCP OAuth posture lives in os_info.oauth and never
+    # enables minting), or -- on an open plane -- an exported service-account token,
+    # which the server dispatches by prefix and scope-checks in every auth mode.
+    env_credential = env_admin_credential()
+    minting = (
+        bool(selected)
+        and not oauth_mode
+        and (
+            os_info.auth_mode not in ("none",)
+            or (pat and env_credential is not None and env_credential.startswith(PAT_PREFIX))
         )
+    )
+    # Dead end: minted tokens are wanted (--pat) or required (/mcp is token-protected
+    # with no authorization server to sign in through), but nothing can mint here.
+    # Fail before any credential prompt or config write.
+    if selected and not oauth_mode and not minting and (pat or os_info.oauth is not None):
+        if pat and os_info.oauth_enabled:
+            or_else = "Or drop --pat to use the OAuth sign-in flow."
+        elif os_info.oauth is not None:
+            or_else = "Or export a previously minted token via " + ADMIN_TOKEN_ENV + " and re-run with --pat."
+        else:
+            or_else = "Or drop --pat to connect without a token (this MCP endpoint is unauthenticated)."
+        require_mint_capable(os_info.base_url, os_info.auth_mode, or_else=or_else)
         raise CLIError(
-            "--pat needs an admin credential to mint tokens, but this AgentOS reports no REST "
-            "authentication (auth mode: " + os_info.auth_mode + ").",
-            hint="Set OS_SECURITY_KEY (or configure JWT auth) on the server, or drop --pat.",
+            "This AgentOS reports no REST authentication (auth mode: "
+            + os_info.auth_mode
+            + ") and no admin credential is exported, so nothing can mint the tokens "
+            + ("--pat asks for." if pat else "its token-protected MCP endpoint needs."),
+            hint="Set OS_SECURITY_KEY (or configure JWT auth) on the server, or export "
+            + ADMIN_TOKEN_ENV
+            + " if minting worked before. "
+            + or_else,
         )
     # When we mint, the admin token is attached to base_url and the minted PATs are written
     # into client configs and sent to the (same-origin) MCP URL. Refuse to do any of that
     # over plaintext HTTP to a non-loopback host unless the operator opted in.
     if minting:
         require_secure_url(os_info.base_url, allow_http=allow_http, what="the admin credential and minted tokens")
+    elif selected and _stored_token_exists(selected, (server_name, legacy_name), os_info.mcp_url):
+        # Not minting, but re-verification re-sends any token already stored in a
+        # matching entry: the same plaintext rule applies to credentials we merely relay.
+        require_secure_url(os_info.base_url, allow_http=allow_http, what="a token stored in a client config")
     admin_token = resolve_admin_token(os_info.auth_mode, json_mode) if minting else None
     # "Authorization is disabled" is a statement about the whole server; stay quiet when
     # an mcp.oauth block says /mcp has its own auth the REST plane knows nothing about.
@@ -560,11 +593,17 @@ def _connect(
 
     # Spot a deployed AgentOS: when discovery lands on a public, token-free URL (typically
     # AGENTOS_URL set to the production domain), the hosted chat apps can use it too --
-    # surface their setup steps without requiring --clients.
+    # surface their setup steps without requiring --clients. Auto-surfaced apps are
+    # marked so the report can render them as one compact aside instead of two full
+    # instruction blocks nobody asked for; explicitly requested apps keep the detail.
+    explicit_apps = set(wanted_apps)
     if auto_surface_apps:
         wanted_apps = list(CHAT_APPS)
     for app in wanted_apps:
-        results.append(_chat_app_instructions(app, os_info))
+        entry = _chat_app_instructions(app, os_info)
+        if app not in explicit_apps:
+            entry["auto"] = True
+        results.append(entry)
 
     _report(os_info, results, server_name, open_mcp_warning, json_mode)
 
@@ -638,6 +677,18 @@ def _select_os(candidates: List[OSInfo], verb: str) -> OSInfo:
         if raw.isdigit() and 1 <= int(raw) <= len(candidates):
             return candidates[int(raw) - 1]
         print_warning("Enter a number between 1 and " + str(len(candidates)) + ".")
+
+
+def _stored_token_exists(adapters: List[ClientAdapter], names: "tuple[Optional[str], ...]", mcp_url: str) -> bool:
+    """Whether any selected client already holds a token-carrying entry for this OS."""
+    for adapter in adapters:
+        for name in names:
+            if name is None:
+                continue
+            entry = adapter.read_existing(name)
+            if entry is not None and entry.token is not None and entry.url == mcp_url:
+                return True
+    return False
 
 
 def _remove_legacy_entry(adapter: ClientAdapter, os_info: OSInfo, legacy_name: str, result: Dict[str, Any]) -> None:
@@ -833,16 +884,21 @@ def _report(
         raise typer.Exit(exit_code)
 
     print_info("")
+    # Auto-surfaced chat apps render as one compact aside at the end; only explicitly
+    # requested ones get their full instruction blocks in the result list.
+    auto_apps = [r for r in results if r["status"] == "manual" and r.get("auto")]
     for r in results:
+        if r["status"] == "manual" and r.get("auto"):
+            continue
         label = display_name(r["client"])
         if r["status"] == "connected":
             tools = (r.get("verify") or {}).get("tools")
             suffix = " (" + str(tools) + " tools)" if tools else ""
             print_success("  connected      " + label + suffix + "  ->  " + str(r.get("location", "")))
         elif r["status"] == "needs-login":
+            # The sign-in step lives in the "To finish" section below, next to the
+            # restart step, so the row stays a one-line statement of what happened.
             print_warning("  sign in        " + label + "  ->  " + str(r.get("location", "")))
-            for step in r.get("instructions", []):
-                print_info("                 - " + step)
         elif r["status"] == "already-connected":
             print_success("  already ok     " + label + "  ->  " + str(r.get("location", "")))
         elif r["status"] == "skipped":
@@ -858,37 +914,54 @@ def _report(
             print_error("  failed         " + label + "  (" + str(r.get("error") or "unknown error") + ")")
         if r.get("note"):
             print_warning("                 note: " + str(r["note"]))
-        if r.get("replaced_url"):
-            print_warning("                 replaced an entry that pointed at " + str(r["replaced_url"]))
         if r.get("replaced_legacy"):
             print_warning("                 renamed the legacy '" + str(r["replaced_legacy"]) + "' entry")
 
-    # One summary + restart section: freshly wired clients hold no live MCP session yet,
-    # and rotated ones keep using the previous (now revoked) token until they restart.
+    # Entries replaced across clients are almost always the same other OS (same entry
+    # name, e.g. local vs deployed instances both named "AgentOS"): say it once, with
+    # the way to keep both, instead of a cryptic per-row echo.
+    replaced_urls: Dict[str, List[str]] = {}
+    for r in results:
+        if r.get("replaced_url"):
+            replaced_urls.setdefault(str(r["replaced_url"]), []).append(display_name(r["client"]))
+    for url, labels in replaced_urls.items():
+        print_info("")
+        print_warning(
+            "This replaced " + (", ".join(sorted(set(labels)))) + "'s existing '" + server_name + "' entry, "
+            "which pointed at " + url + " -- those apps now connect to this OS instead."
+        )
+        print_info(
+            "To use both, reconnect the other OS under its own entry name: "
+            "agno connect --url <other-os> --server-name <name>"
+        )
+
+    # One summary + next-steps section: freshly wired clients hold no live MCP session
+    # yet, and rotated ones keep using the previous (now revoked) token until they
+    # restart. The sign-in steps sit HERE, numbered after the restart they depend on.
     fresh = sorted({display_name(r["client"]) for r in results if r["status"] in ("connected", "needs-login")})
     if fresh:
-        signin_pending = any(r["status"] == "needs-login" for r in results)
+        signin_steps = [
+            (display_name(r["client"]), r["instructions"][0])
+            for r in results
+            if r["status"] == "needs-login" and r.get("instructions")
+        ]
         os_label = ('"' + os_info.name + '"') if os_info.name else os_info.base_url
         count = str(len(fresh)) + (" app" if len(fresh) == 1 else " apps")
         loads = "so it loads" if len(fresh) == 1 else "so they load"
         print_info("")
-        verb = "Configured" if signin_pending else "Connected"
+        verb = "Configured" if signin_steps else "Connected"
         print_success(
-            verb
-            + " "
-            + count
-            + " "
-            + ("for" if signin_pending else "to")
-            + " "
-            + os_label
-            + " as '"
-            + server_name
-            + "'."
+            verb + " " + count + " " + ("for" if signin_steps else "to") + " " + os_label + " as '" + server_name + "'."
         )
-        restart = "Restart " + ", ".join(fresh) + " " + loads + " the new MCP server."
-        if signin_pending:
-            restart += " Then complete the one-time sign-in above."
-        print_warning(restart)
+        if signin_steps:
+            width = max(len(name) for name, _ in signin_steps)
+            print_warning("To finish:")
+            print_info("  1. Restart " + ", ".join(fresh) + " " + loads + " the new MCP server.")
+            print_info("  2. Complete the one-time sign-in in each app:")
+            for name, step in signin_steps:
+                print_info("       " + name.ljust(width + 2) + step)
+        else:
+            print_warning("Restart " + ", ".join(fresh) + " " + loads + " the new MCP server.")
         if any(r.get("rotated") for r in results):
             print_warning("A rotated client keeps using its previous (now revoked) token until it restarts.")
 
@@ -914,6 +987,15 @@ def _report(
             + " carried tokens; the service accounts behind them stay valid until they expire."
         )
         print_info("Revoke them with: agno tokens revoke <name> --url " + os_info.base_url)
+
+    if auto_apps:
+        print_info("")
+        print_info("Also reachable from the hosted chat apps (claude.ai, ChatGPT):")
+        print_info("  Settings -> Connectors -> Add custom connector -> " + os_info.mcp_url)
+        if os_info.oauth_enabled:
+            print_info("  Both authenticate with the same one-time sign-in when you add the connector.")
+        print_info("  Custom connectors need a paid plan; ChatGPT needs Developer Mode for full tool access.")
+
     if open_mcp_warning:
         print_info("")
         print_warning(open_mcp_warning)
