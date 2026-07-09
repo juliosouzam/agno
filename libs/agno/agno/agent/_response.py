@@ -63,7 +63,6 @@ from agno.utils.reasoning import (
     add_reasoning_metrics_to_metadata,
     add_reasoning_step_to_metadata,
     append_to_reasoning_content,
-    extract_thinking_content,
     flush_think_tag_state,
     process_think_tag_chunk,
     update_run_output_with_reasoning,
@@ -1190,14 +1189,14 @@ def handle_model_response_stream(
 
         # Emit final content event if there was buffered content
         if flush_result.clean_content or flush_result.reasoning_content:
-            yield handle_event(
+            yield handle_event(  # type: ignore
                 create_run_output_content_event(
                     from_run_response=run_response,
                     content=flush_result.clean_content,
                     reasoning_content=flush_result.reasoning_content,
                 ),
                 run_response,
-                events_to_skip=agent.events_to_skip,
+                events_to_skip=agent.events_to_skip,  # type: ignore
                 store_events=agent.store_events,
             )
 
@@ -1378,14 +1377,14 @@ async def ahandle_model_response_stream(
 
         # Emit final content event if there was buffered content
         if flush_result.clean_content or flush_result.reasoning_content:
-            yield handle_event(
+            yield handle_event(  # type: ignore
                 create_run_output_content_event(
                     from_run_response=run_response,
                     content=flush_result.clean_content,
                     reasoning_content=flush_result.reasoning_content,
                 ),
                 run_response,
-                events_to_skip=agent.events_to_skip,
+                events_to_skip=agent.events_to_skip,  # type: ignore
                 store_events=agent.store_events,
             )
 
@@ -1483,16 +1482,16 @@ def handle_model_response_chunk(
                     run_response.content_type = content_type
                 else:
                     # Parse <think>/<thinking> tags in-flight during streaming
-                    think_tag_state = reasoning_state.get("think_tag_state")
-                    if think_tag_state is not None:
+                    think_tag_state = reasoning_state.get("think_tag_state") if reasoning_state else None
+                    if think_tag_state is not None and reasoning_state is not None:
                         tag_result = process_think_tag_chunk(model_response_event.content, think_tag_state)
 
                         # Emit ReasoningStartedEvent when entering <think> block
                         if tag_result.entered_think and stream_events and not reasoning_state["reasoning_started"]:
-                            yield handle_event(
+                            yield handle_event(  # type: ignore
                                 create_reasoning_started_event(from_run_response=run_response),
                                 run_response,
-                                events_to_skip=agent.events_to_skip,
+                                events_to_skip=agent.events_to_skip,  # type: ignore
                                 store_events=agent.store_events,
                             )
                             reasoning_state["reasoning_started"] = True
@@ -1521,11 +1520,11 @@ def handle_model_response_chunk(
             # Process reasoning content
             if model_response_event.reasoning_content is not None:
                 # Emit ReasoningStartedEvent on first reasoning chunk
-                if stream_events and not reasoning_state["reasoning_started"]:
-                    yield handle_event(
+                if stream_events and reasoning_state is not None and not reasoning_state["reasoning_started"]:
+                    yield handle_event(  # type: ignore
                         create_reasoning_started_event(from_run_response=run_response),
                         run_response,
-                        events_to_skip=agent.events_to_skip,
+                        events_to_skip=agent.events_to_skip,  # type: ignore
                         store_events=agent.store_events,
                     )
                     reasoning_state["reasoning_started"] = True
