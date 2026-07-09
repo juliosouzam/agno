@@ -1486,16 +1486,6 @@ def handle_model_response_chunk(
                     if think_tag_state is not None and reasoning_state is not None:
                         tag_result = process_think_tag_chunk(model_response_event.content, think_tag_state)
 
-                        # Emit ReasoningStartedEvent when entering <think> block
-                        if tag_result.entered_think and stream_events and not reasoning_state["reasoning_started"]:
-                            yield handle_event(  # type: ignore
-                                create_reasoning_started_event(from_run_response=run_response),
-                                run_response,
-                                events_to_skip=agent.events_to_skip,  # type: ignore
-                                store_events=agent.store_events,
-                            )
-                            reasoning_state["reasoning_started"] = True
-
                         # Accumulate clean content (outside <think> tags)
                         if tag_result.clean_content:
                             model_response.content = (model_response.content or "") + tag_result.clean_content
@@ -1517,18 +1507,8 @@ def handle_model_response_chunk(
 
                     run_response.content_type = "str"
 
-            # Process reasoning content
+            # Process reasoning content (native reasoning_content field)
             if model_response_event.reasoning_content is not None:
-                # Emit ReasoningStartedEvent on first reasoning chunk
-                if stream_events and reasoning_state is not None and not reasoning_state["reasoning_started"]:
-                    yield handle_event(  # type: ignore
-                        create_reasoning_started_event(from_run_response=run_response),
-                        run_response,
-                        events_to_skip=agent.events_to_skip,  # type: ignore
-                        store_events=agent.store_events,
-                    )
-                    reasoning_state["reasoning_started"] = True
-
                 model_response.reasoning_content = (
                     model_response.reasoning_content or ""
                 ) + model_response_event.reasoning_content
@@ -1541,6 +1521,35 @@ def handle_model_response_chunk(
                     model_response.reasoning_content += model_response_event.redacted_reasoning_content
                 run_response.reasoning_content = model_response.reasoning_content
 
+            # Emit ReasoningContentDeltaEvent for ALL reasoning sources when streaming
+            # This includes: parsed <think> tags, native reasoning_content, redacted_reasoning_content
+            reasoning_delta = (
+                chunk_reasoning_to_emit
+                or model_response_event.reasoning_content
+                or model_response_event.redacted_reasoning_content
+            )
+            if stream_events and reasoning_state is not None and reasoning_delta:
+                # Emit ReasoningStartedEvent on first reasoning chunk
+                if not reasoning_state["reasoning_started"]:
+                    yield handle_event(  # type: ignore
+                        create_reasoning_started_event(from_run_response=run_response),
+                        run_response,
+                        events_to_skip=agent.events_to_skip,  # type: ignore
+                        store_events=agent.store_events,
+                    )
+                    reasoning_state["reasoning_started"] = True
+
+                # Emit ReasoningContentDeltaEvent for each reasoning chunk
+                yield handle_event(  # type: ignore
+                    create_reasoning_content_delta_event(
+                        from_run_response=run_response,
+                        reasoning_content=reasoning_delta,
+                    ),
+                    run_response,
+                    events_to_skip=agent.events_to_skip,  # type: ignore
+                    store_events=agent.store_events,
+                )
+
             # Handle provider data (one chunk)
             if model_response_event.provider_data is not None:
                 run_response.model_provider_data = model_response_event.provider_data
@@ -1549,7 +1558,7 @@ def handle_model_response_chunk(
             if model_response_event.citations is not None:
                 run_response.citations = model_response_event.citations
 
-            # Only yield if we have content to show
+            # Emit RunContentEvent for content (NOT reasoning when streaming)
             if content_type != "str":
                 yield handle_event(  # type: ignore
                     create_run_output_content_event(
@@ -1563,20 +1572,28 @@ def handle_model_response_chunk(
                 )
             elif (
                 chunk_content_to_emit is not None
-                or chunk_reasoning_to_emit is not None
-                or model_response_event.reasoning_content is not None
-                or model_response_event.redacted_reasoning_content is not None
                 or model_response_event.citations is not None
                 or model_response_event.provider_data is not None
+                # Include reasoning on RunContentEvent ONLY when NOT streaming events
+                or (
+                    not stream_events
+                    and (
+                        model_response_event.reasoning_content is not None
+                        or model_response_event.redacted_reasoning_content is not None
+                    )
+                )
             ):
-                # Use parsed content (clean_content/reasoning_content) when available
-                # Falls back to raw model_response_event fields for native reasoning models
                 yield handle_event(  # type: ignore
                     create_run_output_content_event(
                         from_run_response=run_response,
                         content=chunk_content_to_emit,
-                        reasoning_content=chunk_reasoning_to_emit or model_response_event.reasoning_content,
-                        redacted_reasoning_content=model_response_event.redacted_reasoning_content,
+                        # Only include reasoning on RunContentEvent when NOT streaming events
+                        reasoning_content=(chunk_reasoning_to_emit or model_response_event.reasoning_content)
+                        if not stream_events
+                        else None,
+                        redacted_reasoning_content=model_response_event.redacted_reasoning_content
+                        if not stream_events
+                        else None,
                         citations=model_response_event.citations,
                         model_provider_data=model_response_event.provider_data,
                     ),

@@ -1,7 +1,5 @@
 """Tests for streaming <think> tag parsing."""
 
-
-
 from agno.utils.reasoning import (
     ThinkTagStreamState,
     flush_think_tag_state,
