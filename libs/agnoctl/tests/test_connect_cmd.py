@@ -831,13 +831,11 @@ def test_connect_oauth_prints_signin_summary(monkeypatch, fake_clients):
 
 
 def test_connect_pat_on_oauth_only_os_fails_before_credentials(monkeypatch, fake_clients):
-    """An OS whose ONLY auth is the OAuth provider refuses every mint (anonymous callers
-    must never create durable credentials), so --pat must fail up front naming the
-    server's missing REST credential -- not accept a typed credential (any value passes
-    the open read used by the preflight) and then blame it when the mint 401s."""
+    """An OS whose ONLY auth is the OAuth provider refuses anonymous mints, so --pat
+    with no exported credential must fail up front naming the server's missing REST
+    credential -- before any prompt or config write."""
     fake = FakeAgentOS(auth_mode="none", oauth=True)
     install_fake(monkeypatch, fake)
-    monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
 
     result = _connect(["--clients", "cursor", "--pat"])
     assert result.exit_code == 1
@@ -846,6 +844,85 @@ def test_connect_pat_on_oauth_only_os_fails_before_credentials(monkeypatch, fake
     assert "OS_SECURITY_KEY" in payload["hint"]
     assert "drop --pat" in payload["hint"]
     assert fake.create_calls == 0
+
+
+def test_connect_pat_with_non_pat_credential_on_open_plane_names_the_mismatch(monkeypatch, fake_clients):
+    """The open plane "accepts" any credential on reads, so a typed non-PAT value would
+    pass a preflight and then fail the mint. Only a service-account bearer can
+    authenticate on a server with no REST auth; the error must say exactly that
+    instead of blaming a credential the server never evaluated."""
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
+
+    result = _connect(["--clients", "cursor", "--pat"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "only a service-account token" in payload["error"]
+    assert fake.create_calls == 0
+
+
+def test_connect_pat_with_seeded_admin_pat_mints_on_open_plane(monkeypatch, fake_clients):
+    """The anonymous-mint refusal is anonymous-only: a verified service-account bearer
+    authenticates by prefix even on an open REST plane, and one holding a minting
+    scope may mint. A durable admin PAT from a protected era must keep working."""
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.seed_account("ops", ["admin"]))
+
+    result = _connect(["--clients", "cursor", "--pat"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["status"] == "connected"
+    assert "cursor" in fake.accounts
+    cursor_config = json.loads((fake_clients / ".cursor" / "mcp.json").read_text())
+    assert cursor_config["mcpServers"]["agentos"]["headers"]["Authorization"].startswith("Bearer agno_pat_")
+
+
+def test_connect_pat_on_plain_open_os_errors_instead_of_silently_connecting(monkeypatch, fake_clients):
+    """--pat asks for durable bearers; a plain open OS cannot mint any, and silently
+    writing the tokenless entry the operator opted out of would misreport success."""
+    fake = FakeAgentOS(auth_mode="none")
+    install_fake(monkeypatch, fake)
+
+    result = _connect(["--clients", "cursor", "--pat"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "refuses anonymous minting" in payload["error"]
+    assert "drop --pat" in payload["hint"]
+    assert not (fake_clients / ".cursor" / "mcp.json").exists()
+
+
+def test_connect_bare_verifier_on_open_plane_fails_before_writes(monkeypatch, fake_clients):
+    """A token-protected /mcp with no authorization server to sign in through and no
+    way to mint is a dead end: fail up front, never write an entry that can only 401."""
+    fake = FakeAgentOS(auth_mode="none", oauth={"authorization_servers": None, "resource": None})
+    install_fake(monkeypatch, fake)
+
+    result = _connect(["--clients", "cursor"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "refuses anonymous minting" in payload["error"]
+    assert "--pat" in payload["hint"]
+    assert not (fake_clients / ".cursor" / "mcp.json").exists()
+
+
+def test_connect_reverify_requires_secure_url_for_stored_token(monkeypatch, fake_clients):
+    """Re-verification re-sends a token already stored in a matching entry, so the
+    plaintext-HTTP rule applies to re-runs too, not only to fresh mints."""
+    install_fake(monkeypatch, FakeAgentOS(auth_mode="none", oauth=True))
+    remote_mcp = "http://10.0.0.5:7777/mcp"
+    (fake_clients / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentos": {"url": remote_mcp, "headers": {"Authorization": "Bearer agno_pat_x"}}}})
+    )
+
+    result = runner.invoke(app, ["connect", "--json", "--url", "http://10.0.0.5:7777", "--clients", "cursor"])
+    assert result.exit_code == 1
+    assert "Refusing to send" in json.loads(result.output)["error"]
+
+    allowed = runner.invoke(
+        app, ["connect", "--json", "--url", "http://10.0.0.5:7777", "--clients", "cursor", "--allow-http"]
+    )
+    assert allowed.exit_code == 0, allowed.output
 
 
 def test_connect_oauth_mint_shaping_flags_require_pat(monkeypatch, fake_clients):
@@ -903,3 +980,35 @@ def test_connect_treats_oauth_without_authorization_servers_as_token_protected(m
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["results"][0]["status"] == "connected"
     assert list(fake.accounts.keys()) == ["cursor"]
+
+
+def test_connect_oauth_report_consolidates_next_steps(monkeypatch, fake_clients):
+    """The prod-connect story in one readable arc: one-line rows, a single aggregated
+    note for the entries this run replaced (with how to keep both OSes), a numbered
+    To-finish section holding restart + per-app sign-in, and the auto-surfaced chat
+    apps as one compact aside instead of two full instruction blocks."""
+    prod = "https://os.example.com"
+    fake = FakeAgentOS(
+        auth_mode="none",
+        oauth={"authorization_servers": [prod + "/"], "resource": prod + "/mcp"},
+        name="AgentOS",
+    )
+    install_fake(monkeypatch, fake)
+    (fake_clients / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentos": {"url": "http://localhost:8000/mcp"}}})
+    )
+
+    result = runner.invoke(app, ["connect", "--url", prod])
+    assert result.exit_code == 0, _all_output(result)
+    out = _all_output(result)
+    # The builtin AS is the OS itself; naming it as an issuer reads like a third party.
+    assert "one-time sign-in." in out and "sign-in via" not in out
+    # rich wraps at the console width, so assert the pieces, not the whole line
+    assert "which pointed at" in out and "http://localhost:8000/mcp" in out
+    assert "To use both" in out
+    assert "To finish:" in out
+    assert "1. Restart" in out
+    assert "claude mcp login agentos" in out
+    assert "Also reachable from the hosted chat apps" in out
+    # The compact aside replaces the two full manual blocks for auto-surfaced apps.
+    assert "action needed" not in out

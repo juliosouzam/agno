@@ -13,6 +13,17 @@ from agnoctl.errors import CLIError
 ADMIN_TOKEN_ENV = "AGNO_ADMIN_TOKEN"
 SECURITY_KEY_ENV = "OS_SECURITY_KEY"
 
+# Service-account tokens are dispatched by this prefix on the server, in every auth
+# mode -- including an OS with no REST authentication at all, where a verified PAT is
+# the ONLY credential that can authenticate (and mint, when its scopes allow).
+PAT_PREFIX = "agno_pat_"
+
+
+def env_admin_credential() -> Optional[str]:
+    """The admin credential from the environment, if the operator exported one."""
+    return os.environ.get(ADMIN_TOKEN_ENV) or os.environ.get(SECURITY_KEY_ENV)
+
+
 _SERVER_NAME_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 # MCP entry name when the AgentOS serves no usable name (servers predating the /info
@@ -134,28 +145,41 @@ ADMIN_TOKEN_SOURCES = (
 
 
 def require_mint_capable(base_url: str, auth_mode: str, or_else: Optional[str] = None) -> None:
-    """Fail fast when this AgentOS cannot mint tokens for anyone.
+    """Fail fast when this AgentOS cannot mint tokens for THIS run.
 
-    auth_mode describes the REST plane; "none" means it is open, and an open server
-    refuses every mint (anonymous callers must never create durable credentials) while
-    accepting any credential on reads -- so resolving a credential would prompt for,
-    and appear to accept, a value the mint then rejects. The unauthenticated probe
-    confirms the service-accounts API really is open before failing (a proxy or a
-    manually installed auth layer that /info knows nothing about may guard it), and
-    stays the disambiguator for any server whose /info cannot be taken at its word.
+    auth_mode describes the REST plane; "none" means the server itself has no key, no
+    JWT config -- nothing that could authenticate a caller except a service-account
+    bearer, which it dispatches by prefix in every mode. So on "none":
+
+    - an exported ``agno_pat_`` credential may mint (the server scope-checks it);
+    - any other exported credential can never authenticate a mint -- say so instead of
+      letting the open plane "accept" it on reads and reject it at the mint;
+    - with no credential at all, an open service-accounts API means the anonymous mint
+      is refused outright. The unauthenticated probe confirms the plane really is open
+      before failing; when it is guarded (a proxy or a manually installed auth layer
+      that /info knows nothing about), fall through to the caller's flow instead.
     """
     if auth_mode not in ("none",):
         return
-    from agnoctl.http import service_accounts_open
-
-    if not service_accounts_open(base_url):
+    token = env_admin_credential()
+    if token and token.startswith(PAT_PREFIX):
         return
     hint = "Set " + SECURITY_KEY_ENV + " (or configure JWT auth) on the server to enable minting."
     if or_else:
         hint += " " + or_else
+    if token:
+        raise CLIError(
+            "This AgentOS has no REST authentication configured, so only a service-account token "
+            "(" + PAT_PREFIX + "...) can authenticate a mint -- the exported admin credential cannot.",
+            hint="Export a previously minted token via " + ADMIN_TOKEN_ENV + ". " + hint,
+        )
+    from agnoctl.http import service_accounts_open
+
+    if not service_accounts_open(base_url):
+        return
     raise CLIError(
         "This AgentOS cannot mint tokens: its REST API has no authentication configured, "
-        "and the server refuses to mint without an authenticated caller.",
+        "and the server refuses anonymous minting.",
         hint=hint,
     )
 
@@ -165,11 +189,14 @@ def resolve_admin_token(auth_mode: str, json_mode: bool) -> Optional[str]:
 
     Order: AGNO_ADMIN_TOKEN env, OS_SECURITY_KEY env, interactive prompt. Prompting is
     disabled in --json mode and when stdin is not a TTY, so agent-driven runs fail with
-    a clear instruction instead of hanging.
+    a clear instruction instead of hanging. On auth_mode "none" an EXPORTED credential
+    is still honored -- a service-account bearer authenticates by prefix even on an
+    open REST plane, and a guard /info cannot see (proxy, custom middleware) may want
+    it -- but nothing is ever prompted for on a server that claims to need nothing.
     """
     if auth_mode == "none":
-        return None
-    token = os.environ.get(ADMIN_TOKEN_ENV) or os.environ.get(SECURITY_KEY_ENV)
+        return env_admin_credential()
+    token = env_admin_credential()
     if token:
         return token
     if json_mode or not sys.stdin.isatty():

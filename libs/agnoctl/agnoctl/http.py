@@ -311,11 +311,11 @@ def service_accounts_open(base_url: str, timeout: float = DEFAULT_TIMEOUT) -> bo
     """Whether the service-accounts API answers without any credential.
 
     True means no auth middleware guards the REST plane -- an OS whose only auth is an
-    ``mcp_auth`` provider on /mcp. Such a server refuses every mint (anonymous callers
-    must never create durable credentials), so no admin credential the operator could
-    supply would help; it also "accepts" any credential on reads, which would make a
-    credential check pass right before the mint fails. Unreachable or odd answers count
-    as not-open, so callers fall through to the normal credential flow and its errors.
+    ``mcp_auth`` provider on /mcp. Such a server refuses anonymous mints (durable
+    credentials must never come from anonymous callers) and can authenticate only a
+    verified service-account bearer; any other credential "passes" its open reads right
+    up until the mint fails. Unreachable or odd answers count as not-open, so callers
+    fall through to the normal credential flow and its errors.
     """
     try:
         with build_client(base_url=base_url.rstrip("/"), timeout=timeout) as client:
