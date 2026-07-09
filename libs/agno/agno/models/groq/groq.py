@@ -14,6 +14,7 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.utils.log import log_debug, log_error, log_warning
 from agno.utils.openai import images_to_message
+from agno.utils.reasoning import extract_thinking_content
 
 try:
     from groq import APIError, APIResponseValidationError, APIStatusError
@@ -506,6 +507,18 @@ class Groq(Model):
         if response_message.content is not None:
             model_response.content = response_message.content
 
+        # Add reasoning content (gpt-oss models return reasoning in a separate field)
+        if hasattr(response_message, "reasoning") and response_message.reasoning is not None:
+            model_response.reasoning_content = response_message.reasoning
+        # Fallback: extract thinking content between <think> or <thinking> tags if present
+        elif model_response.content and (
+            "</think>" in model_response.content or "</thinking>" in model_response.content
+        ):
+            reasoning_content, clean_content = extract_thinking_content(model_response.content)
+            if reasoning_content:
+                model_response.reasoning_content = reasoning_content
+                model_response.content = clean_content
+
         # Add tool calls
         if response_message.tool_calls is not None and len(response_message.tool_calls) > 0:
             try:
@@ -538,6 +551,10 @@ class Groq(Model):
                 # Add content
                 if choice_delta.content is not None:
                     model_response.content = choice_delta.content
+
+                # Add reasoning content (gpt-oss models return reasoning in a separate field)
+                if hasattr(choice_delta, "reasoning") and choice_delta.reasoning is not None:
+                    model_response.reasoning_content = choice_delta.reasoning
 
                 # Add tool calls
                 if choice_delta.tool_calls is not None:
