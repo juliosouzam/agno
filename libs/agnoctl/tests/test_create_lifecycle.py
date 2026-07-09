@@ -59,6 +59,51 @@ def test_create_scaffolds_project(fake_git, tmp_path):
     assert "https://github.com/agno-agi/agentos-docker" in clone_args
 
 
+def test_create_without_name_in_json_mode_errors(fake_git):
+    result = runner.invoke(app, ["create", "--json"])
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "Project name is required" in payload["error"]
+    assert fake_git.calls == []
+
+
+def test_create_without_name_noninteractive_errors(fake_git, monkeypatch):
+    monkeypatch.setattr(create_module, "stdin_is_interactive", lambda: False)
+    result = runner.invoke(app, ["create"])
+    assert result.exit_code == 1
+    assert "Project name is required" in result.output
+    assert fake_git.calls == []
+
+
+def test_create_interactive_prompts_for_template_and_name(fake_git, monkeypatch):
+    monkeypatch.setattr(create_module, "stdin_is_interactive", lambda: True)
+    # Template choice "2" is the first non-default in TEMPLATE_CHOICES (sorted after docker).
+    # Name prompt accepts the default (the chosen template key).
+    result = runner.invoke(app, ["create"], input="2\n\n")
+    assert result.exit_code == 0, result.output
+    chosen = create_module.TEMPLATE_CHOICES[1]
+    assert (Path.cwd() / chosen / "docker-compose.yml").exists()
+    assert create_module.TEMPLATES[chosen] in fake_git.calls[0]
+    assert "Created" in result.output
+
+
+def test_create_interactive_name_only_still_prompts_template(fake_git, monkeypatch):
+    monkeypatch.setattr(create_module, "stdin_is_interactive", lambda: True)
+    result = runner.invoke(app, ["create", "my-os"], input="1\n")
+    assert result.exit_code == 0, result.output
+    assert (Path.cwd() / "my-os" / "docker-compose.yml").exists()
+    assert create_module.TEMPLATES["agentos-docker"] in fake_git.calls[0]
+
+
+def test_create_with_explicit_template_skips_prompt(fake_git, monkeypatch):
+    monkeypatch.setattr(create_module, "stdin_is_interactive", lambda: True)
+    result = runner.invoke(app, ["create", "my-os", "-t", "agentos-aws"])
+    assert result.exit_code == 0, result.output
+    assert create_module.TEMPLATES["agentos-aws"] in fake_git.calls[0]
+    # No template menu when -t is passed.
+    assert "Select starter template" not in result.output
+
+
 @pytest.mark.parametrize("name", ["../escape", "a/b", "/tmp/abs", ".."])
 def test_create_rejects_path_traversal_names(fake_git, name):
     result = runner.invoke(app, ["create", name, "--json"])
