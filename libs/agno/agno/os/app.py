@@ -1524,7 +1524,19 @@ class AgentOS:
                 )
             resolved_provider = role_store.provider
         elif provider is not None:
-            resolved_provider = provider
+            # A list/tuple of providers means "run several authz planes at once"
+            # (e.g. token scopes for operators + a managed role store for end users):
+            # compose them with an OR — a request is allowed if any plane allows it.
+            if isinstance(provider, str):
+                raise ValueError(
+                    "authorization_provider must be an AuthorizationProvider (or a list of them), not a string."
+                )
+            if isinstance(provider, (list, tuple)):
+                from agno.os.authz._composite import CompositeAuthorizationProvider
+
+                resolved_provider = CompositeAuthorizationProvider(list(provider))
+            else:
+                resolved_provider = provider
 
         if resolved_provider is not None:
             fastapi_app.state.authorization_provider = resolved_provider
@@ -1532,8 +1544,8 @@ class AgentOS:
             # from the in-flight request's ``.app``, which is this sub-app (request.state
             # crosses the mount boundary, request.app does not). Without mirroring the
             # provider here the gate falls back to the default ScopeAuthorizationProvider,
-            # silently degrading a managed-role / custom provider to scope-only over MCP.
-            # Mirror it so all four choke points enforce the same provider.
+            # silently degrading a managed-role / composite / FGA policy to scope-only over
+            # MCP. Mirror it so all four choke points enforce the same provider.
             if self._mcp_app is not None and hasattr(self._mcp_app, "state"):
                 self._mcp_app.state.authorization_provider = resolved_provider
 
