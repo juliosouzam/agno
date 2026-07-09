@@ -118,3 +118,43 @@
 - Interactive pause/resume (HITL) deferred; pause shows as a status label only.
 
 ---
+
+### activity_events.py (2026-07-09)
+
+**Status:** PASS (wire contract)
+
+**Description:** Workflow progress dual-emitted as opt-in AG-UI ACTIVITY events (`AGUI(emit_activity=True)`): ACTIVITY_SNAPSHOT first, RFC 6902 ACTIVITY_DELTA per step transition, full snapshot at every terminal (completed and error), stable per-run message id `agno-workflow-progress-<run_id>`, activity_type `agno-workflow-progress`. Flag off keeps the wire byte-identical.
+
+**Result:** Wire contract verified in-process (ASGI TestClient, deterministic function-step workflows -- no live model). Completed run: `... [STEP_STARTED -> STATE_DELTA -> ACTIVITY_DELTA]xN -> STATE_SNAPSHOT -> ACTIVITY_SNAPSHOT(COMPLETED) -> RUN_FINISHED`. Hard error (`on_error="fail"`): `... STATE_SNAPSHOT(ERROR) -> ACTIVITY_SNAPSHOT -> RUN_ERROR`, nothing after. Flags-off error sequence byte-identical to the pre-change live capture.
+
+**Verification:**
+- Unit: 9 dedicated tests (test_agui_activity.py) incl. default-off absence regression, snapshot-first, delta replay vs terminal, STATE-before-ACTIVITY per tick, both error shapes, agent inertness, camelCase HTTP wire keys. Full agui interface suite green. (DONE -- PASS)
+- Raw SSE (in-process): captures on file (happy/error x flags off/on); all ordering assertions pass. (DONE -- PASS)
+- Dojo live (2026-07-10, deterministic function-step rig with the flag ON): Task Progress card renders unchanged (STATE channel untouched) and the deployed CopilotKit client parses the full flag-on stream -- the run completes with ACTIVITY_SNAPSHOT/ACTIVITY_DELTA events visible on the browser wire (devtools Network) and no stream kill. As designed, nothing renders for the activity itself: no page registers a renderer for `agno-workflow-progress`. (DONE -- PASS)
+
+**Known gaps (honest):**
+- ACTIVITY is wire-only until a client registers a renderer; the registration snippet ships in the docstring, and the dojo renderer itself is a separate ag-ui PR.
+- Live gpt-5.5 serve of this exact cookbook file not run (the dojo cell used an equivalent deterministic workflow through the same AGUI flag path).
+
+---
+
+### session_rehydration.py (2026-07-09)
+
+**Status:** PASS (wire contract)
+
+**Description:** Session-history rehydration via opt-in MESSAGES_SNAPSHOT (`AGUI(emit_messages_snapshot=True)`): one snapshot at run start (after RUN_STARTED + initial STATE_SNAPSHOT, before all streamed traffic) replaying the session's prior turns, gated four ways (flag, fresh-run-only, non-empty server history, no assistant message in the payload) with the just-typed user message echoed at the snapshot tail under a re-minted id.
+
+**Result:** Wire contract verified in-process (ASGI TestClient, DB-backed deterministic workflow). Run 1 (fresh thread): no snapshot. Run 2 (same thread): exactly one MESSAGES_SNAPSHOT at position `RUN_STARTED -> STATE_SNAPSHOT -> MESSAGES_SNAPSHOT -> ...`, replaying turn 1 as user/assistant and echoing the new user message last with a fresh id. Session-read failure logs and continues (no RUN_ERROR).
+
+**Verification:**
+- Unit: 7 dedicated tests (test_agui_messages_snapshot.py) incl. each gate individually, agent-path mapping via a stub model, workflow interaction synthesis, and the swallow-on-DB-failure guarantee. Full agui interface suite green. (DONE -- PASS)
+- Raw SSE (in-process): two-run capture on file; position + tail-echo assertions pass. (DONE -- PASS)
+
+- Live server (2026-07-10): same-thread two-run curl against a running rig reproduces the exact contract -- run 1 no snapshot; run 2 one MESSAGES_SNAPSHOT at `RUN_STARTED -> STATE_SNAPSHOT -> MESSAGES_SNAPSHOT -> ...` replaying turn 1 with the re-minted tail echo. (DONE -- PASS)
+- Gate observed live in the dojo (2026-07-10): the stock dojo mints a FRESH threadId on every page reload (never reattaches), so the backend correctly emits no snapshot there -- the fresh-thread/non-empty-history gates working as designed.
+
+**Known gaps (honest):**
+- The visual CopilotKit merge of a snapshot could not be exercised in the stock dojo (no thread persistence across reloads -- a client-side property). Risk is bounded by construction: the gates ensure only history-less clients ever receive a snapshot, so there is nothing on screen to reorder; at worst the optimistic user bubble remounts once with identical content.
+- Text-only v1: no tool-call replay, no reasoning messages, no media in the snapshot (documented in the module docstring).
+
+---
