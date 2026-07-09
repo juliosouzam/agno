@@ -207,6 +207,24 @@ async def test_discovery_and_challenge(tmp_path):
     assert "resource_metadata=" in challenge.headers.get("www-authenticate", "")
 
 
+async def test_metadata_advertises_public_client_auth(tmp_path):
+    """The AS metadata must advertise the client-auth methods it actually accepts. This AS
+    is public-clients-only (it rejects confidential DCR), so token_endpoint_auth_methods_
+    supported must include "none" and NOT the confidential methods -- otherwise a spec-strict
+    connector (claude.ai) reads the metadata, registers with client_secret_post, and gets a
+    400 ("Couldn't register with the sign-in service")."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        metadata = await client.get("/.well-known/oauth-authorization-server")
+    assert metadata.status_code == 200
+    body = metadata.json()
+    methods = body["token_endpoint_auth_methods_supported"]
+    assert "none" in methods
+    assert "client_secret_post" not in methods and "client_secret_basic" not in methods
+    # Revocation is public too.
+    assert body.get("revocation_endpoint_auth_methods_supported") == ["none"]
+
+
 async def test_full_flow_behind_active_parent_auth_middleware(tmp_path):
     """The spec's #1 failure mode: with a parent security key installed, the built-in AS's
     own routes (/register, /authorize, /token, the consent page) must be exempt from the
