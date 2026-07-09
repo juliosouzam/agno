@@ -23,12 +23,23 @@ def stream_agno_response_as_agui_events(
 
     completion_chunk = None
 
-    for chunk in response_stream:
-        if is_completion_event(chunk):
-            completion_chunk = chunk
-        else:
-            for event in process_event(chunk, state):
-                yield event
+    try:
+        for chunk in response_stream:
+            if is_completion_event(chunk):
+                completion_chunk = chunk
+            else:
+                for event in process_event(chunk, state):
+                    yield event
+    except Exception:
+        # The engine raised mid-stream (e.g. a step with on_error="fail" yields
+        # workflow_error then raises), preempting the deferred completion below.
+        # Terminalize workflow_progress to ERROR before the exception propagates
+        # (the caller emits RUN_ERROR) -- else the STATE channel freezes.
+        from agno.os.interfaces.agui import workflow_progress
+
+        for event in workflow_progress.error_snapshot(state):
+            yield event
+        raise
 
     # Process completion (or synthesize one if stream ended naturally)
     final_chunk = completion_chunk or RunCompletedEvent()
@@ -50,12 +61,23 @@ async def async_stream_agno_response_as_agui_events(
 
     completion_chunk = None
 
-    async for chunk in response_stream:
-        if is_completion_event(chunk):
-            completion_chunk = chunk
-        else:
-            for event in process_event(chunk, state):
-                yield event
+    try:
+        async for chunk in response_stream:
+            if is_completion_event(chunk):
+                completion_chunk = chunk
+            else:
+                for event in process_event(chunk, state):
+                    yield event
+    except Exception:
+        # The engine raised mid-stream (e.g. a step with on_error="fail" yields
+        # workflow_error then raises), preempting the deferred completion below.
+        # Terminalize workflow_progress to ERROR before the exception reaches
+        # run_entity (which emits RUN_ERROR) -- else the STATE channel freezes.
+        from agno.os.interfaces.agui import workflow_progress
+
+        for event in workflow_progress.error_snapshot(state):
+            yield event
+        raise
 
     # Process completion (or synthesize one if stream ended naturally)
     final_chunk = completion_chunk or RunCompletedEvent()

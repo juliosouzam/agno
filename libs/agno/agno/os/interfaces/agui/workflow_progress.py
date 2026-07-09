@@ -107,6 +107,26 @@ def mark_completed(state: StreamState) -> None:
                 step["status"] = "skipped"
 
 
+def error_snapshot(state: StreamState) -> List[BaseEvent]:
+    """Terminalize workflow_progress on a workflow error, then emit the closing snapshot.
+
+    Two error shapes converge here: the engine may YIELD a workflow_error terminal
+    (handled in process_completion) or -- the common on_error='fail' case -- yield it
+    then RAISE, which preempts the deferred completion, so the stream driver calls this
+    from its except. Both flip the top-level status to ERROR and sweep any still-open
+    ('running'/'paused') step to 'error', so the STATE channel reflects the failure
+    instead of freezing on 'running'. Nothing ran (no progress) -> nothing to emit."""
+    progress = state.workflow_progress
+    if progress is None or state.run_state is None:
+        return []
+    progress["status"] = RunStatus.error.value
+    for step in progress["steps"]:
+        if step["status"] in ("running", "paused"):
+            step["status"] = "error"
+    state.set_state_snapshot(state.run_state)
+    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))]
+
+
 def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     """Map one structural WorkflowRunEvent to a workflow_progress mutation (+ STEP)."""
     events = _baseline(state)
