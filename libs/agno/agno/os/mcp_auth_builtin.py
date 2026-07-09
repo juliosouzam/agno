@@ -617,12 +617,55 @@ class AgentOSBuiltinAuth(OAuthProvider):
                         methods=["POST", "OPTIONS"],
                     )
                 )
+            elif isinstance(route, StarletteRoute) and route.path.startswith("/.well-known/oauth-authorization-server"):
+                rebuilt.append(self._public_metadata_route(route, cors_middleware))
             else:
                 rebuilt.append(route)
         routes = rebuilt
         routes.append(Route(CONSENT_PATH, endpoint=self._consent_get, methods=["GET"]))
         routes.append(Route(CONSENT_PATH, endpoint=self._consent_post, methods=["POST"]))
         return routes
+
+    def _public_metadata_route(self, route: Any, cors_middleware: Any) -> Any:
+        """Rebuild the authorization-server metadata route to advertise the client-auth
+        methods this server actually accepts.
+
+        The SDK's ``build_metadata`` hardcodes ``token_endpoint_auth_methods_supported`` to
+        the confidential methods (``client_secret_post`` / ``client_secret_basic``), but
+        this AS is public-clients-only and REJECTS those at ``/register``. A spec-strict
+        connector (claude.ai) reads the metadata, registers with a confidential method,
+        and gets a 400 -- surfacing as "Couldn't register with the sign-in service".
+        Advertise ``none`` (public + PKCE) instead -- plus ``private_key_jwt`` when CIMD is
+        enabled -- so DCR picks the path the server accepts. Revocation is public too.
+        """
+        from mcp.server.auth.handlers.metadata import MetadataHandler
+        from mcp.server.auth.routes import build_metadata
+        from starlette.routing import Route
+
+        if self.base_url is None:
+            # Unreachable: the SDK requires a valid issuer URL at construction, so the
+            # metadata route only exists when base_url is set. Guard for the type checker.
+            return route
+        metadata = build_metadata(
+            self.base_url,
+            self.service_documentation_url,
+            self.client_registration_options or ClientRegistrationOptions(enabled=True),
+            self.revocation_options or RevocationOptions(enabled=True),
+        )
+        methods = ["none"] + (["private_key_jwt"] if self._cimd_manager is not None else [])
+        metadata.token_endpoint_auth_methods_supported = methods
+        if metadata.revocation_endpoint is not None:
+            metadata.revocation_endpoint_auth_methods_supported = ["none"]
+        if self._cimd_manager is not None:
+            metadata.client_id_metadata_document_supported = True
+        handler = MetadataHandler(metadata)
+        return Route(
+            route.path,
+            endpoint=cors_middleware(handler.handle, ["GET", "OPTIONS"]),
+            methods=route.methods or ["GET", "OPTIONS"],
+            name=route.name,
+            include_in_schema=route.include_in_schema,
+        )
 
     async def _register_public(self, request: "Request") -> Any:
         """DCR that treats an omitted client-auth method as a public (PKCE) client.
