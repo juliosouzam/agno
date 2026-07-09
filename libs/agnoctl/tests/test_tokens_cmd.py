@@ -57,6 +57,27 @@ def test_list_never_exposes_tokens(monkeypatch, fake_os):
     assert payload["service_accounts"][0]["token_prefix"]
 
 
+def test_list_refuses_remote_env_file_url_in_json(monkeypatch, tmp_path, fake_os):
+    """A reachable but non-loopback AGENTOS_URL from a cwd .env file is refused in --json runs."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=https://evil.example\n")
+    result = _run(["tokens", "list", "--json"])  # no --url: resolve from the env file
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert "remote host" in payload["error"]
+    assert "--url" in payload["hint"] and "--yes" in payload["hint"]
+
+
+def test_list_trusts_remote_env_file_url_with_yes(monkeypatch, tmp_path, fake_os):
+    """--yes opts into a non-loopback env-file URL; the call then proceeds against it."""
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
+    (tmp_path / ".env.production").write_text("AGENTOS_URL=https://evil.example\n")
+    result = _run(["tokens", "list", "--json", "--yes"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "service_accounts" in payload
+
+
 def test_revoke_by_name(monkeypatch, fake_os):
     monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake_os.security_key)
     _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
@@ -160,3 +181,48 @@ def test_revoke_yes_skips_confirmation(monkeypatch, fake_os):
     result = _run(["tokens", "revoke", "ci-runner", "--yes"] + URL_ARGS)
     assert result.exit_code == 0, result.output
     assert fake_os.accounts["ci-runner"]["revoked_at"] is not None
+
+
+def test_create_on_open_plane_without_credential_fails_naming_the_server_gap(monkeypatch, fake_os):
+    """An OS whose only auth is the OAuth provider on /mcp refuses anonymous mints, and
+    its open REST plane would "accept" any credential right up to the failing POST;
+    create must fail before resolving a credential, naming what the server is missing."""
+    from tests.conftest import FakeAgentOS, install_fake
+
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
+    install_fake(monkeypatch, fake)
+
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "no authentication configured" in payload["error"]
+    assert "OS_SECURITY_KEY" in payload["hint"]
+    assert fake.create_calls == 0
+
+
+def test_create_on_open_plane_with_non_pat_credential_names_the_mismatch(monkeypatch, fake_os):
+    from tests.conftest import FakeAgentOS, install_fake
+
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", "any-typed-value")
+
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 1
+    assert "only a service-account token" in json.loads(result.output)["error"]
+    assert fake.create_calls == 0
+
+
+def test_create_on_open_plane_with_admin_pat_mints(monkeypatch, fake_os):
+    """The anonymous-mint refusal is anonymous-only: a verified service-account bearer
+    holding a minting scope mints even on an open REST plane."""
+    from tests.conftest import FakeAgentOS, install_fake
+
+    fake = FakeAgentOS(auth_mode="none", oauth=True)
+    install_fake(monkeypatch, fake)
+    monkeypatch.setenv("AGNO_ADMIN_TOKEN", fake.seed_account("ops", ["admin"]))
+
+    result = _run(["tokens", "create", "ci-runner", "--json"] + URL_ARGS)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["name"] == "ci-runner"
+    assert "ci-runner" in fake.accounts
