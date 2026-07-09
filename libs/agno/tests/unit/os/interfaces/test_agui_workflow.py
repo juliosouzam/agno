@@ -1033,3 +1033,49 @@ async def test_db_backed_workflow_keeps_progress_in_final_snapshot(tmp_path):
     saved = wf.get_session(session_id=ri.thread_id)
     persisted = (saved.session_data or {}).get("session_state", {}) if saved is not None else {}
     assert saved is not None and "workflow_progress" not in persisted
+
+
+# ---- user-defined session_state keys ride the same STATE channel as workflow_progress ----
+
+
+@pytest.mark.asyncio
+async def test_user_session_state_key_survives_delta_and_final_snapshot(tmp_path):
+    # The router passes ONE dict object as both the workflow's session_state and the
+    # stream's diff baseline, so a step mutation must surface as a STATE_DELTA op,
+    # survive the terminal snapshot (the workflow_progress re-inject must not blank
+    # user keys), and persist to the DB (where only the transient progress key is
+    # stripped). The step function must literally name session_state -- injection is
+    # signature-matched (step.py _function_has_session_state_param); **kwargs gets nothing.
+    from agno.db.sqlite import SqliteDb
+    from agno.workflow.step import Step
+    from agno.workflow.workflow import Workflow
+
+    async def set_user_key(step_input, session_state=None):
+        session_state["user_key"] = "user_value"
+        return StepOutput(content="done")
+
+    wf = Workflow(
+        name="w",
+        db=SqliteDb(db_file=str(tmp_path / "wf.db")),
+        steps=[Step(name="mutate", executor=set_user_key)],
+    )
+    ri = _FakeRunInput()
+    ri.state = {"client_key": "client_value"}
+    events = [e async for e in run_entity(wf, ri)]
+
+    # (a) the step's mutation reached the wire mid-run as a STATE_DELTA op
+    delta_ops = [op for e in events if e.type == ET.STATE_DELTA for op in e.delta]
+    assert any(op.get("path") == "/user_key" for op in delta_ops)
+
+    # (b) both the client key and the step-written key survive the terminal snapshot
+    final = _final_state(events) or {}
+    assert final.get("user_key") == "user_value"
+    assert final.get("client_key") == "client_value"
+    assert "workflow_progress" in final
+
+    # (c) the DB persists user keys; the transient workflow_progress is stripped
+    saved = wf.get_session(session_id=ri.thread_id)
+    persisted = (saved.session_data or {}).get("session_state", {}) if saved is not None else {}
+    assert persisted.get("user_key") == "user_value"
+    assert persisted.get("client_key") == "client_value"
+    assert "workflow_progress" not in persisted
