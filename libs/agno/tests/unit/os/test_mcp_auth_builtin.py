@@ -340,6 +340,20 @@ async def test_consent_page_denies_framing(tmp_path):
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
 
 
+async def test_consent_csp_does_not_restrict_form_action(tmp_path):
+    """The consent CSP must NOT set `form-action` (e.g. 'self'): Chromium enforces
+    form-action on the redirect that FOLLOWS the form POST, so it would silently block the
+    post-approval 302 to the client's cross-origin callback (claude.ai / ChatGPT) and
+    strand the flow before the token exchange. The page runs no JS, so form-action adds no
+    protection here."""
+    db = _db(tmp_path)
+    async with _http_client(_os(_provider(db), db=db)) as client:
+        registration = await _register(client)
+        client_id = registration.json()["client_id"]
+        page, _, _, _ = await _start_authorization(client, client_id)
+    assert "form-action" not in page.headers["content-security-policy"]
+
+
 async def test_confidential_client_registration_rejected(tmp_path):
     db = _db(tmp_path)
     async with _http_client(_os(_provider(db), db=db)) as client:

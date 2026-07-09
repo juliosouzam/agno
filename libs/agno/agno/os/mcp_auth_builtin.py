@@ -710,8 +710,14 @@ class AgentOSBuiltinAuth(OAuthProvider):
 
     def _consent_headers(self) -> Dict[str, str]:
         return {
-            # The page carries a secret input: never framed, never cached.
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+            # The page carries a secret input: never framed, never cached. NOTE: no
+            # `form-action` directive -- Chromium enforces form-action on the redirect that
+            # FOLLOWS the form POST, so `form-action 'self'` would silently block the
+            # post-approval 302 to the client's cross-origin callback (claude.ai / ChatGPT),
+            # stranding the flow before the token exchange. The page runs no JS
+            # (`default-src 'none'`, no script-src), so the form cannot be hijacked and
+            # form-action adds no protection here.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
             "X-Frame-Options": "DENY",
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
