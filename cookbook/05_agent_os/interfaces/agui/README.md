@@ -6,6 +6,24 @@ and human-in-the-loop workflows between your backend agents and React frontends.
 
 Works with any AG-UI compatible frontend, including [CopilotKit](https://github.com/CopilotKit/CopilotKit) and [Dojo](https://github.com/CopilotKit/CopilotKit/tree/main/examples/coagents-dojo).
 
+## Files
+- `agent_with_media.py` — Accept multimodal user input (image, audio, video, document).
+- `agent_with_tools.py` — Agent with backend tools.
+- `agentic_chat.py` — Chat with frontend tools (change_background) and backend tools (get_weather).
+- `backend_tool_rendering.py` — Render backend tools in frontend via useRenderTool.
+- `basic.py` — Basic agent setup.
+- `human_in_the_loop.py` — HITL with confirmation and user input.
+- `multiple_instances.py` — Multiple agent instances.
+- `reasoning_agent.py` — Agent with reasoning/thinking display.
+- `research_team.py` — Multi-agent research team.
+- `shared_state.py` — Same pattern with pre-populated initial state.
+- `showcase.py` — Single server exposing all Dojo demo endpoints.
+- `state_events.py` — Outbound state synchronization via STATE_SNAPSHOT + STATE_DELTA events.
+- `structured_output.py` — Structured output schema.
+- `team_state_events.py` — Team state synchronization.
+- `tool_based_generative_ui.py` — Generative UI using tool-based approach.
+- `workflow_progress.py` — Native AG-UI workflow progress via STATE (`workflow_progress.steps`) + STEP.
+
 ## Quick Start
 
 ```python
@@ -85,6 +103,12 @@ Multi-agent teams with AG-UI interface.
 | `research_team.py` | Researcher + Writer team with web search |
 | `team_state_events.py` | Team with shared session state (recipe creator + nutrition advisor) |
 | `multiple_instances.py` | Multiple agent instances on one server |
+
+### Workflows
+
+| File | Description |
+|------|-------------|
+| `workflow_progress.py` | Native AG-UI workflow progress via STATE + STEP |
 
 ### Dojo Demos
 
