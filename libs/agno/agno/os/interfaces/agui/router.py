@@ -29,6 +29,7 @@ from agno.os.interfaces.agui.input import (
     parse_client_tools,
     validate_state,
 )
+from agno.os.interfaces.agui.history import session_history_snapshot
 from agno.os.interfaces.agui.resume import resume_paused_run
 from agno.os.interfaces.agui.stream import async_stream_agno_response_as_agui_events
 from agno.os.middleware.user_scope import resolve_run_user_id
@@ -43,6 +44,7 @@ async def run_entity(
     run_input: RunAgentInput,
     user_id: Optional[str] = None,
     emit_activity: bool = False,
+    emit_messages_snapshot: bool = False,
 ) -> AsyncIterator[BaseEvent]:
     """Shared handler for running an Agent, Team, or Workflow with AG-UI input/output mapping.
 
@@ -69,6 +71,13 @@ async def run_entity(
 
         if session_state is not None:
             yield StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(session_state))
+
+        if emit_messages_snapshot:
+            # Session-history rehydration (opt-in): one MESSAGES_SNAPSHOT before any
+            # streamed traffic. All gating lives in session_history_snapshot.
+            history_snapshot = await session_history_snapshot(entity, run_input, tool_messages)
+            if history_snapshot is not None:
+                yield history_snapshot
 
         ui_deps = extract_context(run_input.context)
 
@@ -138,6 +147,7 @@ def attach_routes(
     team: Optional[Union[Team, RemoteTeam]] = None,
     workflow: Optional[Union[Workflow, RemoteWorkflow]] = None,
     emit_activity: bool = False,
+    emit_messages_snapshot: bool = False,
 ) -> APIRouter:
     if agent is None and team is None and workflow is None:
         raise ValueError("Either agent, team, or workflow must be provided.")
@@ -152,7 +162,13 @@ def attach_routes(
         user_id = resolve_run_user_id(request, client_user_id)
 
         async def event_generator():
-            async for event in run_entity(entity, run_input, user_id=user_id, emit_activity=emit_activity):  # type: ignore
+            async for event in run_entity(
+                entity,  # type: ignore
+                run_input,
+                user_id=user_id,
+                emit_activity=emit_activity,
+                emit_messages_snapshot=emit_messages_snapshot,
+            ):
                 # Workflows fan out many steps; stop streaming if the client
                 # disconnected, to avoid burning tokens on output nobody sees.
                 if workflow is not None and await request.is_disconnected():
