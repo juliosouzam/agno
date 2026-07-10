@@ -3,7 +3,12 @@ from typing import Any, AsyncIterator, Dict, Optional, Union
 
 from ag_ui.core import BaseEvent
 
-from agno.os.interfaces.agui.handlers import is_completion_event, process_completion, process_event
+from agno.os.interfaces.agui.handlers import (
+    _workflow_error_snapshot,
+    is_completion_event,
+    process_completion,
+    process_event,
+)
 from agno.os.interfaces.agui.state import StreamState
 from agno.run.agent import RunCompletedEvent, RunOutputEvent
 from agno.run.team import TeamRunOutputEvent
@@ -31,13 +36,8 @@ def stream_agno_response_as_agui_events(
                 for event in process_event(chunk, state):
                     yield event
     except Exception:
-        # The engine raised mid-stream (e.g. a step with on_error="fail" yields
-        # workflow_error then raises), preempting the deferred completion below.
-        # Terminalize workflow_progress to ERROR before the exception propagates
-        # (the caller emits RUN_ERROR) -- else the STATE channel freezes.
-        from agno.os.interfaces.agui import workflow_progress
-
-        for event in workflow_progress.error_snapshot(state):
+        # Engine raised mid-stream (e.g. on_error="fail"): terminalize progress to ERROR
+        for event in _workflow_error_snapshot(state):
             yield event
         raise
 
@@ -69,13 +69,8 @@ async def async_stream_agno_response_as_agui_events(
                 for event in process_event(chunk, state):
                     yield event
     except Exception:
-        # The engine raised mid-stream (e.g. a step with on_error="fail" yields
-        # workflow_error then raises), preempting the deferred completion below.
-        # Terminalize workflow_progress to ERROR before the exception reaches
-        # run_entity (which emits RUN_ERROR) -- else the STATE channel freezes.
-        from agno.os.interfaces.agui import workflow_progress
-
-        for event in workflow_progress.error_snapshot(state):
+        # Engine raised mid-stream (e.g. on_error="fail"): terminalize progress to ERROR
+        for event in _workflow_error_snapshot(state):
             yield event
         raise
 

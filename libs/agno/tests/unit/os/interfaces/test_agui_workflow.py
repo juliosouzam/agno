@@ -26,10 +26,15 @@ from ag_ui.core import EventType, RunStartedEvent
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.os.interfaces.agui.agui import AGUI
-from agno.os.interfaces.agui.handlers import HANDLERS, on_custom_event
+from agno.os.interfaces.agui.handlers import (
+    HANDLERS,
+    STRUCTURAL_EVENT_VALUES,
+    _final_leaf_streamed,
+    on_custom_event,
+    on_workflow_progress,
+)
 from agno.os.interfaces.agui.router import run_entity
 from agno.os.interfaces.agui.stream import async_stream_agno_response_as_agui_events
-from agno.os.interfaces.agui.workflow_handlers import STRUCTURAL_EVENT_VALUES, _final_leaf_streamed
 from agno.reasoning.step import ReasoningStep
 from agno.run.agent import (
     ReasoningCompletedEvent,
@@ -616,11 +621,9 @@ async def test_no_structural_event_falls_through_to_raw(event_value):
 def test_structural_events_route_to_progress_handler():
     # Every structural value except custom_event routes to the native progress handler;
     # custom_event keeps the CustomEvent passthrough (base RunEvent.custom_event registration).
-    from agno.os.interfaces.agui import workflow_progress
-
     custom = WorkflowRunEvent.custom_event.value
     for value in STRUCTURAL_EVENT_VALUES:
-        expected = on_custom_event if value == custom else workflow_progress.progress_handler
+        expected = on_custom_event if value == custom else on_workflow_progress
         assert HANDLERS.get(value) is expected
 
 

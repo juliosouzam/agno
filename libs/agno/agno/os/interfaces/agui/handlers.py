@@ -13,9 +13,12 @@ from ag_ui.core import (
     ReasoningMessageEndEvent,
     ReasoningMessageStartEvent,
     ReasoningStartEvent,
+    RunErrorEvent,
     RunFinishedEvent,
     StateDeltaEvent,
     StateSnapshotEvent,
+    StepFinishedEvent,
+    StepStartedEvent,
     TextMessageContentEvent,
     TextMessageEndEvent,
     TextMessageStartEvent,
@@ -26,25 +29,80 @@ from ag_ui.core import (
 )
 
 from agno.models.response import ToolExecution
-from agno.os.interfaces.agui import activity, workflow_handlers, workflow_progress
+from agno.os.interfaces.agui import activity
 from agno.os.interfaces.agui.state import StreamState
 from agno.os.interfaces.agui.utils import to_json_str
 from agno.reasoning.step import ReasoningStep
 from agno.run.agent import RunContentEvent, RunEvent
 from agno.run.agent import RunPausedEvent as AgentRunPausedEvent
-from agno.run.base import BaseRunOutputEvent
+from agno.run.base import BaseRunOutputEvent, RunStatus
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunEvent
 from agno.run.workflow import WorkflowRunEvent
 from agno.utils.message import get_text_from_message
+from agno.workflow.types import StepType
 
 EventHandler = Callable[[BaseRunOutputEvent, StreamState], List[BaseEvent]]
+
+# Workflow event aliases and constants
+_WF = WorkflowRunEvent
+_MAX_STEP_OUTPUT = 500  # Cap step output in STATE so deltas stay small
+
+# Terminal workflow events → completion handling
+# workflow_cancelled deliberately excluded — surfaces as STATE status, run finalizes cleanly
+_WORKFLOW_TERMINAL_VALUES = frozenset({_WF.workflow_completed.value, _WF.workflow_error.value})
+
+# Structural events → progress handler
+STRUCTURAL_EVENT_VALUES = frozenset(e.value for e in _WF) - _WORKFLOW_TERMINAL_VALUES
+
+# Step-level pause/continue routing
+_STEP_PAUSE_VALUES = frozenset({_WF.step_paused.value, _WF.step_executor_paused.value, _WF.step_output_review.value})
+_WORKFLOW_PAUSE_VALUES = frozenset({_WF.workflow_paused.value, _WF.router_paused.value})
+_STEP_CONTINUE_VALUES = frozenset({_WF.step_continued.value, _WF.step_executor_continued.value})
+# condition_paused is vestigial (no event class, never emitted) — intentionally absent
+
+
+def _event_value(chunk: BaseRunOutputEvent) -> str:
+    event = getattr(chunk, "event", None)
+    if event is None:
+        return ""
+    return event.value if hasattr(event, "value") else str(event)
+
+
+def _normalize_event(event: str) -> str:
+    return event.removeprefix("Team")
+
+
+def _render_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, dict)):
+        return json.dumps(content, default=str)
+    return str(content)
+
+
+def _emit_state_delta(state: StreamState) -> List[BaseEvent]:
+    if state.run_state is None:
+        return []
+    ops = state.compute_state_delta(state.run_state)
+    if not ops:
+        return []
+    state.set_state_snapshot(state.run_state)
+    return [StateDeltaEvent(type=EventType.STATE_DELTA, delta=ops)]
+
+
+def _new_text_message(text: str) -> List[BaseEvent]:
+    message_id = str(uuid.uuid4())
+    return [
+        TextMessageStartEvent(type=EventType.TEXT_MESSAGE_START, message_id=message_id, role="assistant"),
+        TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=message_id, delta=text),
+        TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=message_id),
+    ]
 
 
 def _extract_response_chunk_content(response: RunContentEvent) -> str:
     # RunContentEvent can carry text in .messages (list) or .content (direct)
-    # AG-UI needs a plain string for TEXT_MESSAGE_CONTENT delta
     if hasattr(response, "messages") and response.messages:  # type: ignore
         for msg in reversed(response.messages):  # type: ignore
             if hasattr(msg, "role") and msg.role == "assistant" and hasattr(msg, "content") and msg.content:
@@ -88,16 +146,6 @@ def _format_reasoning_step(step: Optional[ReasoningStep], step_number: int = 0) 
     if step.confidence is not None:
         parts.append(f"Confidence: {step.confidence}")
     return "\n".join(parts) + "\n\n" if parts else ""
-
-
-def _emit_state_delta(state: StreamState) -> List[BaseEvent]:
-    if state.run_state is None:
-        return []
-    ops = state.compute_state_delta(state.run_state)
-    if ops is None:
-        return []
-    state.set_state_snapshot(state.run_state)
-    return [StateDeltaEvent(type=EventType.STATE_DELTA, delta=ops)]
 
 
 def on_run_content(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
@@ -203,7 +251,6 @@ def on_tool_call_completed(chunk: BaseRunOutputEvent, state: StreamState) -> Lis
                 tool_call_id=tool.tool_call_id,
                 content=content,
                 role="tool",
-                # Use tool_call_id as message_id so frontend can link result to the tool call
                 message_id=tool.tool_call_id,
             )
         )
@@ -215,7 +262,6 @@ def on_tool_call_completed(chunk: BaseRunOutputEvent, state: StreamState) -> Lis
 def on_reasoning_started(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
 
-    # Close open text message before reasoning
     if state.text_message_open:
         events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=state.text_message_id))
         state.close_text_message()
@@ -231,7 +277,6 @@ def on_reasoning_started(chunk: BaseRunOutputEvent, state: StreamState) -> List[
 def on_reasoning_content_delta(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
 
-    # Close open text message before reasoning
     if state.text_message_open:
         events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=state.text_message_id))
         state.close_text_message()
@@ -258,7 +303,6 @@ def on_reasoning_content_delta(chunk: BaseRunOutputEvent, state: StreamState) ->
 def on_reasoning_step(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
 
-    # Close open text message before reasoning
     if state.text_message_open:
         events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=state.text_message_id))
         state.close_text_message()
@@ -316,10 +360,201 @@ def on_unknown_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
     return [RawEvent(type=EventType.RAW, event=raw_dict, source="agno")]
 
 
+# Workflow progress tracking
+# Projects workflow structure into run_state["workflow_progress"] as a flat steps list
+
+
+def _get_workflow_progress(state: StreamState) -> Dict[str, Any]:
+    # Reset when run_id changes to avoid cross-turn leakage from echoed state
+    if state.run_state is None:
+        state.run_state = {}
+    existing = state.run_state.get("workflow_progress")
+    if existing is None or existing.get("run_id") != state.run_id:
+        state.run_state["workflow_progress"] = {
+            "run_id": state.run_id,
+            "status": RunStatus.running.value,
+            "steps": [],
+        }
+    return state.run_state["workflow_progress"]
+
+
+def _sync_steps_to_dojo_format(state: StreamState) -> None:
+    # Dojo agentic_generative_ui expects state.steps[{description, status}]
+    if state.run_state is None or "workflow_progress" not in state.run_state:
+        return
+    wp_steps = state.run_state["workflow_progress"].get("steps", [])
+    state.run_state["steps"] = [
+        {
+            "description": s.get("name", ""),
+            "status": "pending" if s.get("status") == "running" else s.get("status", "pending"),
+        }
+        for s in wp_steps
+    ]
+
+
+def _ensure_state_baseline(state: StreamState) -> List[BaseEvent]:
+    # Emit initial STATE_SNAPSHOT if no caller-supplied state
+    if state.run_state is not None:
+        return []
+    state.run_state = {}
+    state.set_state_snapshot(state.run_state)
+    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))]
+
+
+def _truncate_step_output(content: Any) -> Optional[str]:
+    if content is None:
+        return None
+    text = _render_content(content)
+    return text[:_MAX_STEP_OUTPUT] if text else None
+
+
+def _find_open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    # Find by step_id (not step_index) to handle concurrent Parallel siblings
+    for step in reversed(steps):
+        if step["status"] in ("running", "paused") and step["id"] == step_id:
+            return step
+    return None
+
+
+def _mark_workflow_completed(state: StreamState) -> None:
+    # Promote workflow to completed; mark leftover running steps as skipped
+    progress = state.workflow_progress
+    if progress is None:
+        return
+    if progress.get("status") == RunStatus.running.value:
+        progress["status"] = RunStatus.completed.value
+    if progress.get("status") == RunStatus.completed.value:
+        for step in progress["steps"]:
+            if step["status"] == "running":
+                step["status"] = "skipped"
+    _sync_steps_to_dojo_format(state)
+
+
+def _workflow_error_snapshot(state: StreamState) -> List[BaseEvent]:
+    # Terminalize progress to ERROR and emit final snapshot
+    progress = state.workflow_progress
+    if progress is None or state.run_state is None:
+        return []
+    progress["status"] = RunStatus.error.value
+    for step in progress["steps"]:
+        if step["status"] in ("running", "paused"):
+            step["status"] = "error"
+    _sync_steps_to_dojo_format(state)
+    state.set_state_snapshot(state.run_state)
+    events: List[BaseEvent] = [
+        StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))
+    ]
+    return events + activity.terminal_snapshot(state)
+
+
+def on_workflow_progress(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
+    events = _ensure_state_baseline(state)
+    value = _event_value(chunk)
+    progress = _get_workflow_progress(state)
+    state.workflow_progress = progress
+    steps = progress["steps"]
+    name = getattr(chunk, "step_name", None)
+    step_id = getattr(chunk, "step_id", None)
+
+    if value == _WF.step_started.value:
+        steps.append({"id": step_id, "name": name, "status": "running", "output": None})
+        if name:
+            events.append(StepStartedEvent(type=EventType.STEP_STARTED, step_name=name))
+    elif value == _WF.step_completed.value:
+        step = _find_open_step(steps, step_id)
+        if step is not None:
+            step.update(status="completed", output=_truncate_step_output(getattr(chunk, "content", None)))
+        if name:
+            events.append(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=name))
+    elif value == _WF.step_error.value:
+        step = _find_open_step(steps, step_id)
+        if step is not None:
+            step.update(status="error", output=_truncate_step_output(getattr(chunk, "error", None)))
+        if name:
+            events.append(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=name))
+    elif value in _STEP_PAUSE_VALUES:
+        step = _find_open_step(steps, step_id)
+        if step is not None:
+            step["status"] = "paused"
+    elif value in _WORKFLOW_PAUSE_VALUES:
+        progress["status"] = RunStatus.paused.value
+    elif value in _STEP_CONTINUE_VALUES:
+        step = _find_open_step(steps, step_id)
+        if step is not None:
+            step["status"] = "running"
+    elif value == _WF.workflow_cancelled.value:
+        progress["status"] = RunStatus.cancelled.value
+        state.cancelled = True
+    # workflow_started initialises progress above; container/agent events are no-ops (their inner
+    # step_started/completed populate the flat list). step_output carries no step_id and only restates
+    # content the immediately-following step_completed sets authoritatively, so it needs no branch here.
+    _sync_steps_to_dojo_format(state)
+    return events + _emit_state_delta(state) + activity.on_progress(state)
+
+
+# Workflow completion helpers
+
+
+def _is_workflow_terminal(chunk: BaseRunOutputEvent) -> bool:
+    return _event_value(chunk) in _WORKFLOW_TERMINAL_VALUES
+
+
+def _is_workflow_completed(chunk: BaseRunOutputEvent) -> bool:
+    return _event_value(chunk) == _WF.workflow_completed.value
+
+
+def _leaf_streamed(node: Any) -> Optional[bool]:
+    # Descend to final leaf and check if it streamed; None = uncertain (drop-safe: emit)
+    if getattr(node, "step_type", None) in (StepType.PARALLEL, StepType.LOOP):
+        return None
+    sub = getattr(node, "steps", None)
+    if sub:
+        return _leaf_streamed(sub[-1])
+    executor = getattr(node, "executor_type", None)
+    if executor in ("agent", "team"):
+        return True
+    if executor == "function":
+        return False
+    return None
+
+
+def _final_leaf_streamed(chunk: BaseRunOutputEvent) -> Optional[bool]:
+    results = getattr(chunk, "step_results", None)
+    if not results:
+        return None
+    return _leaf_streamed(results[-1])
+
+
+def _workflow_completion_events(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
+    if _event_value(chunk) == _WF.workflow_error.value:
+        error = getattr(chunk, "error", None) or "Workflow error occurred"
+        return [RunErrorEvent(type=EventType.RUN_ERROR, message=str(error))]
+
+    # Cancellation: WorkflowCancelledEvent set state.cancelled; the trailing
+    # WorkflowCompletedEvent.content is the cancel REASON, not an answer. Never render it.
+    if state.cancelled:
+        return []
+
+    content = getattr(chunk, "content", None)
+    if content is None:
+        return []
+    rendered = _render_content(content)
+    if not rendered.strip():
+        return []
+
+    # Provenance: suppress completion recap ONLY when final leaf is agent/team AND
+    # content actually reached the wire. Drop-safe bias: rare duplicate beats dropped answer.
+    if _final_leaf_streamed(chunk) and state.streamed_any_text:
+        return []
+    return _new_text_message(rendered)
+
+
+# Run finalization
+
+
 def _close_open_streams(state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
 
-    # Close orphaned reasoning session
     if state.reasoning_message_id is not None:
         events.append(
             ReasoningMessageEndEvent(type=EventType.REASONING_MESSAGE_END, message_id=state.reasoning_message_id)
@@ -327,13 +562,11 @@ def _close_open_streams(state: StreamState) -> List[BaseEvent]:
         events.append(ReasoningEndEvent(type=EventType.REASONING_END, message_id=state.reasoning_message_id))
         state.end_reasoning()
 
-    # Close remaining active tool calls
     for tool_call_id in list(state.active_tool_call_ids):
         if tool_call_id not in state.ended_tool_call_ids:
             events.append(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tool_call_id))
             state.end_tool_call(tool_call_id)
 
-    # Close open text message
     if state.text_message_open:
         events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=state.text_message_id))
         state.close_text_message()
@@ -361,10 +594,22 @@ def _paused_tools_for(chunk: BaseRunOutputEvent) -> List[ToolExecution]:
     return paused_tools
 
 
+def _final_snapshot(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
+    # Re-inject workflow_progress and steps (stripped before DB save)
+    if state.run_state is None:
+        return []
+    authoritative_state = getattr(chunk, "session_state", None)
+    final_state = authoritative_state if authoritative_state is not None else state.run_state
+    if state.workflow_progress is not None:
+        final_state = {**final_state, "workflow_progress": state.workflow_progress}
+    if "steps" in state.run_state:
+        final_state = {**final_state, "steps": state.run_state["steps"]}
+    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(final_state))]
+
+
 def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
 
-    # Emit tool calls for paused runs
     paused_tools = _paused_tools_for(chunk)
     if paused_tools:
         assistant_message_id = str(uuid.uuid4())
@@ -412,36 +657,18 @@ def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEve
 
             events.append(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tool.tool_call_id))
 
-    # Emit final state snapshot (then its activity twin, if enabled), then close the run.
     events += _final_snapshot(chunk, state)
     events += activity.terminal_snapshot(state)
     events.append(RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id=state.thread_id, run_id=state.run_id))
     return events
 
 
-def _final_snapshot(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    # Re-inject workflow_progress and steps (stripped before DB save)
-    if state.run_state is None:
-        return []
-    authoritative_state = getattr(chunk, "session_state", None)
-    final_state = authoritative_state if authoritative_state is not None else state.run_state
-    if state.workflow_progress is not None:
-        final_state = {**final_state, "workflow_progress": state.workflow_progress}
-    # Sync Dojo-compat steps from run_state if present
-    if "steps" in state.run_state:
-        final_state = {**final_state, "steps": state.run_state["steps"]}
-    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(final_state))]
-
-
 def on_run_completed(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     return _close_open_streams(state) + _finalize_run(chunk, state)
 
 
-def _normalize_event(event: str) -> str:
-    return event.removeprefix("Team")
+# Event dispatch registry
 
-
-# Maps normalized event names to handler functions
 HANDLERS: Dict[str, EventHandler] = {
     RunEvent.run_content.value: on_run_content,
     RunEvent.tool_call_started.value: on_tool_call_started,
@@ -453,31 +680,25 @@ HANDLERS: Dict[str, EventHandler] = {
     RunEvent.custom_event.value: on_custom_event,
 }
 
-# Workflow structural events -> native STATE workflow_progress (+ native STEP at step
-# boundaries). custom_event is excluded so the author's own event keeps its CustomEvent
-# passthrough via the RunEvent.custom_event registration above (same wire value "CustomEvent").
-HANDLERS.update(
-    {
-        value: workflow_progress.progress_handler
-        for value in workflow_handlers.STRUCTURAL_EVENT_VALUES - {WorkflowRunEvent.custom_event.value}
-    }
-)
+# Workflow structural events → progress handler
+# custom_event excluded so author's own event keeps CustomEvent passthrough
+HANDLERS.update({value: on_workflow_progress for value in STRUCTURAL_EVENT_VALUES - {_WF.custom_event.value}})
 
 # Terminal events that trigger completion handling
-_COMPLETION_EVENTS = frozenset(
-    {
-        RunEvent.run_completed.value,
-        RunEvent.run_paused.value,
-        TeamRunEvent.run_completed.value,
-        TeamRunEvent.run_paused.value,
-        WorkflowRunEvent.workflow_completed.value,
-        WorkflowRunEvent.workflow_error.value,
-    }
+_COMPLETION_EVENTS = (
+    frozenset(
+        {
+            RunEvent.run_completed.value,
+            RunEvent.run_paused.value,
+            TeamRunEvent.run_completed.value,
+            TeamRunEvent.run_paused.value,
+        }
+    )
+    | _WORKFLOW_TERMINAL_VALUES
 )
 
 
 def is_completion_event(chunk: BaseRunOutputEvent) -> bool:
-    """Check if this event signals stream completion."""
     event = getattr(chunk, "event", None)
     if event is None:
         return False
@@ -486,7 +707,6 @@ def is_completion_event(chunk: BaseRunOutputEvent) -> bool:
 
 
 def process_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Process a single Agno event and return AG-UI events to emit."""
     event = getattr(chunk, "event", None)
     if event is None:
         return on_unknown_event(chunk, state)
@@ -502,19 +722,23 @@ def process_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEve
 
 
 def process_completion(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Process a terminal event (run or workflow) and return cleanup events."""
-    if not workflow_handlers.is_workflow_terminal(chunk):
+    # Agent/team completion
+    if not _is_workflow_terminal(chunk):
         return on_run_completed(chunk, state)
 
-    # Workflow terminal: close open streams, emit the workflow-specific events,
-    # and finalize only for completed (error ends on RunErrorEvent, no finish).
+    # Workflow terminal: close streams first, always
     events = _close_open_streams(state)
-    if not workflow_handlers.is_workflow_completed(chunk):
-        # Workflow error terminal (yielded, not raised): terminalize progress to ERROR
-        # and emit the final snapshot BEFORE the RUN_ERROR (workflow_completion_events).
-        events += workflow_progress.error_snapshot(state)
-    events += workflow_handlers.workflow_completion_events(chunk, state)
-    if workflow_handlers.is_workflow_completed(chunk):
-        workflow_progress.mark_completed(state)
+
+    # Error: terminalize progress BEFORE emitting RUN_ERROR
+    if not _is_workflow_completed(chunk):
+        events += _workflow_error_snapshot(state)
+
+    # Emit workflow-specific events (RUN_ERROR or final content)
+    events += _workflow_completion_events(chunk, state)
+
+    # Completed: mark progress done, then finalize (no RUN_FINISHED on error)
+    if _is_workflow_completed(chunk):
+        _mark_workflow_completed(state)
         events += _finalize_run(chunk, state)
+
     return events
