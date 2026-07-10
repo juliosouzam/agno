@@ -69,6 +69,16 @@ class TestExtractEventContext:
         ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U1", "ts": "111"})
         assert ctx["thread_id"] == "111"
 
+    def test_user_falls_back_to_bot_id(self):
+        # Bot-authored events (e.g. webhook posts) may carry no "user" — bot_id keeps
+        # downstream identity handling non-empty
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "bot_id": "B99", "ts": "111"})
+        assert ctx["user"] == "B99"
+
+    def test_user_wins_over_bot_id(self):
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U1", "bot_id": "B99", "ts": "111"})
+        assert ctx["user"] == "U1"
+
 
 class TestDownloadEventFilesAsync:
     @pytest.mark.asyncio
@@ -274,6 +284,25 @@ class TestResolveSlackUser:
         client.users_info = AsyncMock(side_effect=RuntimeError("Slack API error"))
         resolved_id, display_name = await resolve_slack_user(client, "UFAIL")
         assert resolved_id == "UFAIL"
+        assert display_name is None
+
+    @pytest.mark.asyncio
+    async def test_bot_id_resolves_via_bots_info(self):
+        # A raw bot id ("B…") never hits users_info — bots_info gives the bot's name,
+        # and the bot id itself stays the canonical user_id (bots have no email)
+        client = AsyncMock()
+        client.bots_info = AsyncMock(return_value={"bot": {"id": "B42", "name": "peerbot"}})
+        resolved_id, display_name = await resolve_slack_user(client, "B42")
+        assert resolved_id == "B42"
+        assert display_name == "peerbot"
+        client.users_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bot_id_api_error_falls_back_gracefully(self):
+        client = AsyncMock()
+        client.bots_info = AsyncMock(side_effect=RuntimeError("Slack API error"))
+        resolved_id, display_name = await resolve_slack_user(client, "BFAIL")
+        assert resolved_id == "BFAIL"
         assert display_name is None
 
 

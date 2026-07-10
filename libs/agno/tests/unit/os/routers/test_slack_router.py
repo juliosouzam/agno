@@ -21,6 +21,7 @@ from agno.os.interfaces.slack.ids import (
     encode_submit_button_value,
     row_block_id,
 )
+from agno.os.interfaces.slack.router import _should_ignore_event
 from agno.os.interfaces.slack.state import StreamState
 from agno.run.requirement import RunRequirement
 
@@ -580,6 +581,178 @@ class TestPerUserThreadSessions:
 
         assert handled is True
         assert mock_card.call_args.kwargs["session_id"] is None
+
+
+class TestBotMessageFiltering:
+    """respond_to_bot_messages: own messages always dropped; other bots' opt-in."""
+
+    def _human_event(self) -> dict[str, Any]:
+        return {"type": "message", "channel_type": "im", "text": "hi", "user": "U_HUMAN"}
+
+    def _own_bot_event(self) -> dict[str, Any]:
+        return {"type": "message", "channel_type": "im", "text": "echo", "user": "U_SELF", "bot_id": "B_SELF"}
+
+    def _peer_bot_event(self, **overrides: Any) -> dict[str, Any]:
+        event = {
+            "type": "message",
+            "channel_type": "im",
+            "text": "ping",
+            "user": "U_PEER",
+            "bot_id": "B_PEER",
+            "app_id": "A_PEER",
+        }
+        event.update(overrides)
+        return event
+
+    def _envelope(self) -> dict[str, Any]:
+        return {"api_app_id": "A_SELF", "authorizations": [{"user_id": "U_SELF"}]}
+
+    def test_human_event_never_ignored(self):
+        assert _should_ignore_event(self._human_event(), self._envelope(), respond_to_bot_messages=False) is False
+        assert _should_ignore_event(self._human_event(), self._envelope(), respond_to_bot_messages=True) is False
+
+    def test_any_bot_event_ignored_by_default(self):
+        assert _should_ignore_event(self._peer_bot_event(), self._envelope(), respond_to_bot_messages=False) is True
+        assert _should_ignore_event(self._own_bot_event(), self._envelope(), respond_to_bot_messages=False) is True
+
+    def test_peer_bot_event_processed_when_opted_in(self):
+        assert _should_ignore_event(self._peer_bot_event(), self._envelope(), respond_to_bot_messages=True) is False
+
+    def test_own_bot_event_ignored_even_when_opted_in(self):
+        # The echo-loop guard is not opt-out-able
+        assert _should_ignore_event(self._own_bot_event(), self._envelope(), respond_to_bot_messages=True) is True
+
+    def test_own_app_matched_by_app_id(self):
+        # Some bot messages carry no "user" — attribution falls back to app_id
+        event = self._peer_bot_event(app_id="A_SELF")
+        event.pop("user")
+        assert _should_ignore_event(event, self._envelope(), respond_to_bot_messages=True) is True
+
+    def test_unattributable_bot_event_fails_closed(self):
+        # No sender user/app_id (e.g. legacy webhook) — treated as own, dropped
+        event = {"type": "message", "channel_type": "im", "text": "??", "bot_id": "B_MYSTERY"}
+        assert _should_ignore_event(event, self._envelope(), respond_to_bot_messages=True) is True
+
+    def test_peer_bot_message_subtype_passes_when_opted_in(self):
+        # "bot_message" is the delivery subtype for bot-authored channel messages
+        event = self._peer_bot_event(subtype="bot_message")
+        assert _should_ignore_event(event, self._envelope(), respond_to_bot_messages=True) is False
+
+    def test_peer_bot_message_edits_still_ignored(self):
+        # message_changed must never be reprocessed, even from a peer bot
+        event = {
+            "type": "message",
+            "subtype": "message_changed",
+            "message": {"text": "edited", "user": "U_PEER", "bot_id": "B_PEER", "app_id": "A_PEER"},
+        }
+        assert _should_ignore_event(event, self._envelope(), respond_to_bot_messages=True) is True
+
+    def test_human_lifecycle_subtypes_still_ignored_when_opted_in(self):
+        event = {"type": "message", "subtype": "message_deleted", "channel_type": "im", "user": "U_HUMAN"}
+        assert _should_ignore_event(event, self._envelope(), respond_to_bot_messages=True) is True
+
+    @pytest.mark.asyncio
+    async def test_peer_bot_dm_processed_end_to_end(self):
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF"}],
+                "event": {
+                    "type": "message",
+                    "channel_type": "im",
+                    "text": "ping from peer",
+                    "user": "U_PEER",
+                    "bot_id": "B_PEER",
+                    "app_id": "A_PEER",
+                    "channel": "C123",
+                    "ts": str(time.time()),
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await wait_for_call(agent_mock.arun)
+        assert agent_mock.arun.call_args.kwargs["user_id"] == "U_PEER"
+
+    @pytest.mark.asyncio
+    async def test_own_bot_dm_dropped_end_to_end(self):
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF"}],
+                "event": {
+                    "type": "message",
+                    "channel_type": "im",
+                    "text": "own echo",
+                    "user": "U_SELF",
+                    "bot_id": "B_SELF",
+                    "app_id": "A_SELF",
+                    "channel": "C123",
+                    "ts": str(time.time()),
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await asyncio.sleep(0.1)
+        agent_mock.arun.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_peer_bot_dropped_without_opt_in_end_to_end(self):
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF"}],
+                "event": {
+                    "type": "message",
+                    "channel_type": "im",
+                    "text": "ping from peer",
+                    "user": "U_PEER",
+                    "bot_id": "B_PEER",
+                    "app_id": "A_PEER",
+                    "channel": "C123",
+                    "ts": str(time.time()),
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await asyncio.sleep(0.1)
+        agent_mock.arun.assert_not_called()
 
 
 class TestRouterWiring:
