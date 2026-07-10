@@ -26,7 +26,6 @@ class AGUI(BaseInterface):
         prefix: str = "",
         tags: Optional[List[str]] = None,
         emit_activity: bool = False,
-        emit_messages_snapshot: bool = False,
     ):
         """
         Initialize the AGUI interface.
@@ -41,11 +40,6 @@ class AGUI(BaseInterface):
                 (ACTIVITY_SNAPSHOT/ACTIVITY_DELTA), additive beside the STATE channel.
                 Off by default: older AG-UI clients without the Activity schemas
                 reject unknown event types, and off keeps the wire unchanged.
-            emit_messages_snapshot: Rehydrate session history to history-less
-                clients as one MESSAGES_SNAPSHOT at run start. Off by default:
-                emitting to a client that already holds the thread would
-                drop-and-reappend its rendered bubbles (wire ids never match
-                persisted ids), so it stays opt-in for reload/reattach flows.
         """
         self.agent = agent
         self.team = team
@@ -53,7 +47,6 @@ class AGUI(BaseInterface):
         self.prefix = prefix
         self.tags = tags or ["AGUI"]
         self.emit_activity = emit_activity
-        self.emit_messages_snapshot = emit_messages_snapshot
 
         provided = [entity for entity in (self.agent, self.team, self.workflow) if entity is not None]
         if not provided:
@@ -70,7 +63,6 @@ class AGUI(BaseInterface):
             team=self.team,
             workflow=self.workflow,
             emit_activity=self.emit_activity,
-            emit_messages_snapshot=self.emit_messages_snapshot,
         )
 
         return self.router

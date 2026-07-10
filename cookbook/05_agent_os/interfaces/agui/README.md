@@ -17,7 +17,6 @@ Works with any AG-UI compatible frontend, including [CopilotKit](https://github.
 - `multiple_instances.py` — Multiple agent instances.
 - `reasoning_agent.py` — Agent with reasoning/thinking display.
 - `research_team.py` — Multi-agent research team.
-- `session_rehydration.py` — Session history rehydration via opt-in MESSAGES_SNAPSHOT at run start.
 - `shared_state.py` — Shared state between agents.
 - `showcase.py` — Single server exposing all Dojo demo endpoints.
 - `state_events.py` — Outbound state synchronization via STATE_SNAPSHOT + STATE_DELTA events.

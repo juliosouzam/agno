@@ -21,7 +21,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from agno.agent import Agent, RemoteAgent
-from agno.os.interfaces.agui.history import session_history_snapshot
 from agno.os.interfaces.agui.input import (
     extract_context,
     extract_media,
@@ -44,7 +43,6 @@ async def run_entity(
     run_input: RunAgentInput,
     user_id: Optional[str] = None,
     emit_activity: bool = False,
-    emit_messages_snapshot: bool = False,
 ) -> AsyncIterator[BaseEvent]:
     """Shared handler for running an Agent, Team, or Workflow with AG-UI input/output mapping.
 
@@ -71,13 +69,6 @@ async def run_entity(
 
         if session_state is not None:
             yield StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(session_state))
-
-        if emit_messages_snapshot:
-            # Session-history rehydration (opt-in): one MESSAGES_SNAPSHOT before any
-            # streamed traffic. All gating lives in session_history_snapshot.
-            history_snapshot = await session_history_snapshot(entity, run_input, tool_messages)
-            if history_snapshot is not None:
-                yield history_snapshot
 
         ui_deps = extract_context(run_input.context)
 
@@ -147,7 +138,6 @@ def attach_routes(
     team: Optional[Union[Team, RemoteTeam]] = None,
     workflow: Optional[Union[Workflow, RemoteWorkflow]] = None,
     emit_activity: bool = False,
-    emit_messages_snapshot: bool = False,
 ) -> APIRouter:
     if agent is None and team is None and workflow is None:
         raise ValueError("Either agent, team, or workflow must be provided.")
@@ -167,7 +157,6 @@ def attach_routes(
                 run_input,
                 user_id=user_id,
                 emit_activity=emit_activity,
-                emit_messages_snapshot=emit_messages_snapshot,
             ):
                 # Workflows fan out many steps; stop streaming if the client
                 # disconnected, to avoid burning tokens on output nobody sees.
