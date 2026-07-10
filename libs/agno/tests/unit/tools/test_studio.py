@@ -309,6 +309,19 @@ class TestCreateAgent:
         assert team["id"] == "reporter"
         assert agent["id"] == "reporter-2"
 
+    def test_code_defined_collision_gets_unique_id(self, db):
+        """Creating component with same id as code-defined agent auto-suffixes."""
+        code_agent = Agent(id="my-code-agent", name="Code Agent", model=OpenAIResponses())
+        studio = StudioTools(
+            registry=Registry(models=[OpenAIResponses(id="gpt-5.4")]),
+            db=db,
+            agents_list=[code_agent],
+        )
+
+        result = _loads(studio.create_agent(name="my-code-agent", instructions="i", model_id="gpt-5.4"))
+        assert result["status"] == "created"
+        assert result["id"] == "my-code-agent-2"
+
     def test_persist_failure_returns_error(self, studio, db, monkeypatch):
         def fail_upsert_config(*args, **kwargs):
             raise RuntimeError("persist failed")

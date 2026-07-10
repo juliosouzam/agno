@@ -1668,26 +1668,45 @@ class StudioTools(Toolkit):
         """Return a unique id in the DB component namespace.
 
         Components use ``component_id`` as the primary key, so agents, teams,
-        and workflows intentionally share one id namespace.
+        and workflows intentionally share one id namespace. Checks both
+        code-defined components and DB components for collisions.
         """
         base = _slugify(name)
         candidate = base
         suffix = 2
-        while self._component_id_exists(candidate, db):
+        while True:
+            collision_source = self._component_id_exists(candidate, db)
+            if collision_source is None:
+                break
+            log_debug(f"Component id '{candidate}' already exists ({collision_source}), trying '{base}-{suffix}'")
             candidate = f"{base}-{suffix}"
             suffix += 1
         return candidate
 
-    def _component_id_exists(self, component_id: str, db: "BaseDb") -> bool:
+    def _component_id_exists(self, component_id: str, db: "BaseDb") -> Optional[str]:
+        """Check if component_id collides with existing components.
+
+        Returns:
+            None if no collision, otherwise a string describing the collision source
+            (e.g. "code-defined agent 'platform-manager'" or "db component").
+        """
+        # 1. Check code-defined components
         for component in [*self._iter_agents(), *self._iter_teams(), *self._iter_workflows()]:
-            component_name = getattr(component, "name", None)
+            comp_id = getattr(component, "id", None)
+            comp_name = getattr(component, "name", None)
+            comp_type = type(component).__name__.lower()
             if (
-                getattr(component, "id", None) == component_id
-                or component_name == component_id
-                or (component_name is not None and _slugify(component_name) == component_id)
+                comp_id == component_id
+                or comp_name == component_id
+                or (comp_name is not None and _slugify(comp_name) == component_id)
             ):
-                return True
-        return db.get_component(component_id) is not None
+                return f"code-defined {comp_type} '{comp_id or comp_name}'"
+
+        # 2. Check DB components
+        if db.get_component(component_id) is not None:
+            return "db component"
+
+        return None
 
     def _resolve_members(self, member_ids: List[str]) -> tuple[List[TeamMember], List[str]]:
         members: List[TeamMember] = []
