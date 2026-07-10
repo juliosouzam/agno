@@ -12,18 +12,17 @@ remembers prior turns and varies ``image_name`` / ``gradient`` choices
 across consecutive same-theme prompts. The AG-UI router strips client-sent
 history, so without a db the team would start fresh on every turn.
 
-Tool schema (``english``, ``japanese``, ``image_name``, ``gradient``)
+Tool schema (``japanese``, ``english``, ``image_name``, ``gradient``)
 matches the AG-UI dojo's ``tool_based_generative_ui`` page so the
 frontend's React render handler can pick up every field.
 ``external_execution_silent=True`` suppresses the "Team run paused"
 status message while the frontend executes the tool.
 
-Prerequisite: Team-mode external-execution over AG-UI requires the
+Team-mode external-execution over AG-UI relies on the
 ``TeamRunPausedEvent`` handling, ``set_external_execution_result()``
-resume path, and team-side silent-tool filter added in PR #7819. On
-framework versions before that change reaches ``main``, the team's
-external tool call is not emitted as AG-UI ``TOOL_CALL_START / ARGS /
-END`` events and the dojo will not render haiku cards.
+resume path, and team-side silent-tool filter that shipped with the
+AG-UI client-tools support in #8565 (and the #8364 interface split),
+both on ``main``. This cookbook runs on current ``main`` as-is.
 
 Run with:
 
@@ -47,20 +46,20 @@ from agno.tools import tool
 
 # This server-side stub is what causes the team to pause for external
 # execution -- the AG-UI client (dojo / CopilotKit) actually runs the
-# tool. The dojo registers a frontend tool with the same name; the AG-UI
-# router's _build_merged_tools drops the frontend definition on name
-# collision (server-side wins). Do NOT remove this stub thinking it is
+# tool. The dojo registers a frontend tool with the same name; agno's
+# tool registry (parse_tools) drops the forwarded frontend definition on
+# name collision (server-side wins). Do NOT remove this stub thinking it is
 # redundant: without it the team has no pause source and the dojo will
 # never receive TOOL_CALL_* events.
 @tool(external_execution=True, external_execution_silent=True)
 def generate_haiku(
-    english: List[str], japanese: List[str], image_name: str, gradient: str
+    japanese: List[str], english: List[str], image_name: str, gradient: str
 ) -> str:
     """Generate a haiku in Japanese and English and display it in the frontend.
 
     Args:
-        english: 3 lines of the haiku translated to English.
         japanese: 3 lines of the haiku in Japanese kanji.
+        english: 3 lines of the haiku translated to English.
         image_name: One relevant image name from:
             Osaka_Castle_Turret_Stone_Wall_Pine_Trees_Daytime.jpg,
             Tokyo_Skyline_Night_Tokyo_Tower_Mount_Fuji_View.jpg,
@@ -87,7 +86,7 @@ def generate_haiku(
 greeter = Agent(
     name="greeter",
     role="Friendly conversational helper",
-    model=OpenAIResponses(id="gpt-5.4"),
+    model=OpenAIResponses(id="gpt-5.5"),
     instructions="Help with simple conversational tasks. You have no special tools.",
     markdown=True,
 )
@@ -97,30 +96,26 @@ team = Team(
     mode="coordinate",
     members=[greeter],
     # In-memory session store so add_history_to_context=True actually has
-    # somewhere to persist prior turns. The AG-UI router strips client-sent
-    # history (utils.extract_agui_user_input keeps only the last user
-    # message), so without a db the team starts fresh on every turn -- the
+    # somewhere to persist prior turns. The AG-UI router keeps only the last
+    # user message (extract_user_input in the agui input module), so without
+    # a db the team starts fresh on every turn -- the
     # model has no signal it picked image_name='X' before and repeats the
     # same image. InMemoryDb lives for the AgentOS process lifetime;
     # mirrors cookbook/06_storage/in_memory/ and
     # cookbook/03_teams/07_session/share_session_with_agent.py.
     db=InMemoryDb(),
-    # gpt-5.4 is the project-standard cookbook model (per CLAUDE.md).
-    # As a reasoning model, its explicit reasoning step makes the "do not
-    # repeat image_name" rule actually stick -- gpt-4.1-mini and gpt-5.1
-    # treated it as a soft suggestion and kept defaulting to the strongest
-    # theme association (Takachiho for nature). Reasoning models read the
-    # rule, look at the prior turn's tool call in history, and pick a
-    # different image. Trade-off: slightly slower responses (reasoning
-    # takes time) and temperature is silently ignored.
-    model=OpenAIResponses(id="gpt-5.4"),
+    # gpt-5.5 matches the AG-UI dojo-demo cookbook set (agentic_chat,
+    # tool_based_generative_ui, etc.). It reads the "do not repeat
+    # image_name" rule and the prior turn's tool call in history, so it
+    # varies image_name across consecutive same-theme prompts.
+    model=OpenAIResponses(id="gpt-5.5"),
     tools=[generate_haiku],
     description="A team that generates haikus on request using a frontend tool.",
     # Lightweight prompt: theme hint + readability constraint + soft
     # anti-repeat. Earlier aggressive "CRITICAL diversity rules" with
-    # numbered MUST/NEVER directives caused gpt-5.4 to over-think and
+    # numbered MUST/NEVER directives caused the model to over-think and
     # collapse to the same shade per theme. This shorter prompt lets the
-    # reasoning model vary more naturally while still keeping the
+    # model vary more naturally while still keeping the
     # light-gradient readability requirement.
     instructions=(
         "Help the user write Haikus. When the user asks for a haiku, "
@@ -155,7 +150,7 @@ app = agent_os.get_app()
 if __name__ == "__main__":
     """Run your AgentOS.
 
-    Configure Dojo / CopilotKit at http://localhost:9002/agui to exercise
+    Configure Dojo / CopilotKit at http://localhost:9001/agui to exercise
     the team-level external-execution flow end to end.
     """
-    agent_os.serve(app="team_with_tools:app", port=9002, reload=True)
+    agent_os.serve(app="team_with_tools:app", port=9001, reload=True)
