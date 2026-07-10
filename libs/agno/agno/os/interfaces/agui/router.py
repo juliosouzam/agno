@@ -172,7 +172,7 @@ def attach_routes(
                 # Workflows fan out many steps; stop streaming if the client
                 # disconnected, to avoid burning tokens on output nobody sees.
                 if workflow is not None and await request.is_disconnected():
-                    log_info(f"AGUI client disconnected; stopping workflow stream for run_id={run_input.run_id}")
+                    log_info("AGUI client disconnected; stopping workflow stream")
                     break
                 yield encoder.encode(event)
 

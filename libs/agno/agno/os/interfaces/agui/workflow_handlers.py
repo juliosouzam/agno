@@ -119,9 +119,9 @@ def workflow_completion_events(chunk: BaseRunOutputEvent, state: StreamState) ->
         error = getattr(chunk, "error", None) or "Workflow error occurred"
         return [RunErrorEvent(type=EventType.RUN_ERROR, message=str(error))]
 
-    # Cancellation: the WorkflowCancelledEvent marker already surfaced as a
-    # CustomEvent; the trailing WorkflowCompletedEvent.content is the cancel
-    # REASON, not an answer (workflow.py:2865/2877). Never render it.
+    # Cancellation: WorkflowCancelledEvent set state.cancelled and surfaced via
+    # workflow_progress STATUS; the trailing WorkflowCompletedEvent.content is the
+    # cancel REASON, not an answer. Never render it.
     if state.cancelled:
         return []
 
