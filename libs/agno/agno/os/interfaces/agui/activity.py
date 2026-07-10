@@ -1,22 +1,3 @@
-"""Workflow progress -> opt-in AG-UI ACTIVITY channel.
-
-Dual-emits the same workflow_progress dict the STATE channel carries as
-ACTIVITY_SNAPSHOT / ACTIVITY_DELTA, so AG-UI clients can render the run's
-progress as a distinct activity card (CopilotKit: a renderActivityMessages
-entry keyed on this module's activity_type). Always ADDITIVE beside the
-auto-rendering STATE channel, never replacing it, and opt-in
-(AGUI(emit_activity=True), default off) -- flag off keeps the wire
-byte-identical.
-
-Protocol: snapshot-first (clients silently drop deltas for unknown activity
-ids), then RFC 6902 deltas rooted at the activity content -- NOT at run_state,
-whose patch paths the STATE channel uses -- then a full snapshot at every
-terminal (completed and error) as an authoritative resync: terminal sweeps
-(mark_completed / error_snapshot) mutate progress outside progress_handler,
-so deltas alone cannot carry them. One activity per run: the message id is
-stable for the run's lifetime, so client-side snapshots replace in place.
-"""
-
 import copy
 from typing import Any, Dict, List
 
@@ -45,9 +26,7 @@ def _snapshot(state: StreamState, progress: Dict[str, Any]) -> List[BaseEvent]:
 
 
 def on_progress(state: StreamState) -> List[BaseEvent]:
-    """One incremental emission per progress mutation: a snapshot first (seeds the
-    client's activity id), deltas after; a patch-compute failure resynchronizes
-    with a fresh snapshot instead of dropping the mutation."""
+    # Snapshot first, then RFC 6902 deltas; resync on patch failure
     if not state.emit_activity or state.workflow_progress is None:
         return []
     progress = state.workflow_progress
@@ -74,8 +53,6 @@ def on_progress(state: StreamState) -> List[BaseEvent]:
 
 
 def terminal_snapshot(state: StreamState) -> List[BaseEvent]:
-    """Authoritative full snapshot at a terminal, emitted after the terminal STATE
-    event and before RUN_FINISHED / RUN_ERROR."""
     if not state.emit_activity or state.workflow_progress is None:
         return []
     return _snapshot(state, state.workflow_progress)

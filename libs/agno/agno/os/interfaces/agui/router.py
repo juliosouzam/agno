@@ -21,6 +21,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from agno.agent import Agent, RemoteAgent
+from agno.os.interfaces.agui.history import session_history_snapshot
 from agno.os.interfaces.agui.input import (
     extract_context,
     extract_media,
@@ -29,7 +30,6 @@ from agno.os.interfaces.agui.input import (
     parse_client_tools,
     validate_state,
 )
-from agno.os.interfaces.agui.history import session_history_snapshot
 from agno.os.interfaces.agui.resume import resume_paused_run
 from agno.os.interfaces.agui.stream import async_stream_agno_response_as_agui_events
 from agno.os.middleware.user_scope import resolve_run_user_id

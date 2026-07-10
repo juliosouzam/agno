@@ -1,22 +1,3 @@
-"""Workflow structural events -> native AG-UI STATE (workflow_progress) + STEP.
-
-A workflow's structural WorkflowRunEvents (started, step_*, loop/parallel/condition/
-router_*, pause/continue, cancelled) surface as a flat steps[] progress object in
-shared STATE -- the one channel the default AG-UI client auto-renders -- plus native
-STEP_STARTED/STEP_FINISHED at flat step boundaries (emitted for protocol consistency;
-they render nothing themselves). No CustomEvent: the author's own custom_event keeps
-its passthrough via the RunEvent.custom_event handler.
-
-v1 is intentionally FLAT: container events (loop/parallel/condition/router) are no-ops
-here -- their inner steps emit their own step_started/completed and populate the list.
-Grouping the topology is a deferred follow-up. Pause/cancel surface as a status only;
-interactive resume is out of scope.
-
-The workflow status uses canonical uppercase RunStatus values ("RUNNING"/"COMPLETED"/...);
-per-step status is a lowercase vocabulary ("running"/"completed"/"skipped"/"error"/"paused"),
-since there is no RunStatus value for a skipped step.
-"""
-
 import copy
 from typing import Any, Dict, List, Optional
 
@@ -46,15 +27,36 @@ _CONTINUE = frozenset({_E.step_continued.value, _E.step_executor_continued.value
 
 
 def _progress(state: StreamState) -> Dict[str, Any]:
+    # Reset progress when run_id changes to avoid cross-turn leakage from echoed state
     if state.run_state is None:
         state.run_state = {}
-    return state.run_state.setdefault("workflow_progress", {"status": RunStatus.running.value, "steps": []})
+    existing = state.run_state.get("workflow_progress")
+    if existing is None or existing.get("run_id") != state.run_id:
+        state.run_state["workflow_progress"] = {
+            "run_id": state.run_id,
+            "status": RunStatus.running.value,
+            "steps": [],
+        }
+    return state.run_state["workflow_progress"]
+
+
+def _sync_steps_to_root(state: StreamState) -> None:
+    # Dojo agentic_generative_ui expects state.steps[{description, status}]
+    if state.run_state is None or "workflow_progress" not in state.run_state:
+        return
+    wp_steps = state.run_state["workflow_progress"].get("steps", [])
+    # Map to Dojo format: description (from name), status (running -> pending for Dojo)
+    state.run_state["steps"] = [
+        {
+            "description": s.get("name", ""),
+            "status": "pending" if s.get("status") == "running" else s.get("status", "pending"),
+        }
+        for s in wp_steps
+    ]
 
 
 def _baseline(state: StreamState) -> List[BaseEvent]:
-    """First touch with no caller-supplied state: router.py emitted no initial snapshot
-    and stream.py set no delta baseline -> establish one here so the workflow_progress
-    deltas below have a reference to diff against."""
+    # Establish delta baseline if no caller-supplied state
     if state.run_state is not None:
         return []
     state.run_state = {}
@@ -80,12 +82,7 @@ def _short(content: Any) -> Optional[str]:
 
 
 def _open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Most recent not-yet-finished entry for this event's step, matched by its unique step_id.
-    On the async run path AG-UI drives, every step event that finds its entry
-    (step_completed/step_error/pause/continue) carries a step_id, distinct per step instance --
-    keying by it, not the step_index that nested Parallel siblings share, is what keeps concurrent
-    siblings from mis-attributing each other's completions. (The sync StepCompletedEvent omits
-    step_id, but the sync stream driver has no runtime callers, so this stays async-scoped.)"""
+    # Find by step_id (not step_index) to handle concurrent Parallel siblings
     for step in reversed(steps):
         if step["status"] in ("running", "paused") and step["id"] == step_id:
             return step
@@ -93,10 +90,7 @@ def _open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Optional[
 
 
 def mark_completed(state: StreamState) -> None:
-    """Promote a still-running workflow to 'completed' at terminal time (never clobbering a
-    'cancelled' / 'error' / 'paused' status already set by a structural event). A step skipped
-    via on_error=skip emits no terminal event, so in a COMPLETED run any leftover 'running' step
-    was skipped -- surface it as 'skipped' instead of leaving it stuck on 'running'."""
+    # Promote workflow to completed; mark any leftover running steps as skipped
     progress = state.workflow_progress
     if progress is None:
         return
@@ -106,17 +100,11 @@ def mark_completed(state: StreamState) -> None:
         for step in progress["steps"]:
             if step["status"] == "running":
                 step["status"] = "skipped"
+    _sync_steps_to_root(state)
 
 
 def error_snapshot(state: StreamState) -> List[BaseEvent]:
-    """Terminalize workflow_progress on a workflow error, then emit the closing snapshot.
-
-    Two error shapes converge here: the engine may YIELD a workflow_error terminal
-    (handled in process_completion) or -- the common on_error='fail' case -- yield it
-    then RAISE, which preempts the deferred completion, so the stream driver calls this
-    from its except. Both flip the top-level status to ERROR and sweep any still-open
-    ('running'/'paused') step to 'error', so the STATE channel reflects the failure
-    instead of freezing on 'running'. Nothing ran (no progress) -> nothing to emit."""
+    # Terminalize progress to ERROR and emit final snapshot
     progress = state.workflow_progress
     if progress is None or state.run_state is None:
         return []
@@ -124,6 +112,7 @@ def error_snapshot(state: StreamState) -> List[BaseEvent]:
     for step in progress["steps"]:
         if step["status"] in ("running", "paused"):
             step["status"] = "error"
+    _sync_steps_to_root(state)
     state.set_state_snapshot(state.run_state)
     events: List[BaseEvent] = [
         StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))
@@ -132,7 +121,6 @@ def error_snapshot(state: StreamState) -> List[BaseEvent]:
 
 
 def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Map one structural WorkflowRunEvent to a workflow_progress mutation (+ STEP)."""
     events = _baseline(state)
     value = _event_value(chunk)
     progress = _progress(state)
@@ -173,4 +161,5 @@ def progress_handler(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
     # workflow_started initialises progress above; container/agent events are no-ops (their inner
     # step_started/completed populate the flat list). step_output carries no step_id and only restates
     # content the immediately-following step_completed sets authoritatively, so it needs no branch here.
+    _sync_steps_to_root(state)
     return events + _emit_delta(state) + activity.on_progress(state)

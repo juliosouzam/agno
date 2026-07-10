@@ -1,14 +1,3 @@
-"""Workflow-specific event handling for the AG-UI interface.
-
-A streaming workflow re-emits its inner agent/team events (content, tool calls,
-reasoning), which the standard handlers already translate — so this module only
-covers what is workflow-specific: identifying the structural events (routed to the
-native STATE workflow_progress handler in handlers.py) and resolving the terminal
-events (completed / error) at completion time. Cancellation is intentionally NOT
-terminal here: it surfaces as a STATE status ("cancelled") and the run finalizes
-cleanly with a RUN_FINISHED.
-"""
-
 import json
 import uuid
 from typing import Any, List, Optional
@@ -52,17 +41,14 @@ def _event_value(chunk: BaseRunOutputEvent) -> str:
 
 
 def is_workflow_terminal(chunk: BaseRunOutputEvent) -> bool:
-    """True for workflow_completed / workflow_error (handled at completion)."""
     return _event_value(chunk) in _WORKFLOW_TERMINAL_VALUES
 
 
 def is_workflow_completed(chunk: BaseRunOutputEvent) -> bool:
-    """True only for workflow_completed (soft-terminal: the run still finalizes)."""
     return _event_value(chunk) == WorkflowRunEvent.workflow_completed.value
 
 
 def _new_text_message(text: str) -> List[BaseEvent]:
-    """Build a fresh assistant TextMessage triplet (START / CONTENT / END)."""
     message_id = str(uuid.uuid4())
     return [
         TextMessageStartEvent(type=EventType.TEXT_MESSAGE_START, message_id=message_id, role="assistant"),
@@ -72,12 +58,8 @@ def _new_text_message(text: str) -> List[BaseEvent]:
 
 
 def _leaf_streamed(node: Any) -> Optional[bool]:
-    """Descend Router/Steps/Condition containers to the final leaf and report
-    whether it streamed. None = uncertain (Parallel/Loop fan-out, an unexpected
-    non-StepOutput node, or unknown executor) -> the caller emits (drop-safe).
-    A non-StepOutput (e.g. a nested list) has no step_type/steps/executor_type, so
-    it falls through every getattr to the drop-safe None below."""
-    if getattr(node, "step_type", None) in (StepType.PARALLEL, StepType.LOOP):  # fan-out: no single final leaf
+    # Descend to final leaf and check if it streamed; None = uncertain (drop-safe: emit)
+    if getattr(node, "step_type", None) in (StepType.PARALLEL, StepType.LOOP):
         return None
     sub = getattr(node, "steps", None)
     if sub:  # Router/Steps/Condition container -> descend the spine to its final leaf
@@ -91,7 +73,6 @@ def _leaf_streamed(node: Any) -> Optional[bool]:
 
 
 def _final_leaf_streamed(chunk: BaseRunOutputEvent) -> Optional[bool]:
-    """True iff the workflow's final answer already streamed (agent/team leaf)."""
     results = getattr(chunk, "step_results", None)
     if not results:
         return None
@@ -99,8 +80,6 @@ def _final_leaf_streamed(chunk: BaseRunOutputEvent) -> Optional[bool]:
 
 
 def _render_content(content: Any) -> str:
-    """Render the final answer as text: str as-is, list/dict as JSON, scalars via
-    str(). default=str keeps json.dumps from crashing on non-serializable values."""
     if isinstance(content, str):
         return content
     if isinstance(content, (list, dict)):
@@ -109,12 +88,6 @@ def _render_content(content: Any) -> str:
 
 
 def workflow_completion_events(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Build the workflow-specific terminal events.
-
-    The caller (process_completion) prepends stream cleanup and, for the
-    completed case, appends the run finalizer (RUN_FINISHED). A workflow error
-    is AG-UI-terminal: it ends on RunErrorEvent with no RUN_FINISHED following.
-    """
     if _event_value(chunk) == WorkflowRunEvent.workflow_error.value:
         error = getattr(chunk, "error", None) or "Workflow error occurred"
         return [RunErrorEvent(type=EventType.RUN_ERROR, message=str(error))]

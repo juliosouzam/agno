@@ -71,7 +71,6 @@ def _extract_team_response_chunk_content(response: TeamRunContentEvent) -> str:
 
 
 def _format_reasoning_step(step: Optional[ReasoningStep], step_number: int = 0) -> str:
-    """Format a ReasoningStep as text for REASONING_MESSAGE_CONTENT."""
     if step is None:
         return ""
     parts: List[str] = []
@@ -318,7 +317,6 @@ def on_unknown_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
 
 
 def _close_open_streams(state: StreamState) -> List[BaseEvent]:
-    """Close any open reasoning session, active tool calls, and text message."""
     events: List[BaseEvent] = []
 
     # Close orphaned reasoning session
@@ -344,9 +342,6 @@ def _close_open_streams(state: StreamState) -> List[BaseEvent]:
 
 
 def _paused_tools_for(chunk: BaseRunOutputEvent) -> List[ToolExecution]:
-    """Tools to surface as TOOL_CALL_* events for a paused run. Pause-type selection seam:
-    surfaces Agent and Team external-execution tools, confirmation tools, and user-input tools;
-    new pause types add their partition here."""
     paused_tools: List[ToolExecution] = []
     if isinstance(chunk, AgentRunPausedEvent):
         paused_tools = (
@@ -367,7 +362,6 @@ def _paused_tools_for(chunk: BaseRunOutputEvent) -> List[ToolExecution]:
 
 
 def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Emit external-execution tool calls for paused runs, the final state snapshot, and RUN_FINISHED."""
     events: List[BaseEvent] = []
 
     # Emit tool calls for paused runs
@@ -426,15 +420,16 @@ def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEve
 
 
 def _final_snapshot(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    """Terminal STATE_SNAPSHOT that re-injects the tracked workflow_progress (stripped from
-    session_state before the DB save, so the engine's authoritative session_state may not
-    carry it) -- else the final snapshot would blank the steps the deltas already rendered."""
+    # Re-inject workflow_progress and steps (stripped before DB save)
     if state.run_state is None:
         return []
     authoritative_state = getattr(chunk, "session_state", None)
     final_state = authoritative_state if authoritative_state is not None else state.run_state
     if state.workflow_progress is not None:
         final_state = {**final_state, "workflow_progress": state.workflow_progress}
+    # Sync Dojo-compat steps from run_state if present
+    if "steps" in state.run_state:
+        final_state = {**final_state, "steps": state.run_state["steps"]}
     return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(final_state))]
 
 
@@ -443,7 +438,6 @@ def on_run_completed(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
 
 
 def _normalize_event(event: str) -> str:
-    """Strip 'Team' prefix so agent and team events use the same handlers."""
     return event.removeprefix("Team")
 
 
