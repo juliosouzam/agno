@@ -894,7 +894,7 @@ def get_response_format(
                 return json_response_format
 
         elif model.supports_json_schema_outputs:
-            log_debug("Setting Model.response_format to JSON response mode")
+            log_debug("Setting Model.response_format to JSON schema")
             # Handle JSON schema - pass through directly (user provides full provider format)
             if isinstance(output_schema, dict):
                 return output_schema
