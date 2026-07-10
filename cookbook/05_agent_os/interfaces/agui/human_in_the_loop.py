@@ -15,6 +15,7 @@ from agno.agent.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.openai import OpenAIResponses
 
+
 hitl_agent = Agent(
     name="human_in_the_loop",
     model=OpenAIResponses(id="gpt-5.5"),
