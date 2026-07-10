@@ -61,10 +61,14 @@ _WORKFLOW_TERMINAL_VALUES = frozenset({_WF.workflow_completed.value, _WF.workflo
 # All non-terminal workflow events route to progress handler
 STRUCTURAL_EVENT_VALUES = frozenset(e.value for e in _WF) - _WORKFLOW_TERMINAL_VALUES
 
-# Step pause/continue event groupings for routing
-_STEP_PAUSE_VALUES = frozenset({_WF.step_paused.value, _WF.step_executor_paused.value, _WF.step_output_review.value})
-_WORKFLOW_PAUSE_VALUES = frozenset({_WF.workflow_paused.value, _WF.router_paused.value})
-_STEP_CONTINUE_VALUES = frozenset({_WF.step_continued.value, _WF.step_executor_continued.value})
+# Step pause/continue events map to the status they set
+_STEP_STATUS_ON_EVENT: Dict[str, str] = {
+    _WF.step_paused.value: "paused",
+    _WF.step_executor_paused.value: "paused",
+    _WF.step_output_review.value: "paused",
+    _WF.step_continued.value: "running",
+    _WF.step_executor_continued.value: "running",
+}
 
 
 # --- Shared helpers ---
@@ -495,18 +499,13 @@ def on_workflow_progress(chunk: BaseRunOutputEvent, state: StreamState) -> List[
         if name:
             events.append(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=name))
 
-    elif value in _STEP_PAUSE_VALUES:
+    elif value in _STEP_STATUS_ON_EVENT:
         step = _find_open_step(steps, step_id)
         if step is not None:
-            step["status"] = "paused"
+            step["status"] = _STEP_STATUS_ON_EVENT[value]
 
-    elif value in _WORKFLOW_PAUSE_VALUES:
+    elif value in (_WF.workflow_paused.value, _WF.router_paused.value):
         progress["status"] = RunStatus.paused.value
-
-    elif value in _STEP_CONTINUE_VALUES:
-        step = _find_open_step(steps, step_id)
-        if step is not None:
-            step["status"] = "running"
 
     elif value == _WF.workflow_cancelled.value:
         progress["status"] = RunStatus.cancelled.value
