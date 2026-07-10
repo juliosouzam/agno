@@ -14,8 +14,10 @@ from agno.os.interfaces.slack.helpers import BotNameResolver
 from agno.os.interfaces.slack.hitl import HITLHandler
 from agno.os.interfaces.slack.ids import (
     ACTION_CHECK_STATUS,
+    ACTION_ROW_APPROVE,
     ACTION_SUBMIT,
     encode_admin_approval_button_value,
+    encode_row_button_value,
     encode_submit_button_value,
     row_block_id,
 )
@@ -82,7 +84,11 @@ def _make_requirement(req_id: str = "r1", **tool_overrides: Any) -> RunRequireme
     return RunRequirement(tool_execution=ToolExecution(**defaults), id=req_id)
 
 
-def _make_submit_payload(blocks: list[dict[str, Any]], awaiting_ts: str | None = "await-1") -> dict[str, Any]:
+def _make_submit_payload(
+    blocks: list[dict[str, Any]],
+    awaiting_ts: str | None = "await-1",
+    session_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "type": "block_actions",
         "team": {"id": "T123"},
@@ -98,10 +104,23 @@ def _make_submit_payload(blocks: list[dict[str, Any]], awaiting_ts: str | None =
             {
                 "action_id": ACTION_SUBMIT,
                 "block_id": "pause:run-1",
-                "value": encode_submit_button_value("run-1", awaiting_ts),
+                "value": encode_submit_button_value("run-1", awaiting_ts, session_id),
             }
         ],
     }
+
+
+def _make_hitl_handler(entity: Any) -> HITLHandler:
+    return HITLHandler(
+        slack_tools=make_slack_mock(token="xoxb-test"),
+        ssl=None,
+        entity=entity,
+        entity_id="agent-1",
+        entity_name="Test Agent",
+        entity_type="agent",
+        task_display_mode="plan",
+        buffer_size=100,
+    )
 
 
 def _make_check_status_payload(
@@ -445,6 +464,122 @@ class TestNonStreamingRoutes:
         assert resp.status_code == 200
         await wait_for_call(agent_mock.arun)
         assert mock_client.assistant_threads_setStatus.call_args_list[-1].kwargs["status"] == ""
+
+
+class TestPerUserThreadSessions:
+    """per_user_thread_sessions=True keys sessions per (thread, caller).
+
+    Agno sessions are single-user rows (session_id is the PK, loads filter by user_id),
+    so a shared thread key lets the first speaker claim the session while every other
+    participant's runs load no history and are never persisted. Per-user keys give each
+    participant their own session — no caller can ever pull another caller's turns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_session_id_includes_slack_user_id(self):
+        agent_mock = make_agent_mock()
+        agent_mock.name = "Research Bot"
+        agent_mock.id = "researcher"
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, per_user_thread_sessions=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            thread_ts = "1708123456.000100"
+            body = {
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel_type": "im",
+                    "text": "hello",
+                    "user": "U123",
+                    "channel": "C123",
+                    "ts": "1708123456.000200",
+                    "thread_ts": thread_ts,
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await wait_for_call(agent_mock.arun)
+        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:{thread_ts}:U123"
+
+    @pytest.mark.asyncio
+    async def test_session_id_uses_resolved_email_when_identity_resolved(self):
+        # The session key must match the run's user_id, or the Postgres upsert guard
+        # (user_id mismatch) would silently drop the write
+        agent_mock = make_agent_mock()
+        agent_mock.name = "Research Bot"
+        agent_mock.id = "researcher"
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(
+                agent_mock, reply_to_mentions_only=False, per_user_thread_sessions=True, resolve_user_identity=True
+            )
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            thread_ts = "1708123456.000100"
+            body = {
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel_type": "im",
+                    "text": "hello",
+                    "user": "U123",
+                    "channel": "C123",
+                    "ts": "1708123456.000200",
+                    "thread_ts": thread_ts,
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await wait_for_call(agent_mock.arun)
+        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:{thread_ts}:test@example.com"
+        assert agent_mock.arun.call_args.kwargs["user_id"] == "test@example.com"
+
+    @pytest.mark.asyncio
+    async def test_pause_card_embeds_session_id_when_enabled(self):
+        handler = _make_event_handler(per_user_thread_sessions=True)
+        ctx = _make_event_context(session_id="agent-1:1708123456.000100:user@example.com")
+        response = Mock(content="", active_requirements=[_make_requirement()], run_id="run-9")
+
+        with (
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+            patch("agno.os.interfaces.slack.event_handler.post_pause_card", new=AsyncMock()) as mock_card,
+        ):
+            handled = await handler._handle_paused_non_streaming(ctx, response)
+
+        assert handled is True
+        assert mock_card.call_args.kwargs["session_id"] == "agent-1:1708123456.000100:user@example.com"
+
+    @pytest.mark.asyncio
+    async def test_pause_card_omits_session_id_by_default(self):
+        # Default config keeps the pause card byte-identical to before
+        handler = _make_event_handler()
+        ctx = _make_event_context()
+        response = Mock(content="", active_requirements=[_make_requirement()], run_id="run-9")
+
+        with (
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+            patch("agno.os.interfaces.slack.event_handler.post_pause_card", new=AsyncMock()) as mock_card,
+        ):
+            handled = await handler._handle_paused_non_streaming(ctx, response)
+
+        assert handled is True
+        assert mock_card.call_args.kwargs["session_id"] is None
 
 
 class TestRouterWiring:
@@ -983,6 +1118,116 @@ class TestHITLFlow:
         assert required_req.confirmation is None
         assert continued["called"] is True
 
+    @pytest.mark.asyncio
+    async def test_submit_uses_session_id_from_button_value(self):
+        """Per-user thread sessions: the resume must load the ORIGINAL run's session.
+
+        The thread-derived id can't include the user key (the clicker may not be the
+        original caller), so the pause card's button value carries the paused run's
+        session id and the submit path uses it for both the run lookup and the resume.
+        """
+        requirement = _make_requirement()
+        entity = AsyncMock()
+        entity.aget_run_output = AsyncMock(
+            return_value=Mock(active_requirements=[requirement], user_id="user@test.com")
+        )
+        captured: Dict[str, Any] = {}
+
+        async def _continue_run(*args: Any, **kwargs: Any):
+            captured.update(kwargs)
+            yield Mock(
+                event=RunEvent.run_content.value,
+                content="resumed",
+                images=None,
+                videos=None,
+                audio=None,
+                files=None,
+                tool=None,
+            )
+
+        entity.acontinue_run = _continue_run
+        handler = _make_hitl_handler(entity)
+        mock_client = make_async_client_mock()
+        mock_client.chat_delete = AsyncMock()
+        stream = make_stream_mock()
+        per_user_session = "agent-1:111.222:user@test.com"
+        payload = _make_submit_payload(
+            blocks=[{"type": "section", "block_id": row_block_id("r1", "confirmation", decided="approve")}],
+            session_id=per_user_session,
+        )
+
+        with (
+            patch("agno.os.interfaces.slack.hitl.AsyncWebClient", return_value=mock_client),
+            patch("agno.os.interfaces.slack.hitl.open_chat_stream", new=AsyncMock(return_value=stream)),
+        ):
+            await handler.handle_submit(payload)
+
+        entity.aget_run_output.assert_awaited_once_with(run_id="run-1", session_id=per_user_session)
+        assert captured["session_id"] == per_user_session
+        # The resume runs as the original run's user, not the clicker
+        assert captured["user_id"] == "user@test.com"
+
+    @pytest.mark.asyncio
+    async def test_row_approve_auto_submit_propagates_session_id(self):
+        """Approve-button clicks re-encode the session id into the synthetic submit."""
+        requirement = _make_requirement()
+        entity = AsyncMock()
+        entity.aget_run_output = AsyncMock(
+            return_value=Mock(active_requirements=[requirement], user_id="user@test.com")
+        )
+
+        async def _continue_run(*args: Any, **kwargs: Any):
+            yield Mock(
+                event=RunEvent.run_content.value,
+                content="resumed",
+                images=None,
+                videos=None,
+                audio=None,
+                files=None,
+                tool=None,
+            )
+
+        entity.acontinue_run = _continue_run
+        handler = _make_hitl_handler(entity)
+        mock_client = make_async_client_mock()
+        mock_client.chat_delete = AsyncMock()
+        stream = make_stream_mock()
+        per_user_session = "agent-1:111.222:user@test.com"
+        payload = {
+            "type": "block_actions",
+            "team": {"id": "T123"},
+            "user": {"id": "U123"},
+            "channel": {"id": "C123"},
+            "message": {
+                "ts": "222.333",
+                "thread_ts": "111.222",
+                "blocks": [
+                    {
+                        "type": "card",
+                        "block_id": "rowact:r1:confirmation",
+                        "title": {"text": "*delete_file*"},
+                        "body": {"text": "path: /tmp/demo.txt"},
+                    }
+                ],
+            },
+            "state": {"values": {}},
+            "actions": [
+                {
+                    "action_id": ACTION_ROW_APPROVE,
+                    "value": encode_row_button_value("r1", "run-1", "await-1", per_user_session),
+                }
+            ],
+        }
+
+        with (
+            patch("agno.os.interfaces.slack.hitl.AsyncWebClient", return_value=mock_client),
+            patch("agno.os.interfaces.slack.hitl.open_chat_stream", new=AsyncMock(return_value=stream)),
+        ):
+            await handler.handle_row_approve(payload)
+
+        entity.aget_run_output.assert_awaited_once_with(run_id="run-1", session_id=per_user_session)
+        assert requirement.confirmation is True
+
 
 class TestAdminApprovalFlow:
     """Tests for approval_type='required' tools resolved via admin dashboard + Check Status."""
@@ -1109,8 +1354,48 @@ class TestAdminApprovalFlow:
         assert call.kwargs["text"] == "Status: rejected"
 
     @pytest.mark.asyncio
+    async def test_check_status_approved_resumes_with_approval_record_session(self):
+        """Per-user thread sessions: the approval record carries the paused run's session id."""
+        requirement = _make_requirement(approval_type="required", approval_id="appr-1")
+        entity = AsyncMock()
+        entity.aget_run_output = AsyncMock(
+            return_value=Mock(active_requirements=[requirement], user_id="owner@test.com")
+        )
+
+        per_user_session = "agent-1:111.222:owner@test.com"
+        db = Mock()
+        db.get_approval = Mock(return_value={"id": "appr-1", "status": "approved", "session_id": per_user_session})
+        entity.db = db
+
+        async def _continue_run(*args: Any, **kwargs: Any):
+            yield Mock(
+                event=RunEvent.run_content.value,
+                content="resumed",
+                images=None,
+                videos=None,
+                audio=None,
+                files=None,
+                tool=None,
+            )
+
+        entity.acontinue_run = _continue_run
+        handler = _make_hitl_handler(entity)
+        mock_client = make_async_client_mock()
+        mock_client.chat_delete = AsyncMock()
+        stream = make_stream_mock()
+        payload = _make_check_status_payload()
+
+        with (
+            patch("agno.os.interfaces.slack.hitl.AsyncWebClient", return_value=mock_client),
+            patch("agno.os.interfaces.slack.hitl.open_chat_stream", new=AsyncMock(return_value=stream)),
+        ):
+            await handler.handle_check_status(payload)
+
+        entity.aget_run_output.assert_awaited_once_with(run_id="run-1", session_id=per_user_session)
+
+    @pytest.mark.asyncio
     async def test_check_status_no_db_returns_pending(self):
-        """Without a DB, _get_approval_status returns pending."""
+        """Without a DB, _get_approval returns None and status defaults to pending."""
         entity = AsyncMock()
         entity.db = None
 

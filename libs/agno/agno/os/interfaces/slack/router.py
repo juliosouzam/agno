@@ -68,6 +68,7 @@ def attach_routes(
     buffer_size: int = 100,
     max_file_size: int = 1_073_741_824,  # 1GB
     resolve_user_identity: bool = False,
+    per_user_thread_sessions: bool = False,
 ) -> APIRouter:
     # Inner functions capture config via closure to keep each instance isolated
     entity = agent or team or workflow
@@ -114,6 +115,7 @@ def attach_routes(
         task_display_mode=task_display_mode,
         buffer_size=buffer_size,
         suggested_prompts=suggested_prompts,
+        per_user_thread_sessions=per_user_thread_sessions,
     )
 
     @router.post(

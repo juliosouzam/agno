@@ -38,6 +38,14 @@ class Slack(BaseInterface):
         buffer_size: int = 100,
         max_file_size: int = 1_073_741_824,  # 1GB
         resolve_user_identity: bool = False,
+        # Key sessions per (thread, caller) — <entity_id>:<thread_ts>:<user_id> — instead of
+        # one shared session per thread. Agno sessions are single-user rows, so the shared
+        # key lets the first speaker claim the session while every other participant's runs
+        # load no history and are never persisted. Per-user keys give each participant their
+        # own session; history loads are scoped by session_id, so no participant can ever
+        # pull another's turns. The user id is the run's resolved identity (email when
+        # resolve_user_identity resolves one, else the Slack id).
+        per_user_thread_sessions: bool = False,
     ):
         self.agent = agent
         self.team = team
@@ -56,6 +64,7 @@ class Slack(BaseInterface):
         self.buffer_size = buffer_size
         self.max_file_size = max_file_size
         self.resolve_user_identity = resolve_user_identity
+        self.per_user_thread_sessions = per_user_thread_sessions
 
         if not (self.agent or self.team or self.workflow):
             raise ValueError("Slack requires an agent, team, or workflow")
@@ -78,6 +87,7 @@ class Slack(BaseInterface):
             buffer_size=self.buffer_size,
             max_file_size=self.max_file_size,
             resolve_user_identity=self.resolve_user_identity,
+            per_user_thread_sessions=self.per_user_thread_sessions,
         )
 
         return self.router
