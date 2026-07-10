@@ -16,7 +16,7 @@ from agno.os.interfaces.slack.builders import (
     select_confirmation_row,
 )
 from agno.os.interfaces.slack.events import process_event
-from agno.os.interfaces.slack.helpers import open_chat_stream, slack_error_code
+from agno.os.interfaces.slack.helpers import derive_session_id, open_chat_stream, slack_error_code
 from agno.os.interfaces.slack.ids import decode_admin_approval_button_value
 from agno.os.interfaces.slack.interactions import (
     apply_decisions,
@@ -194,7 +194,8 @@ class HITLHandler:
                 )
                 # Embed the session id in the new card only when it can't be re-derived from
                 # the thread (per-user thread sessions) — same rule as the original card.
-                repause_session_id = ctx.session_id if ctx.session_id != f"{self.entity_id}:{ctx.thread_ts}" else None
+                thread_derived = derive_session_id(self.entity_id, ctx.channel, ctx.thread_ts)
+                repause_session_id = ctx.session_id if ctx.session_id != thread_derived else None
                 try:
                     await post_pause_card(
                         self._client(),
@@ -289,9 +290,9 @@ class HITLHandler:
 
         session_id is the paused run's session id from the approval record — required to
         find the run when sessions are keyed per user. Falls back to the thread-derived id
-        (the only possible session id before per-user thread sessions existed).
+        (the only possible session id when the record predates per-user thread sessions).
         """
-        session_id = session_id or f"{self.entity_id}:{thread_ts}"
+        session_id = session_id or derive_session_id(self.entity_id, channel, thread_ts)
 
         try:
             run_output = await self.entity.aget_run_output(run_id=run_id, session_id=session_id)  # type: ignore[union-attr]

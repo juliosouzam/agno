@@ -4,6 +4,7 @@ import pytest
 
 from agno.os.interfaces.slack.helpers import (
     BotNameResolver,
+    derive_session_id,
     download_event_files_async,
     extract_event_context,
     member_name,
@@ -414,3 +415,21 @@ class TestStripBotMention:
     def test_mention_only_with_bot_name(self):
         result = strip_bot_mention("<@U0APCSS3MDH>", "U0APCSS3MDH", "Scout")
         assert result == "Scout"
+
+
+class TestDeriveSessionId:
+    def test_channel_scoped(self):
+        # Slack ts values are only unique per channel — the same thread_ts in
+        # two channels must never share a session
+        a = derive_session_id("agent-1", "C1", "111.222")
+        b = derive_session_id("agent-1", "C2", "111.222")
+        assert a != b
+        assert a == "agent-1:C1:111.222"
+
+    def test_per_user_keeps_thread_ts_last(self):
+        key = derive_session_id("agent-1", "C1", "111.222", user_key="user@example.com")
+        assert key == "agent-1:C1:user@example.com:111.222"
+
+    def test_empty_user_key_falls_back_to_thread_key(self):
+        assert derive_session_id("agent-1", "C1", "111.222", user_key=None) == "agent-1:C1:111.222"
+        assert derive_session_id("agent-1", "C1", "111.222", user_key="") == "agent-1:C1:111.222"

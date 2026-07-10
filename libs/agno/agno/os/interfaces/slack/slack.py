@@ -38,9 +38,9 @@ class Slack(BaseInterface):
         buffer_size: int = 100,
         max_file_size: int = 1_073_741_824,  # 1GB
         resolve_user_identity: bool = False,
-        # Key sessions per (thread, caller) — <entity_id>:<thread_ts>:<user_id> — instead of
-        # one shared session per thread. Agno sessions are single-user rows, so the shared
-        # key lets the first speaker claim the session while every other participant's runs
+        # Key sessions per (channel, thread, caller) — <entity_id>:<channel_id>:<user_id>:<thread_ts>
+        # — instead of one shared session per thread. Agno sessions are single-user rows, so the
+        # shared key lets the first speaker claim the session while every other participant's runs
         # load no history and are never persisted. Per-user keys give each participant their
         # own session; history loads are scoped by session_id, so no participant can ever
         # pull another's turns. The user id is the run's resolved identity (email when

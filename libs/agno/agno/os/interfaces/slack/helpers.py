@@ -17,6 +17,17 @@ def slack_error_code(exc: BaseException) -> Optional[str]:
     return None
 
 
+def derive_session_id(entity_id: str, channel_id: str, thread_ts: str, user_key: Optional[str] = None) -> str:
+    # The Slack session key. Channel-scoped because Slack `ts` values are only
+    # unique per channel — two threads in different channels can share a
+    # thread_ts. The per-user variant (per_user_thread_sessions) inserts the
+    # resolved caller so each participant in a thread gets their own session;
+    # thread_ts stays last so keys read naturally in session UIs.
+    if user_key:
+        return f"{entity_id}:{channel_id}:{user_key}:{thread_ts}"
+    return f"{entity_id}:{channel_id}:{thread_ts}"
+
+
 def task_id(agent_name: Optional[str], base_id: str) -> str:
     # Prefix card IDs per agent so concurrent tool calls from different
     # team members don't collide in the Slack stream

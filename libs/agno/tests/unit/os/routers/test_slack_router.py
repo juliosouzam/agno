@@ -68,7 +68,7 @@ def _make_event_context(**overrides: Any) -> EventContext:
         "thread_id": "1708123456.000100",
         "user": "U123",
         "message_text": "Summarize the incident timeline",
-        "session_id": "agent-1:1708123456.000100",
+        "session_id": "agent-1:C123:1708123456.000100",
         "team_id": "T123",
         "resolved_user_id": "U123",
         "display_name": None,
@@ -273,7 +273,7 @@ class TestNonStreamingRoutes:
 
         assert resp.status_code == 200
         await wait_for_call(agent_mock.arun)
-        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:{thread_ts}"
+        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:C123:{thread_ts}"
 
     @pytest.mark.asyncio
     async def test_user_id_is_raw_slack_id_by_default(self):
@@ -509,7 +509,7 @@ class TestPerUserThreadSessions:
 
         assert resp.status_code == 200
         await wait_for_call(agent_mock.arun)
-        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:{thread_ts}:U123"
+        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:C123:U123:{thread_ts}"
 
     @pytest.mark.asyncio
     async def test_session_id_uses_resolved_email_when_identity_resolved(self):
@@ -548,13 +548,13 @@ class TestPerUserThreadSessions:
 
         assert resp.status_code == 200
         await wait_for_call(agent_mock.arun)
-        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:{thread_ts}:test@example.com"
+        assert agent_mock.arun.call_args.kwargs["session_id"] == f"researcher:C123:test@example.com:{thread_ts}"
         assert agent_mock.arun.call_args.kwargs["user_id"] == "test@example.com"
 
     @pytest.mark.asyncio
     async def test_pause_card_embeds_session_id_when_enabled(self):
         handler = _make_event_handler(per_user_thread_sessions=True)
-        ctx = _make_event_context(session_id="agent-1:1708123456.000100:user@example.com")
+        ctx = _make_event_context(session_id="agent-1:C123:user@example.com:1708123456.000100")
         response = Mock(content="", active_requirements=[_make_requirement()], run_id="run-9")
 
         with (
@@ -564,7 +564,7 @@ class TestPerUserThreadSessions:
             handled = await handler._handle_paused_non_streaming(ctx, response)
 
         assert handled is True
-        assert mock_card.call_args.kwargs["session_id"] == "agent-1:1708123456.000100:user@example.com"
+        assert mock_card.call_args.kwargs["session_id"] == "agent-1:C123:user@example.com:1708123456.000100"
 
     @pytest.mark.asyncio
     async def test_pause_card_omits_session_id_by_default(self):
@@ -1231,7 +1231,7 @@ class TestHITLFlow:
         ):
             await handler.handle_submit(payload)
 
-        entity.aget_run_output.assert_awaited_once_with(run_id="run-1", session_id="agent-1:111.222")
+        entity.aget_run_output.assert_awaited_once_with(run_id="run-1", session_id="agent-1:C123:111.222")
         assert requirement.confirmation is True
         mock_client.chat_delete.assert_awaited_once_with(channel="C123", ts="await-1")
         mock_open.assert_awaited_once_with(mock_client, "C123", "111.222", "U123", "T123", "plan", 100)

@@ -11,6 +11,7 @@ from agno.os.interfaces.slack.events import process_event
 from agno.os.interfaces.slack.helpers import (
     BotNameResolver,
     build_run_metadata,
+    derive_session_id,
     download_event_files_async,
     extract_event_context,
     open_chat_stream,
@@ -88,14 +89,18 @@ class SlackEventHandler:
         if self.resolve_user_identity:
             resolved_user_id, display_name = await resolve_slack_user(client, raw_ctx["user"])
 
-        session_id = f"{self.entity_id}:{raw_ctx['thread_id']}"
-        if self.per_user_thread_sessions and resolved_user_id:
-            # One session per (thread, caller): agno sessions are single-user rows, so a
-            # shared thread key would let the first speaker claim the session and silently
-            # drop every other participant's history. Keying on the same resolved user id
-            # the run uses gives each participant their own session — history loads are
-            # scoped by session_id, so no caller can ever pull another caller's turns.
-            session_id = f"{session_id}:{resolved_user_id}"
+        # One session per (channel, thread) — and per caller when per_user_thread_sessions
+        # is on: agno sessions are single-user rows, so a shared thread key would let the
+        # first speaker claim the session and silently drop every other participant's
+        # history. Keying on the same resolved user id the run uses gives each participant
+        # their own session — history loads are scoped by session_id, so no caller can
+        # ever pull another caller's turns.
+        session_id = derive_session_id(
+            self.entity_id,
+            raw_ctx["channel_id"],
+            raw_ctx["thread_id"],
+            user_key=resolved_user_id if self.per_user_thread_sessions else None,
+        )
 
         channel_name = await resolve_channel_name(client, raw_ctx["channel_id"])
 
