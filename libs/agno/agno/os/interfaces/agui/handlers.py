@@ -43,24 +43,31 @@ from agno.run.workflow import WorkflowRunEvent
 from agno.utils.message import get_text_from_message
 from agno.workflow.types import StepType
 
+# --- Type aliases ---
+
 EventHandler = Callable[[BaseRunOutputEvent, StreamState], List[BaseEvent]]
 
-# Workflow event aliases and constants
-_WF = WorkflowRunEvent
-_MAX_STEP_OUTPUT = 500  # Cap step output in STATE so deltas stay small
+# --- Workflow event constants ---
 
-# Terminal workflow events → completion handling
-# workflow_cancelled deliberately excluded — surfaces as STATE status, run finalizes cleanly
+_WF = WorkflowRunEvent
+
+# Truncate step output to keep STATE deltas small
+_MAX_STEP_OUTPUT = 500
+
+# Terminal events route to process_completion; workflow_cancelled is NOT terminal
+# because it surfaces as a STATE status and the run finalizes on the trailing completed event
 _WORKFLOW_TERMINAL_VALUES = frozenset({_WF.workflow_completed.value, _WF.workflow_error.value})
 
-# Structural events → progress handler
+# All non-terminal workflow events route to progress handler
 STRUCTURAL_EVENT_VALUES = frozenset(e.value for e in _WF) - _WORKFLOW_TERMINAL_VALUES
 
-# Step-level pause/continue routing
+# Step pause/continue event groupings for routing
 _STEP_PAUSE_VALUES = frozenset({_WF.step_paused.value, _WF.step_executor_paused.value, _WF.step_output_review.value})
 _WORKFLOW_PAUSE_VALUES = frozenset({_WF.workflow_paused.value, _WF.router_paused.value})
 _STEP_CONTINUE_VALUES = frozenset({_WF.step_continued.value, _WF.step_executor_continued.value})
-# condition_paused is vestigial (no event class, never emitted) — intentionally absent
+
+
+# --- Shared helpers ---
 
 
 def _event_value(chunk: BaseRunOutputEvent) -> str:
@@ -71,6 +78,7 @@ def _event_value(chunk: BaseRunOutputEvent) -> str:
 
 
 def _normalize_event(event: str) -> str:
+    # Strip "Team" prefix so agent and team events use same handlers
     return event.removeprefix("Team")
 
 
@@ -101,8 +109,11 @@ def _new_text_message(text: str) -> List[BaseEvent]:
     ]
 
 
+# --- Text content handlers ---
+
+
 def _extract_response_chunk_content(response: RunContentEvent) -> str:
-    # RunContentEvent can carry text in .messages (list) or .content (direct)
+    # RunContentEvent carries text in .messages (list) or .content (direct)
     if hasattr(response, "messages") and response.messages:  # type: ignore
         for msg in reversed(response.messages):  # type: ignore
             if hasattr(msg, "role") and msg.role == "assistant" and hasattr(msg, "content") and msg.content:
@@ -111,7 +122,7 @@ def _extract_response_chunk_content(response: RunContentEvent) -> str:
 
 
 def _extract_team_response_chunk_content(response: TeamRunContentEvent) -> str:
-    # Team responses nest member outputs — fold them into one text delta
+    # Team responses nest member outputs; fold them into one text delta
     members_content = []
     if hasattr(response, "member_responses") and response.member_responses:  # type: ignore
         for member_resp in response.member_responses:  # type: ignore
@@ -183,13 +194,15 @@ def on_run_content(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEv
     return events
 
 
+# --- Tool call handlers ---
+
+
 def on_tool_call_started(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     events: List[BaseEvent] = []
     tool = getattr(chunk, "tool", None)
     if tool is None:
         return events
 
-    # Close open text message before tool call
     if state.text_message_open:
         events.append(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=state.text_message_id))
         state.set_pending_tool_calls_parent_id(state.text_message_id)
@@ -197,7 +210,7 @@ def on_tool_call_started(chunk: BaseRunOutputEvent, state: StreamState) -> List[
 
     parent_message_id = state.get_parent_message_id_for_tool_call()
 
-    # Create empty parent message if none exists (AG-UI protocol requirement)
+    # AG-UI protocol requires tool calls to have a parent message
     if not parent_message_id:
         parent_message_id = str(uuid.uuid4())
         events.append(
@@ -257,6 +270,9 @@ def on_tool_call_completed(chunk: BaseRunOutputEvent, state: StreamState) -> Lis
 
     events.extend(_emit_state_delta(state))
     return events
+
+
+# --- Reasoning handlers ---
 
 
 def on_reasoning_started(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
@@ -338,6 +354,9 @@ def on_reasoning_completed(chunk: BaseRunOutputEvent, state: StreamState) -> Lis
     return events
 
 
+# --- Custom and unknown event handlers ---
+
+
 def on_custom_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
     try:
         custom_event_name = chunk.__class__.__name__
@@ -360,12 +379,15 @@ def on_unknown_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
     return [RawEvent(type=EventType.RAW, event=raw_dict, source="agno")]
 
 
-# Workflow progress tracking
-# Projects workflow structure into run_state["workflow_progress"] as a flat steps list
+# --- Workflow progress tracking ---
+#
+# Workflow state shape in run_state:
+#   workflow_progress: {run_id, status, steps: [{id, name, status, output}]}
+#   steps: [{description, status}]  # Dojo-compatible format, synced automatically
 
 
 def _get_workflow_progress(state: StreamState) -> Dict[str, Any]:
-    # Reset when run_id changes to avoid cross-turn leakage from echoed state
+    # Reset when run_id changes to prevent stale state from prior turn leaking through
     if state.run_state is None:
         state.run_state = {}
     existing = state.run_state.get("workflow_progress")
@@ -386,6 +408,7 @@ def _sync_steps_to_dojo_format(state: StreamState) -> None:
     state.run_state["steps"] = [
         {
             "description": s.get("name", ""),
+            # Dojo uses "pending" for in-progress steps
             "status": "pending" if s.get("status") == "running" else s.get("status", "pending"),
         }
         for s in wp_steps
@@ -393,7 +416,7 @@ def _sync_steps_to_dojo_format(state: StreamState) -> None:
 
 
 def _ensure_state_baseline(state: StreamState) -> List[BaseEvent]:
-    # Emit initial STATE_SNAPSHOT if no caller-supplied state
+    # First STATE_SNAPSHOT establishes the diff baseline for subsequent deltas
     if state.run_state is not None:
         return []
     state.run_state = {}
@@ -409,7 +432,7 @@ def _truncate_step_output(content: Any) -> Optional[str]:
 
 
 def _find_open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    # Find by step_id (not step_index) to handle concurrent Parallel siblings
+    # Match by step_id, not index, because Parallel siblings share index but have distinct ids
     for step in reversed(steps):
         if step["status"] in ("running", "paused") and step["id"] == step_id:
             return step
@@ -417,12 +440,12 @@ def _find_open_step(steps: List[Dict[str, Any]], step_id: Optional[str]) -> Opti
 
 
 def _mark_workflow_completed(state: StreamState) -> None:
-    # Promote workflow to completed; mark leftover running steps as skipped
     progress = state.workflow_progress
     if progress is None:
         return
     if progress.get("status") == RunStatus.running.value:
         progress["status"] = RunStatus.completed.value
+    # Steps still running at completion were skipped (e.g., on_error=skip)
     if progress.get("status") == RunStatus.completed.value:
         for step in progress["steps"]:
             if step["status"] == "running":
@@ -431,7 +454,6 @@ def _mark_workflow_completed(state: StreamState) -> None:
 
 
 def _workflow_error_snapshot(state: StreamState) -> List[BaseEvent]:
-    # Terminalize progress to ERROR and emit final snapshot
     progress = state.workflow_progress
     if progress is None or state.run_state is None:
         return []
@@ -460,39 +482,48 @@ def on_workflow_progress(chunk: BaseRunOutputEvent, state: StreamState) -> List[
         steps.append({"id": step_id, "name": name, "status": "running", "output": None})
         if name:
             events.append(StepStartedEvent(type=EventType.STEP_STARTED, step_name=name))
+
     elif value == _WF.step_completed.value:
         step = _find_open_step(steps, step_id)
         if step is not None:
             step.update(status="completed", output=_truncate_step_output(getattr(chunk, "content", None)))
         if name:
             events.append(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=name))
+
     elif value == _WF.step_error.value:
         step = _find_open_step(steps, step_id)
         if step is not None:
             step.update(status="error", output=_truncate_step_output(getattr(chunk, "error", None)))
         if name:
             events.append(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=name))
+
     elif value in _STEP_PAUSE_VALUES:
         step = _find_open_step(steps, step_id)
         if step is not None:
             step["status"] = "paused"
+
     elif value in _WORKFLOW_PAUSE_VALUES:
         progress["status"] = RunStatus.paused.value
+
     elif value in _STEP_CONTINUE_VALUES:
         step = _find_open_step(steps, step_id)
         if step is not None:
             step["status"] = "running"
+
     elif value == _WF.workflow_cancelled.value:
         progress["status"] = RunStatus.cancelled.value
         state.cancelled = True
-    # workflow_started initialises progress above; container/agent events are no-ops (their inner
-    # step_started/completed populate the flat list). step_output carries no step_id and only restates
-    # content the immediately-following step_completed sets authoritatively, so it needs no branch here.
+
+    # Other events (workflow_started, container events, step_output) need no special handling:
+    # workflow_started initializes progress via _get_workflow_progress above; container events
+    # are no-ops because their inner step_started/completed populate the flat list; step_output
+    # only restates content that step_completed sets authoritatively
+
     _sync_steps_to_dojo_format(state)
     return events + _emit_state_delta(state) + activity.on_progress(state)
 
 
-# Workflow completion helpers
+# --- Workflow completion ---
 
 
 def _is_workflow_terminal(chunk: BaseRunOutputEvent) -> bool:
@@ -504,7 +535,7 @@ def _is_workflow_completed(chunk: BaseRunOutputEvent) -> bool:
 
 
 def _leaf_streamed(node: Any) -> Optional[bool]:
-    # Descend to final leaf and check if it streamed; None = uncertain (drop-safe: emit)
+    # Descend step tree to final leaf; True if agent/team (streamed), False if function, None if uncertain
     if getattr(node, "step_type", None) in (StepType.PARALLEL, StepType.LOOP):
         return None
     sub = getattr(node, "steps", None)
@@ -530,8 +561,7 @@ def _workflow_completion_events(chunk: BaseRunOutputEvent, state: StreamState) -
         error = getattr(chunk, "error", None) or "Workflow error occurred"
         return [RunErrorEvent(type=EventType.RUN_ERROR, message=str(error))]
 
-    # Cancellation: WorkflowCancelledEvent set state.cancelled; the trailing
-    # WorkflowCompletedEvent.content is the cancel REASON, not an answer. Never render it.
+    # Cancellation: the trailing WorkflowCompletedEvent.content is the cancel REASON, not an answer
     if state.cancelled:
         return []
 
@@ -542,14 +572,14 @@ def _workflow_completion_events(chunk: BaseRunOutputEvent, state: StreamState) -
     if not rendered.strip():
         return []
 
-    # Provenance: suppress completion recap ONLY when final leaf is agent/team AND
-    # content actually reached the wire. Drop-safe bias: rare duplicate beats dropped answer.
+    # Drop-safe bias: only suppress if final leaf is agent/team AND content already streamed
+    # A rare duplicate beats a dropped answer
     if _final_leaf_streamed(chunk) and state.streamed_any_text:
         return []
     return _new_text_message(rendered)
 
 
-# Run finalization
+# --- Run finalization ---
 
 
 def _close_open_streams(state: StreamState) -> List[BaseEvent]:
@@ -595,7 +625,7 @@ def _paused_tools_for(chunk: BaseRunOutputEvent) -> List[ToolExecution]:
 
 
 def _final_snapshot(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    # Re-inject workflow_progress and steps (stripped before DB save)
+    # Re-inject workflow_progress and steps because workflow.py strips them before DB save
     if state.run_state is None:
         return []
     authoritative_state = getattr(chunk, "session_state", None)
@@ -667,7 +697,7 @@ def on_run_completed(chunk: BaseRunOutputEvent, state: StreamState) -> List[Base
     return _close_open_streams(state) + _finalize_run(chunk, state)
 
 
-# Event dispatch registry
+# --- Event dispatch ---
 
 HANDLERS: Dict[str, EventHandler] = {
     RunEvent.run_content.value: on_run_content,
@@ -680,11 +710,11 @@ HANDLERS: Dict[str, EventHandler] = {
     RunEvent.custom_event.value: on_custom_event,
 }
 
-# Workflow structural events → progress handler
-# custom_event excluded so author's own event keeps CustomEvent passthrough
+# Workflow structural events route to progress handler; custom_event excluded so
+# author's own event keeps CustomEvent passthrough (same wire value "CustomEvent")
 HANDLERS.update({value: on_workflow_progress for value in STRUCTURAL_EVENT_VALUES - {_WF.custom_event.value}})
 
-# Terminal events that trigger completion handling
+# Terminal events trigger completion handling
 _COMPLETION_EVENTS = (
     frozenset(
         {
@@ -722,11 +752,11 @@ def process_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEve
 
 
 def process_completion(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    # Agent/team completion
+    # Agent/team runs
     if not _is_workflow_terminal(chunk):
         return on_run_completed(chunk, state)
 
-    # Workflow terminal: close streams first, always
+    # Workflow runs: close streams first, always
     events = _close_open_streams(state)
 
     # Error: terminalize progress BEFORE emitting RUN_ERROR
