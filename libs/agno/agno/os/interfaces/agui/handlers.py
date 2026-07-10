@@ -358,10 +358,8 @@ def on_reasoning_completed(chunk: BaseRunOutputEvent, state: StreamState) -> Lis
 
 
 def on_custom_event(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
-    try:
-        custom_event_name = chunk.__class__.__name__
-    except Exception:
-        custom_event_name = str(getattr(chunk, "event", "CustomEvent"))
+    # User-provided name takes precedence; fallback to subclass name (e.g. "CustomerProfileEvent")
+    custom_event_name = getattr(chunk, "name", None) or type(chunk).__name__
 
     try:
         custom_event_value: Any = chunk.to_dict()
