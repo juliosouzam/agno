@@ -318,7 +318,7 @@ async def test_workflow_stream_stops_on_client_disconnect():
 
     from agno.os.interfaces.agui import router as agui_router
 
-    async def fake_run_entity(entity, run_input, user_id=None, emit_activity=False, emit_messages_snapshot=False):
+    async def fake_run_entity(entity, run_input, user_id=None):
         for _ in range(5):
             yield RunStartedEvent(type=ET.RUN_STARTED, thread_id="t1", run_id="r1")
 

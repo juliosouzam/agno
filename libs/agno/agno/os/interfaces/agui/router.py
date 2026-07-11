@@ -42,7 +42,6 @@ async def run_entity(
     entity: Union[Agent, RemoteAgent, Team, RemoteTeam, Workflow, RemoteWorkflow],
     run_input: RunAgentInput,
     user_id: Optional[str] = None,
-    emit_activity: bool = False,
 ) -> AsyncIterator[BaseEvent]:
     """Shared handler for running an Agent, Team, or Workflow with AG-UI input/output mapping.
 
@@ -123,7 +122,6 @@ async def run_entity(
             thread_id=run_input.thread_id,
             run_id=run_id,
             run_state=session_state,
-            emit_activity=emit_activity,
         ):
             yield event
 
@@ -137,7 +135,6 @@ def attach_routes(
     agent: Optional[Union[Agent, RemoteAgent]] = None,
     team: Optional[Union[Team, RemoteTeam]] = None,
     workflow: Optional[Union[Workflow, RemoteWorkflow]] = None,
-    emit_activity: bool = False,
 ) -> APIRouter:
     if agent is None and team is None and workflow is None:
         raise ValueError("Either agent, team, or workflow must be provided.")
@@ -156,7 +153,6 @@ def attach_routes(
                 entity,  # type: ignore
                 run_input,
                 user_id=user_id,
-                emit_activity=emit_activity,
             ):
                 # Workflows fan out many steps; stop streaming if the client
                 # disconnected, to avoid burning tokens on output nobody sees.

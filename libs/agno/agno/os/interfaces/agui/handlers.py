@@ -29,7 +29,6 @@ from ag_ui.core import (
 )
 
 from agno.models.response import ToolExecution
-from agno.os.interfaces.agui import activity
 from agno.os.interfaces.agui.state import StreamState
 from agno.os.interfaces.agui.utils import to_json_str
 from agno.reasoning.step import ReasoningStep
@@ -465,10 +464,7 @@ def _workflow_error_snapshot(state: StreamState) -> List[BaseEvent]:
             step["status"] = "error"
     _sync_steps_to_dojo_format(state)
     state.set_state_snapshot(state.run_state)
-    events: List[BaseEvent] = [
-        StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))
-    ]
-    return events + activity.terminal_snapshot(state)
+    return [StateSnapshotEvent(type=EventType.STATE_SNAPSHOT, snapshot=copy.deepcopy(state.run_state))]
 
 
 def on_workflow_progress(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEvent]:
@@ -517,7 +513,7 @@ def on_workflow_progress(chunk: BaseRunOutputEvent, state: StreamState) -> List[
     # only restates content that step_completed sets authoritatively
 
     _sync_steps_to_dojo_format(state)
-    return events + _emit_state_delta(state) + activity.on_progress(state)
+    return events + _emit_state_delta(state)
 
 
 # --- Workflow completion ---
@@ -685,7 +681,6 @@ def _finalize_run(chunk: BaseRunOutputEvent, state: StreamState) -> List[BaseEve
             events.append(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tool.tool_call_id))
 
     events += _final_snapshot(chunk, state)
-    events += activity.terminal_snapshot(state)
     events.append(RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id=state.thread_id, run_id=state.run_id))
     return events
 

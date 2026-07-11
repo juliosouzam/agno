@@ -19,9 +19,8 @@ def stream_agno_response_as_agui_events(
     thread_id: str,
     run_id: str,
     run_state: Optional[Dict[str, Any]] = None,
-    emit_activity: bool = False,
 ) -> Iterator[BaseEvent]:
-    state = StreamState(thread_id=thread_id, run_id=run_id, run_state=run_state, emit_activity=emit_activity)
+    state = StreamState(thread_id=thread_id, run_id=run_id, run_state=run_state)
 
     if run_state is not None:
         state.set_state_snapshot(run_state)
@@ -52,9 +51,8 @@ async def async_stream_agno_response_as_agui_events(
     thread_id: str,
     run_id: str,
     run_state: Optional[Dict[str, Any]] = None,
-    emit_activity: bool = False,
 ) -> AsyncIterator[BaseEvent]:
-    state = StreamState(thread_id=thread_id, run_id=run_id, run_state=run_state, emit_activity=emit_activity)
+    state = StreamState(thread_id=thread_id, run_id=run_id, run_state=run_state)
 
     if run_state is not None:
         state.set_state_snapshot(run_state)
