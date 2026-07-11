@@ -89,7 +89,9 @@ def update_plan_step(
 
 agentic_generative_ui_agent = Agent(
     name="agentic_generative_ui",
-    model=OpenAIResponses(id="gpt-5.5"),
+    # Disable parallel tool calls so each update_plan_step is a separate turn,
+    # emitting STATE_DELTA events incrementally instead of in one burst
+    model=OpenAIResponses(id="gpt-5.5", parallel_tool_calls=False),
     db=SqliteDb(db_file="/tmp/agentic_generative_ui.db"),
     tools=[create_plan, update_plan_step],
     instructions="""\
