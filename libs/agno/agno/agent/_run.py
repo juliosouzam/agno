@@ -1313,6 +1313,7 @@ def run_dispatch(
     output_schema: Optional[Union[Type[BaseModel], Dict[str, Any]]] = None,
     yield_run_output: Optional[bool] = None,
     debug_mode: Optional[bool] = None,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> Union[RunOutput, Iterator[Union[RunOutputEvent, RunOutput]]]:
     """Run the Agent and return the response."""
@@ -1370,7 +1371,7 @@ def run_dispatch(
     # so that session-stored metadata is visible to resolve_run_options.
     from agno.agent._storage import read_or_create_session, update_metadata
 
-    agent_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+    agent_session = read_or_create_session(agent, session_id=session_id, user_id=user_id, shared_session=shared_session)
     update_metadata(agent, session=agent_session)
 
     # Resolve all run options centrally
@@ -1482,6 +1483,7 @@ async def _arun(
     debug_mode: Optional[bool] = None,
     background_tasks: Optional[Any] = None,
     pre_session: Optional[AgentSession] = None,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> RunOutput:
     """Run the Agent and return the RunOutput.
@@ -1543,7 +1545,9 @@ async def _arun(
                 if attempt == 0 and pre_session is not None:
                     agent_session = pre_session
                 else:
-                    agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
+                    agent_session = await aread_or_create_session(
+                        agent, session_id=session_id, user_id=user_id, shared_session=shared_session
+                    )
 
                 # 2. Update metadata and session state
                 if not (attempt == 0 and pre_session is not None):
@@ -1935,6 +1939,7 @@ async def _arun_background(
     response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
     debug_mode: Optional[bool] = None,
     background_tasks: Optional[Any] = None,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> RunOutput:
     """Start an agent run in the background and return immediately with PENDING status.
@@ -1954,7 +1959,9 @@ async def _arun_background(
     run_response.status = RunStatus.pending
 
     # 3. Persist the PENDING run so polling can find it immediately
-    agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
+    agent_session = await aread_or_create_session(
+        agent, session_id=session_id, user_id=user_id, shared_session=shared_session
+    )
     update_metadata(agent, session=agent_session)
     agent_session.upsert_run(run=run_response)
     await asave_session(agent, session=agent_session)
@@ -2018,6 +2025,7 @@ async def _arun_background_stream(
     yield_run_output: Optional[bool] = None,
     debug_mode: Optional[bool] = None,
     background_tasks: Optional[Any] = None,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> AsyncIterator[str]:
     """Background streaming agent run that survives client disconnections.
@@ -2043,7 +2051,9 @@ async def _arun_background_stream(
     # 1. Persist RUNNING status so the run is visible in the DB immediately
     run_response.status = RunStatus.running
 
-    agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
+    agent_session = await aread_or_create_session(
+        agent, session_id=session_id, user_id=user_id, shared_session=shared_session
+    )
     update_metadata(agent, session=agent_session)
     agent_session.upsert_run(run=run_response)
     await asave_session(agent, session=agent_session)
@@ -2159,6 +2169,7 @@ async def _arun_stream(
     debug_mode: Optional[bool] = None,
     background_tasks: Optional[Any] = None,
     pre_session: Optional[AgentSession] = None,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> AsyncIterator[Union[RunOutputEvent, RunOutput]]:
     """Run the Agent and yield the RunOutput.
@@ -2215,7 +2226,9 @@ async def _arun_stream(
                 if attempt == 0 and pre_session is not None:
                     agent_session = pre_session
                 else:
-                    agent_session = await aread_or_create_session(agent, session_id=session_id, user_id=user_id)
+                    agent_session = await aread_or_create_session(
+                        agent, session_id=session_id, user_id=user_id, shared_session=shared_session
+                    )
 
                 # Start the Run by yielding a RunStarted event
                 if stream_events:
@@ -2760,6 +2773,7 @@ def arun_dispatch(  # type: ignore
     yield_run_output: Optional[bool] = None,
     debug_mode: Optional[bool] = None,
     background: bool = False,
+    shared_session: Optional[bool] = None,
     **kwargs: Any,
 ) -> Union[RunOutput, AsyncIterator[RunOutputEvent]]:
     """Async Run the Agent and return the response."""
@@ -2821,7 +2835,9 @@ def arun_dispatch(  # type: ignore
     if not has_async_db(agent):
         from agno.agent._storage import read_or_create_session
 
-        _pre_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+        _pre_session = read_or_create_session(
+            agent, session_id=session_id, user_id=user_id, shared_session=shared_session
+        )
         update_metadata(agent, session=_pre_session)
 
     # Resolve all run options centrally
@@ -2904,6 +2920,7 @@ def arun_dispatch(  # type: ignore
                 add_session_state_to_context=opts.add_session_state_to_context,
                 debug_mode=debug_mode,
                 background_tasks=background_tasks,
+                shared_session=shared_session,
                 **kwargs,
             )
         return _arun_background(  # type: ignore[return-value]
@@ -2918,6 +2935,7 @@ def arun_dispatch(  # type: ignore
             add_session_state_to_context=opts.add_session_state_to_context,
             debug_mode=debug_mode,
             background_tasks=background_tasks,
+            shared_session=shared_session,
             **kwargs,
         )
 
@@ -2938,6 +2956,7 @@ def arun_dispatch(  # type: ignore
             debug_mode=debug_mode,
             background_tasks=background_tasks,
             pre_session=_pre_session,
+            shared_session=shared_session,
             **kwargs,
         )  # type: ignore[assignment]
     else:
@@ -2954,6 +2973,7 @@ def arun_dispatch(  # type: ignore
             debug_mode=debug_mode,
             background_tasks=background_tasks,
             pre_session=_pre_session,
+            shared_session=shared_session,
             **kwargs,
         )
 
