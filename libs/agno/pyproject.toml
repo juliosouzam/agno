@@ -169,6 +169,10 @@ redis = ["redis", "redisvl>=0.12.1"]
 sql = ["sqlalchemy"]
 sqlite = ["sqlalchemy", "aiosqlite"]
 
+# Managed roles + credential-less user directory (ManagedRoleStore / ManagedUserStore),
+# which persist to a SQL database. Referenced by the role_store/user_store docstrings.
+roles = ["sqlalchemy"]
+
 # Dependencies for Vector databases
 cassandra = ["cassio"]
 chromadb = ["chromadb"]
