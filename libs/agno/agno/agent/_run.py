@@ -360,8 +360,7 @@ def _run(
     5. Determine tools for model
     6. Prepare run messages
     7. Start memory creation in background thread
-    8. Reason about the task if reasoning is enabled
-    9. Generate a response from the Model (includes running function calls)
+    8. Generate a response from the Model (includes running function calls)
     10. Update the RunOutput with the model response
     11. Store media if enabled
     12. Convert the response to the structured format if needed
@@ -1473,8 +1472,7 @@ async def _arun(
     5. Determine tools for model
     6. Prepare run messages
     7. Start memory creation in background task
-    8. Reason about the task if reasoning is enabled
-    9. Generate a response from the Model (includes running function calls)
+    8. Generate a response from the Model (includes running function calls)
     10. Update the RunOutput with the model response
     11. Convert response to structured format
     12. Store media if enabled
@@ -2141,8 +2139,7 @@ async def _arun_stream(
     5. Determine tools for model
     6. Prepare run messages
     7. Start memory creation in background task
-    8. Reason about the task if reasoning is enabled
-    9. Generate a response from the Model (includes running function calls)
+    8. Generate a response from the Model (includes running function calls)
     10. Parse response with parser model if provided
     11. Wait for background memory creation
     12. Create session summary

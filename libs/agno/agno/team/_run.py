@@ -1035,8 +1035,7 @@ def _run(
     2. Determine tools for model
     3. Prepare run messages
     4. Start memory creation in background thread
-    5. Reason about the task if reasoning is enabled
-    6. Get a response from the model
+    5. Get a response from the model
     7. Update TeamRunOutput with the model response
     8. Store media if enabled
     9. Convert response to structured format
@@ -1389,8 +1388,7 @@ def _run_stream(
     2. Determine tools for model
     3. Prepare run messages
     4. Start memory creation in background thread
-    5. Reason about the task if reasoning is enabled
-    6. Get a response from the model
+    5. Get a response from the model
     7. Parse response with parser model if provided
     8. Wait for background memory creation
     9. Create session summary
@@ -3535,8 +3533,7 @@ async def _arun_stream(
     2. Determine tools for model
     3. Prepare run messages
     4. Start memory creation in background task
-    5. Reason about the task if reasoning is enabled
-    6. Get a response from the model
+    5. Get a response from the model
     7. Parse response with parser model if provided
     8. Wait for background memory creation
     9. Create session summary
