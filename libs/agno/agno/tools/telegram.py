@@ -27,6 +27,10 @@ class TelegramTools(Toolkit):
         enable_send_sticker: Enable send_sticker tool. Defaults to False.
         enable_edit_message: Enable edit_message tool. Defaults to False.
         enable_delete_message: Enable delete_message tool. Defaults to False.
+        enable_pin_message: Enable pin_message tool. Defaults to False.
+        enable_get_chat: Enable get_chat tool. Defaults to False.
+        enable_get_file: Enable get_file tool. Defaults to False.
+        enable_set_reaction: Enable set_reaction tool. Defaults to False.
         all: Enable all tools. Overrides individual flags when True.
     """
 
@@ -43,6 +47,10 @@ class TelegramTools(Toolkit):
         enable_send_sticker: bool = False,
         enable_edit_message: bool = False,
         enable_delete_message: bool = False,
+        enable_pin_message: bool = False,
+        enable_get_chat: bool = False,
+        enable_get_file: bool = False,
+        enable_set_reaction: bool = False,
         all: bool = False,
         **kwargs: Any,
     ):
@@ -72,6 +80,14 @@ class TelegramTools(Toolkit):
             tools.append(self.edit_message)
         if enable_delete_message or all:
             tools.append(self.delete_message)
+        if enable_pin_message or all:
+            tools.append(self.pin_message)
+        if enable_get_chat or all:
+            tools.append(self.get_chat)
+        if enable_get_file or all:
+            tools.append(self.get_file)
+        if enable_set_reaction or all:
+            tools.append(self.set_reaction)
 
         super().__init__(name="telegram", tools=tools, **kwargs)
 
@@ -224,5 +240,91 @@ class TelegramTools(Toolkit):
         try:
             self.bot.delete_message(self._chat_id, message_id)
             return json.dumps({"status": "success", "deleted": True})
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def pin_message(self, message_id: int, disable_notification: bool = False) -> str:
+        """Pin a message in a Telegram chat.
+
+        Args:
+            message_id: The ID of the message to pin.
+            disable_notification: If True, no notification is sent to chat members.
+
+        Returns:
+            JSON string with status.
+        """
+        try:
+            self.bot.pin_chat_message(self._chat_id, message_id, disable_notification=disable_notification)
+            return json.dumps({"status": "success", "pinned": True})
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def get_chat(self) -> str:
+        """Get information about the current chat.
+
+        Returns:
+            JSON string with chat details (id, type, title, description, etc.).
+        """
+        try:
+            chat = self.bot.get_chat(self._chat_id)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "chat": {
+                        "id": chat.id,
+                        "type": chat.type,
+                        "title": getattr(chat, "title", None),
+                        "username": getattr(chat, "username", None),
+                        "first_name": getattr(chat, "first_name", None),
+                        "last_name": getattr(chat, "last_name", None),
+                        "description": getattr(chat, "description", None),
+                    },
+                }
+            )
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def get_file(self, file_id: str) -> str:
+        """Download a file sent to the bot and return its content as base64.
+
+        Args:
+            file_id: The file_id from a received message (photo, document, etc.).
+
+        Returns:
+            JSON string with file metadata and base64-encoded content.
+        """
+        import base64
+
+        try:
+            file_info = self.bot.get_file(file_id)
+            file_content = self.bot.download_file(file_info.file_path)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "file_id": file_info.file_id,
+                    "file_path": file_info.file_path,
+                    "file_size": file_info.file_size,
+                    "content_base64": base64.b64encode(file_content).decode("utf-8"),
+                }
+            )
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def set_reaction(self, message_id: int, emoji: Optional[str] = None) -> str:
+        """Set an emoji reaction on a message.
+
+        Args:
+            message_id: The ID of the message to react to.
+            emoji: The emoji to react with. Pass None to remove reactions.
+
+        Returns:
+            JSON string with status.
+        """
+        try:
+            from telebot.types import ReactionTypeEmoji
+
+            reaction = [ReactionTypeEmoji(emoji)] if emoji else None
+            self.bot.set_message_reaction(self._chat_id, message_id, reaction=reaction)
+            return json.dumps({"status": "success", "emoji": emoji})
         except ApiTelegramException as e:
             return json.dumps({"status": "error", "message": str(e)})
