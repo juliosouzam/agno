@@ -75,14 +75,14 @@ def main():
     researcher = Agent(
         name="Researcher",
         role="Research specialist",
-        model=OpenAIChat(id="gpt-4o-mini"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         instructions="You research topics and provide information.",
     )
 
     writer = Agent(
         name="Writer",
         role="Content writer",
-        model=OpenAIChat(id="gpt-4o-mini"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         instructions="You write content based on research.",
     )
 

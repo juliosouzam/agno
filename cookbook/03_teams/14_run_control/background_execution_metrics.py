@@ -33,14 +33,14 @@ db = PostgresDb(
 # ---------------------------------------------------------------------------
 stock_searcher = Agent(
     name="Stock Searcher",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Searches for stock information.",
     tools=[YFinanceTools(enable_stock_price=True)],
 )
 
 team = Team(
     name="Stock Research Team",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     members=[stock_searcher],
     db=db,
     show_members_responses=True,

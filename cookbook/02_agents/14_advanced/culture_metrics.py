@@ -18,8 +18,8 @@ from rich.pretty import pprint
 db = PostgresDb(db_url="postgresql+psycopg://ai:ai@localhost:5532/ai")
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o-mini"),
-    culture_manager=CultureManager(model=OpenAIChat(id="gpt-4o-mini"), db=db),
+    model=OpenAIChat(id="gpt-5.4-mini"),
+    culture_manager=CultureManager(model=OpenAIChat(id="gpt-5.4-mini"), db=db),
     update_cultural_knowledge=True,
     db=db,
 )

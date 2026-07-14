@@ -38,7 +38,7 @@ def get_the_weather(city: str) -> str:
 
 weather_agent = Agent(
     name="WeatherAgent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[get_the_weather],
     db=db,
     telemetry=False,
@@ -46,7 +46,7 @@ weather_agent = Agent(
 
 weather_team = Team(
     name="WeatherTeam",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     members=[weather_agent],
     db=db,
     telemetry=False,

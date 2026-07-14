@@ -86,14 +86,14 @@ web_researcher = Agent(
 
 researcher = Agent(
     name="Researcher",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[WebSearchTools()],
     role="Conduct thorough research on assigned topics",
 )
 
 analyst = Agent(
     name="Analyst",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Analyze research findings and provide recommendations",
 )
 
@@ -118,7 +118,7 @@ research_team_with_input_schema = Team(
 research_team_with_output_schema = Team(
     name="Research Team",
     id="research-team",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     members=[researcher, analyst],
     output_schema=ResearchReport,
     markdown=False,

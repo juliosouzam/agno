@@ -36,20 +36,20 @@ def run_example() -> None:
     # Define agents
     web_agent = Agent(
         name="Web Agent",
-        model=OpenAIChat(id="gpt-4o-mini"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         tools=[WebSearchTools()],
         role="Search the web for the latest news and trends",
     )
     hackernews_agent = Agent(
         name="Hackernews Agent",
-        model=OpenAIChat(id="gpt-4o-mini"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         tools=[HackerNewsTools()],
         role="Extract key insights and content from Hackernews posts",
     )
 
     writer_agent = Agent(
         name="Writer Agent",
-        model=OpenAIChat(id="gpt-4o-mini"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         instructions="Write a blog post on the topic",
     )
 

@@ -18,7 +18,7 @@ from agno.tools.yfinance import YFinanceTools
 
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[WebSearchTools(), YFinanceTools(cache_results=True)],
 )
 

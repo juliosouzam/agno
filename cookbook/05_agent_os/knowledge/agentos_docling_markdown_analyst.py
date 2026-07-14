@@ -34,7 +34,7 @@ docling_knowledge = Knowledge(
 
 docling_agent = Agent(
     name="Docling Markdown Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     db=db,  # For session storage
     knowledge=docling_knowledge,
     search_knowledge=True,

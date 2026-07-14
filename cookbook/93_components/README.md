@@ -51,7 +51,7 @@ db = PostgresDb(db_url="postgresql+psycopg://ai:ai@localhost:5532/ai")
 agent = Agent(
     id="my-agent",
     name="My Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     db=db,
 )
 
@@ -115,14 +115,14 @@ db = PostgresDb(db_url="postgresql+psycopg://ai:ai@localhost:5532/ai")
 researcher = Agent(
     id="researcher-agent",
     name="Researcher",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Research and gather information",
 )
 
 writer = Agent(
     id="writer-agent",
     name="Writer",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Write content based on research",
 )
 
@@ -130,7 +130,7 @@ writer = Agent(
 team = Team(
     id="content-team",
     name="Content Creation Team",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     members=[researcher, writer],
     description="A team that researches and creates content",
     db=db,
@@ -181,14 +181,14 @@ db = PostgresDb(db_url="postgresql+psycopg://ai:ai@localhost:5532/ai")
 research_agent = Agent(
     id="research-agent",
     name="Research Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Extract key insights from data",
 )
 
 content_agent = Agent(
     id="content-agent",
     name="Content Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Create content based on research",
 )
 
@@ -260,7 +260,7 @@ class OutputSchema(BaseModel):
 registry = Registry(
     name="My Registry",
     tools=[DuckDuckGoTools(), my_custom_tool],
-    models=[OpenAIChat(id="gpt-4o-mini")],
+    models=[OpenAIChat(id="gpt-5.4-mini")],
     schemas=[InputSchema, OutputSchema],
 )
 ```

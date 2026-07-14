@@ -18,13 +18,13 @@ from agno.team import Team
 researcher = Agent(
     name="Researcher",
     role="You research topics and provide detailed findings.",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
 )
 
 writer = Agent(
     name="Writer",
     role="You write clear, concise summaries from research findings.",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
 )
 
 team = Team(
@@ -32,7 +32,7 @@ team = Team(
     model=OpenAIChat(id="gpt-5.4-mini"),
     fallback_config=FallbackConfig(
         on_rate_limit=[
-            OpenAIChat(id="gpt-4o-mini"),
+            OpenAIChat(id="gpt-5.4-mini"),
             Claude(id="claude-sonnet-4-20250514"),
         ],
         on_context_overflow=[

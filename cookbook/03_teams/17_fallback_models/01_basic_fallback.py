@@ -14,13 +14,13 @@ from agno.team import Team
 researcher = Agent(
     name="Researcher",
     role="You research topics and provide detailed findings.",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
 )
 
 writer = Agent(
     name="Writer",
     role="You write clear, concise summaries from research findings.",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
 )
 
 team = Team(

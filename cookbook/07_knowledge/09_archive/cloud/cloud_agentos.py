@@ -109,7 +109,7 @@ knowledge = Knowledge(
 )
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     knowledge=knowledge,
     search_knowledge=True,
 )

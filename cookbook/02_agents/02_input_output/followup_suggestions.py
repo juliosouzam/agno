@@ -34,7 +34,7 @@ agent = Agent(
     followups=True,
     num_followups=3,
     # Optionally use a cheaper model for followups
-    # followup_model=OpenAIResponses(id="gpt-4o-mini"),
+    # followup_model=OpenAIResponses(id="gpt-5.4-mini"),
     markdown=True,
 )
 

@@ -25,7 +25,7 @@ db = PostgresDb(db_url=db_url, session_table="sessions")
 # Only the last 5 runs are included when generating the summary.
 # ---------------------------------------------------------------------------
 summary_manager_by_runs = SessionSummaryManager(
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     last_n_runs=5,
 )
 
@@ -42,7 +42,7 @@ agent_by_runs = Agent(
 # At most 20 messages are included when generating the summary.
 # ---------------------------------------------------------------------------
 summary_manager_by_messages = SessionSummaryManager(
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     conversation_limit=20,
 )
 

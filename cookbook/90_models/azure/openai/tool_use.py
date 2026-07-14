@@ -9,7 +9,7 @@ from agno.tools.websearch import WebSearchTools
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=AzureOpenAI(id="gpt-4o-mini"),
+    model=AzureOpenAI(id="gpt-5.4-mini"),
     tools=[WebSearchTools()],
     markdown=True,
 )

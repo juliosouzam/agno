@@ -10,7 +10,7 @@ from agno.workflow.workflow import Workflow
 # ---------------------------------------------------------------------------
 report_generator = Agent(
     name="Report Generator",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[FileGenerationTools(enable_pdf_generation=True)],
     instructions=[
         "You are a data analyst that generates reports.",

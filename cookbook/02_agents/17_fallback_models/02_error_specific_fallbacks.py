@@ -25,7 +25,7 @@ agent = Agent(
     fallback_config=FallbackConfig(
         # On rate-limit errors, try these models (in order)
         on_rate_limit=[
-            OpenAIChat(id="gpt-4o-mini"),
+            OpenAIChat(id="gpt-5.4-mini"),
             Claude(id="claude-sonnet-4-20250514"),
         ],
         # On context-window-exceeded errors, try a model with a larger window

@@ -21,21 +21,21 @@ from agno.workflow.workflow import Workflow
 # ---------------------------------------------------------------------------
 researcher = Agent(
     name="Research Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[WebSearchTools()],
     instructions="Research the given topic and provide key facts and insights.",
 )
 
 tech_researcher = Agent(
     name="Tech Research Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[HackerNewsTools()],
     instructions="Research tech-related topics from Hacker News and provide latest developments.",
 )
 
 news_researcher = Agent(
     name="News Research Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[ExaTools()],
     instructions="Research current news and trends using Exa search.",
 )
@@ -54,7 +54,7 @@ editor = Agent(
 
 content_agent = Agent(
     name="Content Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions="Prepare and format content for writing based on research inputs.",
 )
 

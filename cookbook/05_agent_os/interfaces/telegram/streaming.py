@@ -8,7 +8,7 @@ the full response.
 
 Key concepts:
   - ``streaming=True`` on the Telegram interface enables chunked message edits.
-  - Uses OpenAI gpt-4o-mini for fast token generation.
+  - Uses OpenAI gpt-5.4-mini for fast token generation.
   - SQLite session persistence keeps conversation history across restarts.
 
 Setup: Set TELEGRAM_TOKEN env var from @BotFather.
@@ -30,7 +30,7 @@ agent_db = SqliteDb(
 
 telegram_agent = Agent(
     name="Telegram Streaming Bot",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     db=agent_db,
     instructions=[
         "You are a helpful assistant on Telegram.",

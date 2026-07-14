@@ -44,7 +44,7 @@ db = PostgresDb(
 scheduler_agent = Agent(
     id="scheduler-agent",
     name="Scheduler Agent",
-    model=OpenAIChat(id="gpt-4o-mini"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[
         SchedulerTools(
             db=db,
