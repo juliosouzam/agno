@@ -1,0 +1,116 @@
+"""BrowserbaseMCPBackend — cloud browser automation via Browserbase's MCP server.
+
+Runs `npx @browserbasehq/mcp-server-browserbase` as a subprocess and exposes
+Stagehand-powered browser tools (navigate, act, observe, extract) to the calling agent.
+
+Requires:
+    Node.js 18+
+    BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables
+    GEMINI_API_KEY (or model_api_key) for Stagehand's internal LLM
+"""
+
+from __future__ import annotations
+
+from os import getenv
+from typing import Any
+
+from agno.context.backend import ContextBackend
+from agno.context.provider import Status
+from agno.utils.log import log_warning
+
+
+class BrowserbaseMCPBackend(ContextBackend):
+    """Backend for `BrowserContextProvider` using Browserbase's MCP server with Stagehand.
+
+    Unlike BrowserbaseBackend (SDK), this uses Stagehand for semantic actions:
+    - `act("click the login button")` instead of CSS selectors
+    - `extract(instruction)` for targeted content extraction
+    - Server-side LLM handles element resolution
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        project_id: str | None = None,
+        model_api_key: str | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
+        tool_name_prefix: str | None = "browser",
+        timeout_seconds: int = 60,
+    ) -> None:
+        self.api_key = api_key or getenv("BROWSERBASE_API_KEY")
+        self.project_id = project_id or getenv("BROWSERBASE_PROJECT_ID")
+        self.model_api_key = model_api_key or getenv("GEMINI_API_KEY")
+        self.include_tools = include_tools
+        self.exclude_tools = exclude_tools
+        self.tool_name_prefix = tool_name_prefix
+        self.timeout_seconds = timeout_seconds
+        self._mcp_tools: Any = None
+
+    def status(self) -> Status:
+        missing = []
+        if not self.api_key:
+            missing.append("BROWSERBASE_API_KEY")
+        if not self.project_id:
+            missing.append("BROWSERBASE_PROJECT_ID")
+        if not self.model_api_key:
+            missing.append("GEMINI_API_KEY")
+        if missing:
+            return Status(ok=False, detail=f"browserbase-mcp: missing {', '.join(missing)}")
+        return Status(ok=True, detail="browserbase-mcp (stagehand)")
+
+    async def astatus(self) -> Status:
+        return self.status()
+
+    def get_tools(self) -> list:
+        if self._mcp_tools is None:
+            self._mcp_tools = self._build_tools()
+        return [self._mcp_tools]
+
+    def _build_tools(self) -> Any:
+        from mcp import StdioServerParameters
+
+        from agno.tools.mcp import MCPTools
+
+        env: dict[str, str] = {}
+        if self.api_key:
+            env["BROWSERBASE_API_KEY"] = self.api_key
+        if self.project_id:
+            env["BROWSERBASE_PROJECT_ID"] = self.project_id
+        if self.model_api_key:
+            env["GEMINI_API_KEY"] = self.model_api_key
+
+        return MCPTools(
+            server_params=StdioServerParameters(
+                command="npx",
+                args=["@browserbasehq/mcp-server-browserbase"],
+                env=env if env else None,
+            ),
+            transport="stdio",
+            include_tools=self.include_tools,
+            exclude_tools=self.exclude_tools,
+            tool_name_prefix=self.tool_name_prefix,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    async def asetup(self) -> None:
+        if self._mcp_tools is None:
+            self._mcp_tools = self._build_tools()
+        if getattr(self._mcp_tools, "initialized", False):
+            return
+        try:
+            await self._mcp_tools._connect()
+        except Exception as exc:
+            log_warning(f"BrowserbaseMCPBackend setup failed: {type(exc).__name__}: {exc}")
+            self._mcp_tools = None
+
+    async def aclose(self) -> None:
+        tools = self._mcp_tools
+        self._mcp_tools = None
+        if tools is None:
+            return
+        try:
+            await tools.close()
+        except Exception as exc:
+            log_warning(f"BrowserbaseMCPBackend close raised {type(exc).__name__}: {exc}")
