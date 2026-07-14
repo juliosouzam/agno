@@ -42,6 +42,68 @@ _IGNORED_SUBTYPES = frozenset(
 )
 
 
+def _is_own_bot_event(event: dict, data: dict) -> bool:
+    """Check if a bot-authored event was produced by this app itself.
+
+    Own identity comes from the event envelope — ``authorizations[].user_id``
+    is this app's bot user id and ``api_app_id`` is this app's id — so no extra
+    API call is needed.
+
+    IMPORTANT: Treat as own if EITHER signal matches. Slack's authorizations
+    array may surface a human installer (not the bot) in mixed-scope installs,
+    so user_id alone isn't reliable — but app_id always identifies the app.
+    Fails closed: if the sender can't be attributed, treat as own.
+    """
+    message = event.get("message") or {}
+    sender_user_id = event.get("user") or message.get("user")
+    sender_app_id = event.get("app_id") or message.get("app_id")
+
+    own_bot_user_id = (data.get("authorizations") or [{}])[0].get("user_id")
+    own_app_id = data.get("api_app_id")
+
+    # Check app_id first — it's the most reliable signal
+    if own_app_id and sender_app_id and sender_app_id == own_app_id:
+        return True
+    # Fall back to user_id comparison
+    if own_bot_user_id and sender_user_id and sender_user_id == own_bot_user_id:
+        return True
+    # Unattributable bot event — fail closed (treat as own)
+    if not sender_user_id and not sender_app_id:
+        return True
+    return False
+
+
+def _should_ignore_event(event: dict, data: dict, respond_to_bot_messages: bool) -> bool:
+    """Decide whether an event should be dropped before dispatch.
+
+    Default (respond_to_bot_messages=False): every bot-authored event and every
+    lifecycle subtype is dropped — self-loop protection, unchanged behavior.
+
+    Opt-in (respond_to_bot_messages=True): only this app's OWN messages are
+    dropped (the echo guard), so other bots' messages flow into normal processing.
+    ``bot_message`` is the delivery subtype for bot-authored channel messages, so
+    it passes when authored by a peer bot; other lifecycle subtypes stay dropped.
+
+    Loop safety: replies don't @-mention the sender and with reply_to_mentions_only=True
+    the receiving side only processes mentions/DMs. Two bots that both set
+    reply_to_mentions_only=False + respond_to_bot_messages=True in a shared channel
+    WILL loop — don't combine those settings.
+    """
+    subtype = event.get("subtype")
+    is_bot_authored = bool(event.get("bot_id") or (event.get("message") or {}).get("bot_id"))
+
+    if not respond_to_bot_messages:
+        return is_bot_authored or subtype in _IGNORED_SUBTYPES
+
+    # With opt-in: drop only own bot events, let peer bots through
+    if is_bot_authored and _is_own_bot_event(event, data):
+        return True
+    # bot_message subtype passes for peer bots; other lifecycle subtypes stay dropped
+    if subtype in _IGNORED_SUBTYPES and not (is_bot_authored and subtype == "bot_message"):
+        return True
+    return False
+
+
 class SlackEventResponse(BaseModel):
     status: str = Field(default="ok")
 
@@ -68,6 +130,12 @@ def attach_routes(
     buffer_size: int = 100,
     max_file_size: int = 1_073_741_824,  # 1GB
     resolve_user_identity: bool = False,
+    # Process messages authored by OTHER Slack bots (mentions, DMs, channel messages).
+    # This app's own messages are always dropped (echo guard). Safe against ping-pong
+    # by default: replies don't @-mention the sender and with reply_to_mentions_only=True
+    # only mentions/DMs are processed. Two bots with reply_to_mentions_only=False +
+    # respond_to_bot_messages=True in a shared channel WILL loop.
+    respond_to_bot_messages: bool = False,
 ) -> APIRouter:
     # Inner functions capture config via closure to keep each instance isolated
     entity = agent or team or workflow
@@ -160,16 +228,10 @@ def attach_routes(
             # setSuggestedPrompts requires "Agents & AI Apps" mode (streaming UX only)
             if event_type == "assistant_thread_started" and streaming:
                 background_tasks.add_task(event_handler.handle_thread_started, event)
-            # Bot self-loop prevention: check bot_id at BOTH the top-level event
-            # AND inside message_changed's nested "message" object. Slack puts
-            # bot_id at different nesting levels depending on event shape — the
-            # nested check catches edited bot messages that would otherwise be
-            # reprocessed as new user events.
-            elif (
-                event.get("bot_id")
-                or (event.get("message") or {}).get("bot_id")
-                or event.get("subtype") in _IGNORED_SUBTYPES
-            ):
+            # Bot self-loop prevention: with respond_to_bot_messages=False (default),
+            # all bot events are dropped. With =True, only this app's own messages
+            # are dropped and peer bots' messages flow through to normal processing.
+            elif _should_ignore_event(event, data, respond_to_bot_messages):
                 pass
             elif streaming:
                 background_tasks.add_task(event_handler.handle_streaming, data)

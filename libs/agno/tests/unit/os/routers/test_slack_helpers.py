@@ -385,3 +385,53 @@ class TestStripBotMention:
     def test_mention_only_with_bot_name(self):
         result = strip_bot_mention("<@U0APCSS3MDH>", "U0APCSS3MDH", "Scout")
         assert result == "Scout"
+
+
+class TestExtractEventContextBotFallback:
+    def test_user_field_preferred(self):
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "bot_id": "B456", "ts": "111"})
+        assert ctx["user"] == "U123"
+
+    def test_bot_id_fallback_when_no_user(self):
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "bot_id": "B456", "ts": "111"})
+        assert ctx["user"] == "B456"
+
+    def test_empty_string_when_neither(self):
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "ts": "111"})
+        assert ctx["user"] == ""
+
+
+class TestResolveSlackUserBot:
+    @pytest.mark.asyncio
+    async def test_bot_id_uses_bots_info(self):
+        mock_client = AsyncMock()
+        mock_client.bots_info = AsyncMock(return_value={"bot": {"name": "My Bot"}})
+
+        resolved_id, display_name = await resolve_slack_user(mock_client, "B123456")
+
+        mock_client.bots_info.assert_awaited_once_with(bot="B123456")
+        assert resolved_id == "B123456"
+        assert display_name == "My Bot"
+
+    @pytest.mark.asyncio
+    async def test_bot_id_fallback_on_error(self):
+        mock_client = AsyncMock()
+        mock_client.bots_info = AsyncMock(side_effect=Exception("API error"))
+
+        resolved_id, display_name = await resolve_slack_user(mock_client, "B123456")
+
+        assert resolved_id == "B123456"
+        assert display_name is None
+
+    @pytest.mark.asyncio
+    async def test_user_id_still_uses_users_info(self):
+        mock_client = AsyncMock()
+        mock_client.users_info = AsyncMock(
+            return_value={"user": {"profile": {"email": "user@example.com", "display_name": "Test User"}}}
+        )
+
+        resolved_id, display_name = await resolve_slack_user(mock_client, "U123456")
+
+        mock_client.users_info.assert_awaited_once_with(user="U123456")
+        assert resolved_id == "user@example.com"
+        assert display_name == "Test User"

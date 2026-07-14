@@ -1133,3 +1133,212 @@ class TestAdminApprovalFlow:
         mock_client.chat_update.assert_awaited_once()
         call = mock_client.chat_update.call_args
         assert call.kwargs["text"] == "Status: pending"
+
+
+class TestBotMessageFiltering:
+    """Tests for respond_to_bot_messages opt-in and _is_own_bot_event logic."""
+
+    @pytest.mark.asyncio
+    async def test_default_drops_all_bot_events(self):
+        """Default behavior: all bot-authored events are dropped."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel_type": "channel",
+                    "text": "hello from a bot",
+                    "bot_id": "B_OTHER_BOT",
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        agent_mock.arun.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_opt_in_allows_peer_bot_messages(self):
+        """With respond_to_bot_messages=True, peer bot messages are processed."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF_BOT"}],
+                "event": {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "channel_type": "channel",
+                    "text": "hello from peer bot",
+                    "bot_id": "B_OTHER_BOT",
+                    "app_id": "A_OTHER",
+                    "user": "U_OTHER_BOT",
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await wait_for_call(agent_mock.arun)
+
+    @pytest.mark.asyncio
+    async def test_opt_in_still_drops_own_messages_by_app_id(self):
+        """Own messages identified by app_id are always dropped, even with opt-in."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF_BOT"}],
+                "event": {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "channel_type": "channel",
+                    "text": "my own message",
+                    "bot_id": "B_SELF",
+                    "app_id": "A_SELF",  # Matches api_app_id
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        agent_mock.arun.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_opt_in_still_drops_own_messages_by_user_id(self):
+        """Own messages identified by user_id are dropped, even with opt-in."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF_BOT"}],
+                "event": {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "channel_type": "channel",
+                    "text": "my own message",
+                    "bot_id": "B_SELF",
+                    "user": "U_SELF_BOT",  # Matches authorizations
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        agent_mock.arun.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unattributable_bot_event_dropped_fail_closed(self):
+        """Bot event with no user or app_id is treated as own (fail closed)."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF_BOT"}],
+                "event": {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "channel_type": "channel",
+                    "text": "webhook message with no attribution",
+                    "bot_id": "B_WEBHOOK",
+                    # No user, no app_id — can't attribute
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        agent_mock.arun.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_subtypes_still_dropped_with_opt_in(self):
+        """message_changed, message_deleted, etc. are still dropped with opt-in."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "api_app_id": "A_SELF",
+                "authorizations": [{"user_id": "U_SELF_BOT"}],
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel_type": "channel",
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                    "message": {"text": "edited", "user": "U_OTHER"},
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        agent_mock.arun.assert_not_called()
