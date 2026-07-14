@@ -1,47 +1,188 @@
-"""Unit tests for BrowserContextProvider."""
+"""Unit tests for BrowserContextProvider and its backends.
+
+Tests the 2x2 matrix of browser backends:
+- PlaywrightMCPBackend: local MCP server
+- PlaywrightBackend: local SDK (PlaywrightTools)
+- BrowserbaseMCPBackend: cloud MCP (Stagehand)
+- BrowserbaseBackend: cloud SDK (BrowserbaseTools)
+
+Following the codebase pattern from test_provider.py — test the contract,
+not the implementation details.
+"""
+
+from __future__ import annotations
 
 import pytest
 
-from agno.context.browser import BrowserContextProvider, PlaywrightMCPBackend
+from agno.context.browser import (
+    BrowserbaseBackend,
+    BrowserbaseMCPBackend,
+    BrowserContextProvider,
+    PlaywrightBackend,
+    PlaywrightMCPBackend,
+)
 from agno.context.mode import ContextMode
+
+# ---------------------------------------------------------------------------
+# PlaywrightMCPBackend — local MCP server
+# ---------------------------------------------------------------------------
 
 
 class TestPlaywrightMCPBackend:
-    def test_status_shows_browser_and_mode(self):
+    def test_status_shows_chromium_and_mode(self):
         backend = PlaywrightMCPBackend()
         status = backend.status()
         assert status.ok is True
         assert "chromium" in status.detail
         assert "headless" in status.detail
 
-    def test_default_browser_is_chromium(self):
-        backend = PlaywrightMCPBackend()
-        assert backend.browser == "chromium"
-
-    def test_custom_browser(self):
-        backend = PlaywrightMCPBackend(browser="firefox")
-        assert backend.browser == "firefox"
-        assert "firefox" in backend.status().detail
-
     def test_headless_default_true(self):
         backend = PlaywrightMCPBackend()
         assert backend.headless is True
 
-    def test_headless_false(self):
+    def test_headless_false_reflected_in_status(self):
         backend = PlaywrightMCPBackend(headless=False)
         assert backend.headless is False
+        assert "headed" in backend.status().detail
 
-    def test_default_include_tools_is_none(self):
+    def test_include_tools_default_none(self):
         backend = PlaywrightMCPBackend()
         assert backend.include_tools is None
 
-    def test_custom_include_tools(self):
+    def test_include_tools_custom(self):
         backend = PlaywrightMCPBackend(include_tools=["browser_navigate", "browser_snapshot"])
         assert backend.include_tools == ["browser_navigate", "browser_snapshot"]
 
-    def test_tool_name_prefix(self):
-        backend = PlaywrightMCPBackend(tool_name_prefix="pw_")
-        assert backend.tool_name_prefix == "pw_"
+    def test_exclude_tools_default_none(self):
+        backend = PlaywrightMCPBackend()
+        assert backend.exclude_tools is None
+
+    def test_exclude_tools_custom(self):
+        backend = PlaywrightMCPBackend(exclude_tools=["browser_pdf_save"])
+        assert backend.exclude_tools == ["browser_pdf_save"]
+
+    def test_tool_name_prefix_default_none(self):
+        backend = PlaywrightMCPBackend()
+        assert backend.tool_name_prefix is None
+
+    def test_tool_name_prefix_custom(self):
+        backend = PlaywrightMCPBackend(tool_name_prefix="pw")
+        assert backend.tool_name_prefix == "pw"
+
+    def test_timeout_seconds_default(self):
+        backend = PlaywrightMCPBackend()
+        assert backend.timeout_seconds == 60
+
+    def test_timeout_seconds_custom(self):
+        backend = PlaywrightMCPBackend(timeout_seconds=120)
+        assert backend.timeout_seconds == 120
+
+
+# ---------------------------------------------------------------------------
+# PlaywrightBackend — local SDK (PlaywrightTools)
+# ---------------------------------------------------------------------------
+
+
+class TestPlaywrightBackend:
+    def test_status_shows_local(self):
+        backend = PlaywrightBackend()
+        status = backend.status()
+        assert status.ok is True
+        assert "playwright" in status.detail
+        assert "local" in status.detail
+
+    def test_headless_default_true(self):
+        backend = PlaywrightBackend()
+        assert backend.headless is True
+
+    def test_headless_false_reflected_in_status(self):
+        backend = PlaywrightBackend(headless=False)
+        assert backend.headless is False
+        assert "headed" in backend.status().detail
+
+
+# ---------------------------------------------------------------------------
+# BrowserbaseBackend — cloud SDK (BrowserbaseTools)
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserbaseBackend:
+    def test_status_missing_api_key(self):
+        backend = BrowserbaseBackend(api_key=None, project_id="proj_123")
+        status = backend.status()
+        assert status.ok is False
+        assert "BROWSERBASE_API_KEY" in status.detail
+
+    def test_status_missing_project_id(self):
+        backend = BrowserbaseBackend(api_key="bb_live_xxx", project_id=None)
+        status = backend.status()
+        assert status.ok is False
+        assert "BROWSERBASE_PROJECT_ID" in status.detail
+
+    def test_status_missing_both(self):
+        backend = BrowserbaseBackend(api_key=None, project_id=None)
+        status = backend.status()
+        assert status.ok is False
+        assert "BROWSERBASE_API_KEY" in status.detail
+        assert "BROWSERBASE_PROJECT_ID" in status.detail
+
+    def test_status_ok_with_credentials(self):
+        backend = BrowserbaseBackend(api_key="bb_live_xxx", project_id="proj_123")
+        status = backend.status()
+        assert status.ok is True
+        assert "browserbase" in status.detail
+
+
+# ---------------------------------------------------------------------------
+# BrowserbaseMCPBackend — cloud MCP (Stagehand)
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserbaseMCPBackend:
+    def test_status_missing_api_key(self):
+        backend = BrowserbaseMCPBackend(api_key=None, project_id="proj_123")
+        status = backend.status()
+        assert status.ok is False
+        assert "BROWSERBASE_API_KEY" in status.detail
+
+    def test_status_missing_project_id(self):
+        backend = BrowserbaseMCPBackend(api_key="bb_live_xxx", project_id=None)
+        status = backend.status()
+        assert status.ok is False
+        assert "BROWSERBASE_PROJECT_ID" in status.detail
+
+    def test_status_missing_model_api_key(self):
+        backend = BrowserbaseMCPBackend(api_key="bb_live_xxx", project_id="proj_123", model_api_key=None)
+        status = backend.status()
+        assert status.ok is False
+        assert "GEMINI_API_KEY" in status.detail
+
+    def test_status_ok_with_all_credentials(self):
+        backend = BrowserbaseMCPBackend(api_key="bb_live_xxx", project_id="proj_123", model_api_key="xxx")
+        status = backend.status()
+        assert status.ok is True
+        assert "browserbase-mcp" in status.detail
+
+    def test_include_tools_default_none(self):
+        backend = BrowserbaseMCPBackend(api_key="x", project_id="y")
+        assert backend.include_tools is None
+
+    def test_exclude_tools_custom(self):
+        backend = BrowserbaseMCPBackend(api_key="x", project_id="y", exclude_tools=["tool1"])
+        assert backend.exclude_tools == ["tool1"]
+
+    def test_tool_name_prefix_default(self):
+        backend = BrowserbaseMCPBackend(api_key="x", project_id="y")
+        assert backend.tool_name_prefix == "browser"
+
+    def test_timeout_seconds_default(self):
+        backend = BrowserbaseMCPBackend(api_key="x", project_id="y")
+        assert backend.timeout_seconds == 60
+
+
+# ---------------------------------------------------------------------------
+# BrowserContextProvider — wraps any backend
+# ---------------------------------------------------------------------------
 
 
 class TestBrowserContextProvider:
@@ -73,6 +214,13 @@ class TestBrowserContextProvider:
         status = provider.status()
         assert status.ok is True
         assert "playwright-mcp" in status.detail
+
+    def test_status_delegates_to_browserbase_backend(self):
+        backend = BrowserbaseBackend(api_key="bb_live_xxx", project_id="proj_123")
+        provider = BrowserContextProvider(backend=backend)
+        status = provider.status()
+        assert status.ok is True
+        assert "browserbase" in status.detail
 
     def test_instructions_default_mode(self):
         backend = PlaywrightMCPBackend()
