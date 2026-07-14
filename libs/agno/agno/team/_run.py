@@ -246,7 +246,6 @@ def _run_tasks(
     from agno.team._response import (
         _convert_response_to_structured_format,
         _update_run_response,
-        handle_reasoning,
     )
     from agno.team._telemetry import log_team_telemetry
     from agno.team._tools import _determine_tools_for_model
@@ -339,11 +338,6 @@ def _run_tasks(
             user_id=user_id,
             existing_future=learning_future,
         )
-
-        raise_if_cancelled(run_response.run_id)  # type: ignore
-
-        # 5. Reason about the task if reasoning is enabled
-        handle_reasoning(team, run_response=run_response, run_messages=run_messages, run_context=run_context)
 
         raise_if_cancelled(run_response.run_id)  # type: ignore
 
@@ -572,7 +566,6 @@ def _run_tasks_stream(
         _convert_response_to_structured_format,
         _handle_model_response_stream,
         generate_response_with_output_model_stream,
-        handle_reasoning_stream,
     )
     from agno.team._telemetry import log_team_telemetry
     from agno.team._tools import _determine_tools_for_model
@@ -681,17 +674,6 @@ def _run_tasks_stream(
                 events_to_skip=team.events_to_skip,
                 store_events=team.store_events,
             )
-
-        raise_if_cancelled(run_response.run_id)  # type: ignore
-
-        # 5. Reason about the task if reasoning is enabled
-        yield from handle_reasoning_stream(
-            team,
-            run_response=run_response,
-            run_messages=run_messages,
-            run_context=run_context,
-            stream_events=stream_events,
-        )
 
         raise_if_cancelled(run_response.run_id)  # type: ignore
 
@@ -1070,7 +1052,6 @@ def _run(
     from agno.team._response import (
         _convert_response_to_structured_format,
         _update_run_response,
-        handle_reasoning,
         parse_response_with_output_model,
         parse_response_with_parser_model,
     )
@@ -1198,13 +1179,7 @@ def _run(
 
                 raise_if_cancelled(run_response.run_id)  # type: ignore
 
-                # 5. Reason about the task if reasoning is enabled
-                handle_reasoning(team, run_response=run_response, run_messages=run_messages, run_context=run_context)
-
-                # Check for cancellation before model call
-                raise_if_cancelled(run_response.run_id)  # type: ignore
-
-                # 6. Get the model response for the team leader
+                # 5. Get the model response for the team leader
                 team.model = cast(Model, team.model)
                 model_response: ModelResponse = call_model_with_fallback(
                     team.model,
@@ -1428,7 +1403,6 @@ def _run_stream(
     from agno.team._response import (
         _handle_model_response_stream,
         generate_response_with_output_model_stream,
-        handle_reasoning_stream,
         parse_response_with_parser_model_stream,
     )
     from agno.team._telemetry import log_team_telemetry
@@ -1569,19 +1543,7 @@ def _run_stream(
 
                 raise_if_cancelled(run_response.run_id)  # type: ignore
 
-                # 5. Reason about the task if reasoning is enabled
-                yield from handle_reasoning_stream(
-                    team,
-                    run_response=run_response,
-                    run_messages=run_messages,
-                    run_context=run_context,
-                    stream_events=stream_events,
-                )
-
-                # Check for cancellation before model processing
-                raise_if_cancelled(run_response.run_id)  # type: ignore
-
-                # 6. Get a response from the model
+                # 5. Get a response from the model
                 if team.output_model is None:
                     for event in _handle_model_response_stream(
                         team,
@@ -2081,7 +2043,6 @@ async def _arun_tasks(
     from agno.team._response import (
         _convert_response_to_structured_format,
         _update_run_response,
-        ahandle_reasoning,
     )
     from agno.team._telemetry import alog_team_telemetry
     from agno.team._tools import _aget_learning_tools, _check_and_refresh_mcp_tools, _determine_tools_for_model
@@ -2190,11 +2151,6 @@ async def _arun_tasks(
             user_id=user_id,
             existing_task=learning_task,
         )
-
-        await araise_if_cancelled(run_response.run_id)  # type: ignore
-
-        # 5. Reason about the task if reasoning is enabled
-        await ahandle_reasoning(team, run_response=run_response, run_messages=run_messages, run_context=run_context)
 
         await araise_if_cancelled(run_response.run_id)  # type: ignore
 
@@ -2441,7 +2397,6 @@ async def _arun_tasks_stream(
         _ahandle_model_response_stream,
         _convert_response_to_structured_format,
         agenerate_response_with_output_model_stream,
-        ahandle_reasoning_stream,
     )
     from agno.team._telemetry import alog_team_telemetry
     from agno.team._tools import _aget_learning_tools, _check_and_refresh_mcp_tools, _determine_tools_for_model
@@ -2565,19 +2520,6 @@ async def _arun_tasks_stream(
                 events_to_skip=team.events_to_skip,
                 store_events=team.store_events,
             )
-
-        await araise_if_cancelled(run_response.run_id)  # type: ignore
-
-        # 5. Reason about the task if reasoning is enabled
-        async for item in ahandle_reasoning_stream(
-            team,
-            run_response=run_response,
-            run_messages=run_messages,
-            run_context=run_context,
-            stream_events=stream_events,
-        ):
-            await araise_if_cancelled(run_response.run_id)  # type: ignore
-            yield item
 
         await araise_if_cancelled(run_response.run_id)  # type: ignore
 
@@ -2991,7 +2933,6 @@ async def _arun(
         _convert_response_to_structured_format,
         _update_run_response,
         agenerate_response_with_output_model,
-        ahandle_reasoning,
         aparse_response_with_parser_model,
     )
     from agno.team._telemetry import alog_team_telemetry
@@ -3138,15 +3079,8 @@ async def _arun(
                 )
 
                 await araise_if_cancelled(run_response.run_id)  # type: ignore
-                # 5. Reason about the task if reasoning is enabled
-                await ahandle_reasoning(
-                    team, run_response=run_response, run_messages=run_messages, run_context=run_context
-                )
 
-                # Check for cancellation before model call
-                await araise_if_cancelled(run_response.run_id)  # type: ignore
-
-                # 6. Get the model response for the team leader
+                # 5. Get the model response for the team leader
                 model_response = await acall_model_with_fallback(
                     team.model,
                     team.fallback_config,
@@ -3615,7 +3549,6 @@ async def _arun_stream(
     from agno.team._response import (
         _ahandle_model_response_stream,
         agenerate_response_with_output_model_stream,
-        ahandle_reasoning_stream,
         aparse_response_with_parser_model_stream,
     )
     from agno.team._telemetry import alog_team_telemetry
@@ -3773,21 +3706,7 @@ async def _arun_stream(
                         store_events=team.store_events,
                     )
 
-                # 5. Reason about the task if reasoning is enabled
-                async for item in ahandle_reasoning_stream(
-                    team,
-                    run_response=run_response,
-                    run_messages=run_messages,
-                    run_context=run_context,
-                    stream_events=stream_events,
-                ):
-                    await araise_if_cancelled(run_response.run_id)  # type: ignore
-                    yield item
-
-                # Check for cancellation before model processing
-                await araise_if_cancelled(run_response.run_id)  # type: ignore
-
-                # 6. Get a response from the model
+                # 5. Get a response from the model
                 if team.output_model is None:
                     async for event in _ahandle_model_response_stream(
                         team,
