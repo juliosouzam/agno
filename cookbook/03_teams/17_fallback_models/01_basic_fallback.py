@@ -25,7 +25,7 @@ writer = Agent(
 
 team = Team(
     name="Research Team",
-    model=OpenAIChat(id="gpt-4o", base_url="http://localhost:1/v1", retries=0),
+    model=OpenAIChat(id="gpt-5.4-mini", base_url="http://localhost:1/v1", retries=0),
     fallback_models=[Claude(id="claude-sonnet-4-20250514")],
     members=[researcher, writer],
     instructions=[

@@ -37,7 +37,7 @@ class MovieScript(BaseModel):
 
 # Agent that uses structured outputs
 structured_output_agent = Agent(
-    model=Requesty(id="openai/gpt-4o"),
+    model=Requesty(id="openai/gpt-5.4-mini"),
     description="You write movie scripts.",
     output_schema=MovieScript,
 )

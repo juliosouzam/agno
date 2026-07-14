@@ -17,7 +17,7 @@ from agno.utils.media import save_base64_data
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[
         GeminiTools(
             image_generation_model="imagen-4.0-generate-preview-05-20", vertexai=True

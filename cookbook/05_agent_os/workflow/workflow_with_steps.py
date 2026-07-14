@@ -29,13 +29,13 @@ researcher = Agent(
 
 writer = Agent(
     name="Writing Agent",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions="Write a comprehensive article based on the research provided. Make it engaging and well-structured.",
 )
 
 editor = Agent(
     name="Editor Agent",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions="Review and edit the article for clarity, grammar, and flow. Provide a polished final version.",
 )
 

@@ -21,7 +21,7 @@ from agno.models.openai import OpenAIChat
 # Create Agent with error-specific fallbacks
 # ---------------------------------------------------------------------------
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     fallback_config=FallbackConfig(
         # On rate-limit errors, try these models (in order)
         on_rate_limit=[

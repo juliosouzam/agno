@@ -19,7 +19,7 @@ researcher = Agent(
     name="researcher",
     id="researcher",
     role="Research Assistant",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions="You are a research assistant. Find information and provide detailed analysis.",
     tools=[WebSearchTools()],
     markdown=True,

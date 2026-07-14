@@ -18,7 +18,7 @@ def main() -> None:
     db = PostgresDb(db_url)
 
     agent = Agent(
-        model=OpenAIChat(id="gpt-4o"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         db=db,
         add_history_to_context=True,
         num_history_runs=10,
@@ -34,7 +34,7 @@ def main() -> None:
     agent.print_response("What is the weather in London?")
 
     # Turn 3 — OpenAI with tool call (works fine on its own)
-    agent.model = OpenAIChat(id="gpt-4o")
+    agent.model = OpenAIChat(id="gpt-5.4-mini")
     agent.print_response("What is the weather in Tokyo?")
 
     # Turn 4 — OpenAI Responses summary

@@ -16,7 +16,7 @@ from agno.workflow.workflow import Workflow
 # ---------------------------------------------------------------------------
 tutor_agent = Agent(
     name="AI Tutor",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions=[
         "You are an expert tutor who provides personalized educational support.",
         "You have access to our full conversation history.",

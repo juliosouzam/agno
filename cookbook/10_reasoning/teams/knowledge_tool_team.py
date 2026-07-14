@@ -56,7 +56,7 @@ def run_example() -> None:
 
     team_leader = Team(
         name="Reasoning Finance Team",
-        model=OpenAIChat(id="gpt-4o"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         members=[
             web_agent,
             finance_agent,

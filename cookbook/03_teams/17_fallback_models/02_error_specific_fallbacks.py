@@ -29,7 +29,7 @@ writer = Agent(
 
 team = Team(
     name="Research Team",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     fallback_config=FallbackConfig(
         on_rate_limit=[
             OpenAIChat(id="gpt-4o-mini"),

@@ -21,7 +21,7 @@ from agno.utils.media import save_base64_data
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[OpenAITools(image_model="gpt-image-1")],
     markdown=True,
 )

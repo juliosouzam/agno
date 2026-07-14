@@ -12,7 +12,7 @@ from agno.models.cometapi import CometAPI
 
 # Use a vision-capable model from CometAPI
 agent = Agent(
-    model=CometAPI(id="gpt-4o"),  # GPT-4o has vision capabilities
+    model=CometAPI(id="gpt-5.4-mini"),  # gpt-5.4-mini has vision capabilities
     markdown=True,
 )
 

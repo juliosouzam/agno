@@ -100,7 +100,7 @@ strategy_agent = Agent(
 
 planning_agent = Agent(
     name="Content Planning Specialist",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     role="Create detailed content plans and calendars",
     output_schema=FinalContentPlan,
     instructions=[

@@ -30,7 +30,7 @@ generate_report_step = Step(
 # ---------------------------------------------------------------------------
 report_analyzer = Agent(
     name="Report Analyzer",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions=[
         "You are a business analyst.",
         "Analyze the attached PDF report and provide insights.",

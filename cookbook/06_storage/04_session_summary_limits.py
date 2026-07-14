@@ -30,7 +30,7 @@ summary_manager_by_runs = SessionSummaryManager(
 )
 
 agent_by_runs = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     db=db,
     session_id="summary_limit_runs",
     session_summary_manager=summary_manager_by_runs,
@@ -47,7 +47,7 @@ summary_manager_by_messages = SessionSummaryManager(
 )
 
 agent_by_messages = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     db=db,
     session_id="summary_limit_messages",
     session_summary_manager=summary_manager_by_messages,

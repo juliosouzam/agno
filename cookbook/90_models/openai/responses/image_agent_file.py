@@ -6,7 +6,7 @@ from agno.media import Image
 from agno.models.openai import OpenAIResponses
 
 agent = Agent(
-    model=OpenAIResponses(id="gpt-4o"),
+    model=OpenAIResponses(id="gpt-5.4-mini"),
     markdown=True,
 )
 

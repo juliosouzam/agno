@@ -34,7 +34,7 @@ knowledge = Knowledge(
 # Create Agent
 # ---------------------------------------------------------------------------
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     knowledge=knowledge,
     search_knowledge=True,
     read_chat_history=True,

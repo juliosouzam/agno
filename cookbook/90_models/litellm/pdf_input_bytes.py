@@ -23,7 +23,7 @@ download_file(
 )
 
 agent = Agent(
-    model=LiteLLM(id="openai/gpt-4o"),
+    model=LiteLLM(id="openai/gpt-5.4-mini"),
     markdown=True,
 )
 

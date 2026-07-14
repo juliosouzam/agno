@@ -49,7 +49,7 @@ knowledge_tools = KnowledgeTools(
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     tools=[knowledge_tools],
     markdown=True,
 )

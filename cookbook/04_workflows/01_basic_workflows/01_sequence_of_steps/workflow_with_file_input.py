@@ -24,7 +24,7 @@ read_agent = Agent(
 
 summarize_agent = Agent(
     name="Summarize Agent",
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     instructions=[
         "Summarize the contents of the attached file.",
     ],

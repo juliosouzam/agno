@@ -11,7 +11,7 @@ from agno.tools.websearch import WebSearchTools
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=Requesty(id="openai/gpt-4o"),
+    model=Requesty(id="openai/gpt-5.4-mini"),
     tools=[WebSearchTools()],
     markdown=True,
 )

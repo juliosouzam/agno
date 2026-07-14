@@ -90,7 +90,7 @@ def main():
     team = Team(
         name="Content Team",
         mode=TeamMode.tasks,
-        model=OpenAIChat(id="gpt-4o"),
+        model=OpenAIChat(id="gpt-5.4-mini"),
         members=[researcher, writer],
         instructions=[
             "You are a content creation team leader.",

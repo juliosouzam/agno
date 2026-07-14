@@ -15,13 +15,13 @@ from agno.models.openai import OpenAIChat
 task = "Craft a curriculum for Python 101"
 
 cot_agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     reasoning=True,
     markdown=True,
 )
 
 deepseek_agent = Agent(
-    model=OpenAIChat(id="gpt-4o"),
+    model=OpenAIChat(id="gpt-5.4-mini"),
     reasoning_model=DeepSeek(id="deepseek-reasoner"),
     markdown=True,
 )
