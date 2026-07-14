@@ -42,38 +42,43 @@ _IGNORED_SUBTYPES = frozenset(
 )
 
 
-def _is_own_bot_event(event: dict, data: dict) -> bool:
+def _is_own_bot_event(event: dict, data: dict, own_bot_id: Optional[str] = None) -> bool:
     """Check if a bot-authored event was produced by this app itself.
 
-    Own identity comes from the event envelope — ``authorizations[].user_id``
-    is this app's bot user id and ``api_app_id`` is this app's id — so no extra
-    API call is needed.
+    Identity signals checked in order of reliability:
+    1. bot_id — only guaranteed field in bot_message events (via auth.test)
+    2. app_id — reliable when present, but not all bot messages include it
+    3. user_id — fallback; authorizations[0] can be human installer
 
-    IMPORTANT: Treat as own if EITHER signal matches. Slack's authorizations
-    array may surface a human installer (not the bot) in mixed-scope installs,
-    so user_id alone isn't reliable — but app_id always identifies the app.
-    Fails closed: if the sender can't be attributed, treat as own.
+    Fails closed only when no sender identity signals are present.
     """
     message = event.get("message") or {}
+    sender_bot_id = event.get("bot_id") or message.get("bot_id")
     sender_user_id = event.get("user") or message.get("user")
     sender_app_id = event.get("app_id") or message.get("app_id")
 
-    own_bot_user_id = (data.get("authorizations") or [{}])[0].get("user_id")
     own_app_id = data.get("api_app_id")
+    own_bot_user_id = (data.get("authorizations") or [{}])[0].get("user_id")
 
-    # Check app_id first — it's the most reliable signal
-    if own_app_id and sender_app_id and sender_app_id == own_app_id:
-        return True
-    # Fall back to user_id comparison
-    if own_bot_user_id and sender_user_id and sender_user_id == own_bot_user_id:
-        return True
-    # Unattributable bot event — fail closed (treat as own)
-    if not sender_user_id and not sender_app_id:
-        return True
-    return False
+    # bot_id is the only field guaranteed in all bot messages
+    if own_bot_id and sender_bot_id:
+        return sender_bot_id == own_bot_id
+
+    # app_id comparison — reliable when present
+    if own_app_id and sender_app_id:
+        return sender_app_id == own_app_id
+
+    # user_id fallback — less reliable but covers some edge cases
+    if own_bot_user_id and sender_user_id:
+        return sender_user_id == own_bot_user_id
+
+    # Fail closed only when sender has no identity at all
+    return not sender_bot_id and not sender_user_id and not sender_app_id
 
 
-def _should_ignore_event(event: dict, data: dict, respond_to_bot_messages: bool) -> bool:
+def _should_ignore_event(
+    event: dict, data: dict, respond_to_bot_messages: bool, own_bot_id: Optional[str] = None
+) -> bool:
     """Decide whether an event should be dropped before dispatch.
 
     Default (respond_to_bot_messages=False): every bot-authored event and every
@@ -96,7 +101,7 @@ def _should_ignore_event(event: dict, data: dict, respond_to_bot_messages: bool)
         return is_bot_authored or subtype in _IGNORED_SUBTYPES
 
     # With opt-in: drop only own bot events, let peer bots through
-    if is_bot_authored and _is_own_bot_event(event, data):
+    if is_bot_authored and _is_own_bot_event(event, data, own_bot_id):
         return True
     # bot_message subtype passes for peer bots; other lifecycle subtypes stay dropped
     if subtype in _IGNORED_SUBTYPES and not (is_bot_authored and subtype == "bot_message"):
@@ -154,6 +159,15 @@ def attach_routes(
     entity_id = getattr(entity, "id", None) or entity_name
 
     slack_tools = SlackTools(token=token, user_token=user_token, ssl=ssl, max_file_size=max_file_size)
+
+    # Fetch own bot_id once at startup for reliable self-event detection.
+    # bot_id is the only field guaranteed in all bot messages.
+    own_bot_id: Optional[str] = None
+    try:
+        own_bot_id = slack_tools.client.auth_test().get("bot_id")
+    except Exception:
+        pass
+
     bot_name_resolver = BotNameResolver()
     if entity is None:
         raise ValueError("attach_routes requires agent, team, or workflow")
@@ -231,7 +245,7 @@ def attach_routes(
             # Bot self-loop prevention: with respond_to_bot_messages=False (default),
             # all bot events are dropped. With =True, only this app's own messages
             # are dropped and peer bots' messages flow through to normal processing.
-            elif _should_ignore_event(event, data, respond_to_bot_messages):
+            elif _should_ignore_event(event, data, respond_to_bot_messages, own_bot_id):
                 pass
             elif streaming:
                 background_tasks.add_task(event_handler.handle_streaming, data)
