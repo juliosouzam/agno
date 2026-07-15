@@ -1,5 +1,6 @@
 import json
 from os import getenv
+from pathlib import Path
 from typing import Any, List, Optional
 
 from agno.tools import Toolkit
@@ -19,6 +20,8 @@ class TelegramTools(Toolkit):
     Args:
         chat_id: Default chat ID. Falls back to TELEGRAM_CHAT_ID env var.
         token: Bot token. Falls back to TELEGRAM_TOKEN env var.
+        output_directory: Directory for saving downloaded files. Only used when save_downloads=True.
+        save_downloads: Save downloaded files to disk instead of returning base64.
         enable_send_message: Enable send_message tool. Defaults to True.
         enable_send_photo: Enable send_photo tool. Defaults to False.
         enable_send_document: Enable send_document tool. Defaults to False.
@@ -39,6 +42,8 @@ class TelegramTools(Toolkit):
         self,
         chat_id: Optional[str] = None,
         token: Optional[str] = None,
+        output_directory: Optional[str] = None,
+        save_downloads: bool = False,
         enable_send_message: bool = True,
         enable_send_photo: bool = False,
         enable_send_document: bool = False,
@@ -61,6 +66,17 @@ class TelegramTools(Toolkit):
 
         self.chat_id = chat_id or getenv("TELEGRAM_CHAT_ID")
         self.bot = TeleBot(self.token)
+
+        # output_directory implies save_downloads=True
+        self.save_downloads = save_downloads or (output_directory is not None)
+        if self.save_downloads:
+            self.output_directory: Optional[Path] = (
+                Path(output_directory).resolve() if output_directory else Path.cwd().resolve()
+            )
+            self.output_directory.mkdir(parents=True, exist_ok=True)
+            log_debug(f"Downloaded files will be saved to: {self.output_directory}")
+        else:
+            self.output_directory = None
 
         tools: List[Any] = []
         if enable_send_message or all:
@@ -101,13 +117,10 @@ class TelegramTools(Toolkit):
         return self.chat_id
 
     def send_message(self, message: str) -> str:
-        """Send a text message to a Telegram chat.
+        """Send a text message to the chat.
 
         Args:
             message: The message text to send.
-
-        Returns:
-            JSON string with status and message_id.
         """
         log_debug(f"Sending telegram message: {message}")
         try:
@@ -117,14 +130,11 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_photo(self, photo: bytes, caption: Optional[str] = None) -> str:
-        """Send a photo to a Telegram chat.
+        """Send a photo to the chat.
 
         Args:
             photo: The photo as bytes.
-            caption: Optional caption for the photo.
-
-        Returns:
-            JSON string with status and message_id.
+            caption: Optional caption.
         """
         try:
             result = self.bot.send_photo(self._chat_id, photo, caption=caption)
@@ -133,15 +143,12 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_document(self, document: bytes, filename: str, caption: Optional[str] = None) -> str:
-        """Send a document to a Telegram chat.
+        """Send a document to the chat.
 
         Args:
             document: The document as bytes.
             filename: The filename for the document.
-            caption: Optional caption for the document.
-
-        Returns:
-            JSON string with status and message_id.
+            caption: Optional caption.
         """
         try:
             result = self.bot.send_document(self._chat_id, (filename, document), caption=caption)
@@ -150,14 +157,11 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_video(self, video: bytes, caption: Optional[str] = None) -> str:
-        """Send a video to a Telegram chat.
+        """Send a video to the chat.
 
         Args:
             video: The video as bytes.
-            caption: Optional caption for the video.
-
-        Returns:
-            JSON string with status and message_id.
+            caption: Optional caption.
         """
         try:
             result = self.bot.send_video(self._chat_id, video, caption=caption)
@@ -166,15 +170,12 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_audio(self, audio: bytes, caption: Optional[str] = None, title: Optional[str] = None) -> str:
-        """Send an audio file to a Telegram chat.
+        """Send an audio file to the chat.
 
         Args:
             audio: The audio as bytes.
-            caption: Optional caption for the audio.
+            caption: Optional caption.
             title: Optional title for the audio track.
-
-        Returns:
-            JSON string with status and message_id.
         """
         try:
             result = self.bot.send_audio(self._chat_id, audio, caption=caption, title=title)
@@ -183,14 +184,11 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_animation(self, animation: bytes, caption: Optional[str] = None) -> str:
-        """Send an animation (GIF) to a Telegram chat.
+        """Send an animation (GIF) to the chat.
 
         Args:
             animation: The animation as bytes.
-            caption: Optional caption for the animation.
-
-        Returns:
-            JSON string with status and message_id.
+            caption: Optional caption.
         """
         try:
             result = self.bot.send_animation(self._chat_id, animation, caption=caption)
@@ -199,13 +197,10 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def send_sticker(self, sticker: bytes) -> str:
-        """Send a sticker to a Telegram chat.
+        """Send a sticker to the chat.
 
         Args:
             sticker: The sticker as bytes.
-
-        Returns:
-            JSON string with status and message_id.
         """
         try:
             result = self.bot.send_sticker(self._chat_id, sticker)
@@ -214,29 +209,25 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def edit_message(self, text: str, message_id: int) -> str:
-        """Edit a previously sent message in a Telegram chat.
+        """Edit a previously sent message.
 
         Args:
             text: The new message text.
             message_id: The ID of the message to edit.
-
-        Returns:
-            JSON string with status and message_id.
         """
         try:
             result = self.bot.edit_message_text(text, chat_id=self._chat_id, message_id=message_id)
-            return json.dumps({"status": "success", "message_id": result.message_id})
+            # edit_message_text returns Message on success, bool on inline message
+            msg_id = result.message_id if hasattr(result, "message_id") else message_id
+            return json.dumps({"status": "success", "message_id": msg_id})
         except ApiTelegramException as e:
             return json.dumps({"status": "error", "message": str(e)})
 
     def delete_message(self, message_id: int) -> str:
-        """Delete a message from a Telegram chat.
+        """Delete a message from the chat.
 
         Args:
             message_id: The ID of the message to delete.
-
-        Returns:
-            JSON string with status and deleted flag.
         """
         try:
             self.bot.delete_message(self._chat_id, message_id)
@@ -250,9 +241,6 @@ class TelegramTools(Toolkit):
         Args:
             message_id: The ID of the message to react to.
             emoji: The emoji to react with.
-
-        Returns:
-            JSON string with status.
         """
         try:
             self.bot.set_message_reaction(
@@ -265,14 +253,11 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def pin_message(self, message_id: int, disable_notification: bool = False) -> str:
-        """Pin a message in a Telegram chat.
+        """Pin a message in the chat.
 
         Args:
             message_id: The ID of the message to pin.
             disable_notification: If True, no notification is sent to chat members.
-
-        Returns:
-            JSON string with status.
         """
         try:
             self.bot.pin_chat_message(self._chat_id, message_id, disable_notification=disable_notification)
@@ -281,11 +266,7 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def get_chat(self) -> str:
-        """Get information about the current chat.
-
-        Returns:
-            JSON string with chat details (id, type, title, description, etc.).
-        """
+        """Get information about the current chat (id, type, title, description)."""
         try:
             chat = self.bot.get_chat(self._chat_id)
             return json.dumps(
@@ -306,31 +287,34 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def get_file(self, file_id: str) -> str:
-        """Download a file by its file_id and return as base64.
-
-        Use this for standalone file operations when not using the AgentOS interface.
-        The interface automatically downloads incoming files, but this tool is useful
-        for batch processing, organizing files, or accessing files from message history.
+        """Download a file by its file_id. Returns path if save_downloads=True, else base64.
 
         Args:
             file_id: The file_id from a Telegram message (photo, document, etc.).
-
-        Returns:
-            JSON string with file metadata and base64-encoded content.
         """
         import base64
 
         try:
             file_info = self.bot.get_file(file_id)
+            if not file_info.file_path:
+                return json.dumps({"status": "error", "message": "File path not available"})
             file_content = self.bot.download_file(file_info.file_path)
-            return json.dumps(
-                {
-                    "status": "success",
-                    "file_id": file_info.file_id,
-                    "file_path": file_info.file_path,
-                    "file_size": file_info.file_size,
-                    "content_base64": base64.b64encode(file_content).decode("utf-8"),
-                }
-            )
+
+            result: dict[str, Any] = {
+                "status": "success",
+                "file_id": file_info.file_id,
+                "file_path": file_info.file_path,
+                "file_size": file_info.file_size,
+            }
+
+            if self.save_downloads and self.output_directory:
+                filename = Path(file_info.file_path).name
+                local_path = self.output_directory / filename
+                local_path.write_bytes(file_content)
+                result["local_path"] = str(local_path)
+            else:
+                result["content_base64"] = base64.b64encode(file_content).decode("utf-8")
+
+            return json.dumps(result)
         except ApiTelegramException as e:
             return json.dumps({"status": "error", "message": str(e)})

@@ -557,7 +557,7 @@ class TestGetChat:
 
 
 class TestGetFile:
-    def test_success(self, monkeypatch):
+    def test_success_base64(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
         from agno.tools.telegram import TelegramTools
 
@@ -577,6 +577,37 @@ class TestGetFile:
         assert parsed["file_id"] == "ABC123"
         assert parsed["file_path"] == "photos/file_0.jpg"
         assert "content_base64" in parsed
+        assert "local_path" not in parsed
+
+    def test_save_downloads_to_disk(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(
+            chat_id="12345", enable_get_file=True, save_downloads=True, output_directory=str(tmp_path)
+        )
+        mock_file = MagicMock()
+        mock_file.file_id = "ABC123"
+        mock_file.file_path = "photos/file_0.jpg"
+        mock_file.file_size = 12345
+        tools.bot.get_file = MagicMock(return_value=mock_file)
+        tools.bot.download_file = MagicMock(return_value=b"fake-image-bytes")
+
+        result = tools.get_file(file_id="ABC123")
+        parsed = json.loads(result)
+        assert parsed["status"] == "success"
+        assert "local_path" in parsed
+        assert "content_base64" not in parsed
+        assert (tmp_path / "file_0.jpg").exists()
+        assert (tmp_path / "file_0.jpg").read_bytes() == b"fake-image-bytes"
+
+    def test_output_directory_implies_save_downloads(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_get_file=True, output_directory=str(tmp_path))
+        assert tools.save_downloads is True
+        assert tools.output_directory == tmp_path.resolve()
 
     def test_api_error(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
