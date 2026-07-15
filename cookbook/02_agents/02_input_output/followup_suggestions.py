@@ -28,13 +28,13 @@ from agno.models.openai import OpenAIResponses
 # Create the Agent — just set followups=True
 # ---------------------------------------------------------------------------
 agent = Agent(
-    model=OpenAIResponses(id="gpt-5.4-mini"),
+    model=OpenAIResponses(id="gpt-5.6-luna"),
     instructions="You are a knowledgeable assistant. Answer questions thoroughly.",
     # Enable built-in followups
     followups=True,
     num_followups=3,
     # Optionally use a cheaper model for followups
-    # followup_model=OpenAIResponses(id="gpt-5.4-mini"),
+    # followup_model=OpenAIResponses(id="gpt-5.6-luna"),
     markdown=True,
 )
 

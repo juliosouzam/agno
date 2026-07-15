@@ -43,7 +43,7 @@ def get_user_details(dependencies: dict):
 # Create agent
 research_agent = Agent(
     id="user-agent",
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     db=db,
     tools=[get_user_details],
     instructions="You are a user agent that can get user details if the user asks for them.",

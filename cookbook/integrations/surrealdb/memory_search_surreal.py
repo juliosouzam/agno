@@ -23,7 +23,7 @@ db = SurrealDb(None, SURREALDB_URL, creds, SURREALDB_NAMESPACE, SURREALDB_DATABA
 # ---------------------------------------------------------------------------
 # Create Memory Manager
 # ---------------------------------------------------------------------------
-memory = MemoryManager(model=OpenAIChat(id="gpt-5.4-mini"), db=db)
+memory = MemoryManager(model=OpenAIChat(id="gpt-5.6-luna"), db=db)
 
 
 # ---------------------------------------------------------------------------

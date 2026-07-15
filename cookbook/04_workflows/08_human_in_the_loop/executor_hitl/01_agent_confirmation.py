@@ -43,7 +43,7 @@ def get_the_weather(city: str) -> str:
 # ---------------------------------------------------------------------------
 weather_agent = Agent(
     name="WeatherAgent",
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     tools=[get_the_weather],
     instructions="You provide weather information. Always use the get_the_weather tool.",
     db=db,

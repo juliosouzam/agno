@@ -54,7 +54,7 @@ openlit.init(tracer=tracer, disable_batch=True)
 # Create Agent
 # ---------------------------------------------------------------------------
 agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     tools=[WebSearchTools()],
     markdown=True,
     debug_mode=True,

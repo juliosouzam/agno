@@ -16,7 +16,7 @@ db = SqliteDb(
 
 # Add storage to the Agent
 agent = Agent(
-    model=LiteLLM(id="gpt-5.4-mini"),
+    model=LiteLLM(id="gpt-5.6-luna"),
     db=db,
     tools=[WebSearchTools()],
     add_history_to_context=True,

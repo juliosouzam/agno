@@ -12,16 +12,16 @@ from agno.models.openai import OpenAIChat
 # Create Agents
 # ---------------------------------------------------------------------------
 manual_cot_agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     reasoning_model=OpenAIChat(
-        id="gpt-5.4-mini",
+        id="gpt-5.6-luna",
         max_tokens=1200,
     ),
     markdown=True,
 )
 
 default_cot_agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini", max_tokens=1200),
+    model=OpenAIChat(id="gpt-5.6-luna", max_tokens=1200),
     reasoning=True,
     markdown=True,
 )

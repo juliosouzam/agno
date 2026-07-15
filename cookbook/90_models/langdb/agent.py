@@ -9,7 +9,7 @@ from agno.tools.yfinance import YFinanceTools
 # ---------------------------------------------------------------------------
 
 agent = Agent(
-    model=LangDB(id="gpt-5.4-mini"),
+    model=LangDB(id="gpt-5.6-luna"),
     tools=[YFinanceTools()],
     instructions=["Use tables where possible."],
     markdown=True,

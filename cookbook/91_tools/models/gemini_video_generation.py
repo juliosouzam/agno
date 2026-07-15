@@ -23,7 +23,7 @@ from agno.utils.media import save_base64_data
 
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     tools=[GeminiTools(vertexai=True)],  # Video Generation only works on VertexAI mode
     debug_mode=True,
 )

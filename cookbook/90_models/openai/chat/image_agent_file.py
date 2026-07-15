@@ -6,7 +6,7 @@ from agno.media import Image
 from agno.models.openai import OpenAIChat
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     markdown=True,
 )
 

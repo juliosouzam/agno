@@ -35,12 +35,12 @@ def instantiate_agent():
     return AssistantAgent(
         name="assistant",
         model_client=OpenAIChatCompletionClient(
-            model="gpt-5.4-mini",
+            model="gpt-5.6-luna",
             model_info={
                 "vision": False,
                 "function_calling": True,
                 "json_output": False,
-                "family": "gpt-5.4-mini",
+                "family": "gpt-5.6-luna",
                 "structured_output": True,
             },
         ),

@@ -38,7 +38,7 @@ db = PostgresDb(
 greeter = Agent(
     id="greeter",
     name="Greeter Agent",
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     instructions=[
         "You are a friendly greeter. Say hello and include the current time."
     ],

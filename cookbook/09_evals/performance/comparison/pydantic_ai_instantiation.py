@@ -16,7 +16,7 @@ from pydantic_ai import Agent
 # ---------------------------------------------------------------------------
 def instantiate_agent():
     agent = Agent(
-        "openai:gpt-5.4-mini", system_prompt="Be concise, reply with one sentence."
+        "openai:gpt-5.6-luna", system_prompt="Be concise, reply with one sentence."
     )
 
     # Tool definition remains scoped to agent construction by design.

@@ -12,7 +12,7 @@ from agno.tools.desi_vocal import DesiVocalTools
 
 
 audio_agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     tools=[DesiVocalTools()],
     description="You are an AI agent that can generate audio using the DesiVocal API.",
     instructions=[

@@ -25,7 +25,7 @@ def logger_hook(function_name: str, function_call: Callable, arguments: Dict[str
 
 
 agent = Agent(
-    model=OpenAIChat(id="gpt-5.4-mini"),
+    model=OpenAIChat(id="gpt-5.6-luna"),
     tools=[WebSearchTools()],
     tool_hooks=[logger_hook],
 )
