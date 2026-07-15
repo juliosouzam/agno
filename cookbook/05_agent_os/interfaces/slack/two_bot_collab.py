@@ -34,7 +34,6 @@ from agno.os.app import AgentOS
 from agno.os.interfaces.slack import Slack
 from agno.tools.duckduckgo import DuckDuckGoTools
 
-
 # Mustafa's Context bot user ID for @mentions
 SPECIALIST_USER_ID = "U0AS83RUHS4"  # mustafa_s_context
 
@@ -103,7 +102,9 @@ else:
     print("    https://<ngrok>/slack/specialist\n")
 
 agent_os = AgentOS(
-    agents=[orchestrator, specialist] if (specialist_token and specialist_secret) else [orchestrator],
+    agents=[orchestrator, specialist]
+    if (specialist_token and specialist_secret)
+    else [orchestrator],
     interfaces=interfaces,
 )
 app = agent_os.get_app()
@@ -112,7 +113,9 @@ app = agent_os.get_app()
 if __name__ == "__main__":
     print("\n=== Two-Bot Collaboration Demo ===")
     print("Orchestrator: Slack Agent (SLACK_TOKEN)")
-    specialist_status = "ENABLED" if (specialist_token and specialist_secret) else "DISABLED"
+    specialist_status = (
+        "ENABLED" if (specialist_token and specialist_secret) else "DISABLED"
+    )
     print(f"Specialist: Mustafa's Context (CONTEXT_BOT_TOKEN) - {specialist_status}")
     print("\nWebhook paths:")
     print("  Slack Agent: https://<ngrok>/slack/orchestrator")

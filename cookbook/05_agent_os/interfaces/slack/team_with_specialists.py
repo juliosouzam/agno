@@ -37,7 +37,6 @@ from agno.os.interfaces.slack import Slack
 from agno.team import Team
 from agno.tools.duckduckgo import DuckDuckGoTools
 
-
 # Specialist agents
 researcher = Agent(
     name="Research Agent",

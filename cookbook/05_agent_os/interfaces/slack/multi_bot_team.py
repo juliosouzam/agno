@@ -43,7 +43,6 @@ from agno.os.app import AgentOS
 from agno.os.interfaces.slack import Slack
 from agno.tools.duckduckgo import DuckDuckGoTools
 
-
 # Orchestrator: Routes requests to appropriate specialists
 orchestrator = Agent(
     name="Orchestrator",
