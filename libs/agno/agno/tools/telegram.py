@@ -1,5 +1,6 @@
 import json
 from os import getenv
+from pathlib import Path
 from typing import Any, List, Optional
 
 from agno.tools import Toolkit
@@ -18,6 +19,8 @@ class TelegramTools(Toolkit):
     Args:
         chat_id: Default chat ID. Falls back to TELEGRAM_CHAT_ID env var.
         token: Bot token. Falls back to TELEGRAM_TOKEN env var.
+        output_directory: Directory for saving downloaded files. Only used when save_downloads=True.
+        save_downloads: Whether to save downloaded files to disk. Defaults to False (base64 only).
         enable_send_message: Enable send_message tool. Defaults to True.
         enable_send_photo: Enable send_photo tool. Defaults to False.
         enable_send_document: Enable send_document tool. Defaults to False.
@@ -38,6 +41,8 @@ class TelegramTools(Toolkit):
         self,
         chat_id: Optional[str] = None,
         token: Optional[str] = None,
+        output_directory: Optional[str] = None,
+        save_downloads: bool = False,
         enable_send_message: bool = True,
         enable_send_photo: bool = False,
         enable_send_document: bool = False,
@@ -60,6 +65,17 @@ class TelegramTools(Toolkit):
 
         self.chat_id = chat_id or getenv("TELEGRAM_CHAT_ID")
         self.bot = TeleBot(self.token)
+
+        # output_directory implies save_downloads=True for backward compatibility
+        self.save_downloads = save_downloads or (output_directory is not None)
+        if self.save_downloads:
+            self.output_directory: Optional[Path] = (
+                Path(output_directory).resolve() if output_directory else Path.cwd().resolve()
+            )
+            self.output_directory.mkdir(parents=True, exist_ok=True)
+            log_debug(f"Downloaded files will be saved to: {self.output_directory}")
+        else:
+            self.output_directory = None
 
         tools: List[Any] = []
         if enable_send_message or all:
@@ -285,28 +301,40 @@ class TelegramTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e)})
 
     def get_file(self, file_id: str) -> str:
-        """Download a file sent to the bot and return its content as base64.
+        """Download a file sent to the bot.
+
+        When save_downloads=True, saves to output_directory and returns the local path.
+        Otherwise returns base64-encoded content.
 
         Args:
             file_id: The file_id from a received message (photo, document, etc.).
 
         Returns:
-            JSON string with file metadata and base64-encoded content.
+            JSON string with file metadata. Includes 'local_path' when saved to disk,
+            or 'content_base64' when returning inline.
         """
         import base64
 
         try:
             file_info = self.bot.get_file(file_id)
             file_content = self.bot.download_file(file_info.file_path)
-            return json.dumps(
-                {
-                    "status": "success",
-                    "file_id": file_info.file_id,
-                    "file_path": file_info.file_path,
-                    "file_size": file_info.file_size,
-                    "content_base64": base64.b64encode(file_content).decode("utf-8"),
-                }
-            )
+
+            result = {
+                "status": "success",
+                "file_id": file_info.file_id,
+                "file_path": file_info.file_path,
+                "file_size": file_info.file_size,
+            }
+
+            if self.save_downloads and self.output_directory:
+                filename = Path(file_info.file_path).name
+                local_path = self.output_directory / filename
+                local_path.write_bytes(file_content)
+                result["local_path"] = str(local_path)
+            else:
+                result["content_base64"] = base64.b64encode(file_content).decode("utf-8")
+
+            return json.dumps(result)
         except ApiTelegramException as e:
             return json.dumps({"status": "error", "message": str(e)})
 
