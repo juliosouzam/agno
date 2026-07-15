@@ -41,6 +41,8 @@ class EventContext:
     user: str
     message_text: str
     session_id: str
+    # Bot sender ID (B...) when message is from a bot; empty for human messages
+    bot_id: str = ""
     team_id: Optional[str] = None
     resolved_user_id: str = ""
     display_name: Optional[str] = None
@@ -83,17 +85,23 @@ class SlackEventHandler:
         session_id = f"{self.entity_id}:{raw_ctx['thread_id']}"
         team_id = data.get("team_id") or event.get("team")
 
-        resolved_user_id = raw_ctx["user"]
+        # Sender identity: human user ID or bot ID (one will be present)
+        sender_user = raw_ctx["user"]
+        sender_bot_id = raw_ctx["bot_id"]
+        sender_id = sender_user or sender_bot_id
+
+        resolved_user_id = sender_id
         display_name = None
-        if self.resolve_user_identity:
-            resolved_user_id, display_name = await resolve_slack_user(client, raw_ctx["user"])
+        if self.resolve_user_identity and sender_id:
+            resolved_user_id, display_name = await resolve_slack_user(client, sender_id)
 
         channel_name = await resolve_channel_name(client, raw_ctx["channel_id"])
 
         return EventContext(
             channel_id=raw_ctx["channel_id"],
             thread_id=raw_ctx["thread_id"],
-            user=raw_ctx["user"],
+            user=sender_user,
+            bot_id=sender_bot_id,
             message_text=message_text,
             session_id=session_id,
             team_id=team_id,

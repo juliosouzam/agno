@@ -69,9 +69,10 @@ def extract_event_context(event: dict) -> Dict[str, Any]:
     return {
         "message_text": event.get("text", ""),
         "channel_id": event.get("channel", ""),
-        # Bot-authored events may lack "user" (e.g. webhook posts); fall back to
-        # bot_id so downstream identity handling always gets a stable, non-empty id
-        "user": event.get("user") or event.get("bot_id") or "",
+        # Human sender ID (U.../W...) — empty for webhook/legacy bot messages
+        "user": event.get("user") or "",
+        # Bot sender ID (B...) — present on all bot-authored messages
+        "bot_id": event.get("bot_id") or "",
         # Prefer existing thread; fall back to message ts for new conversations
         "thread_id": event.get("thread_ts") or event.get("ts", ""),
         # User-scoped token for assistant.search.context workspace search

@@ -387,18 +387,29 @@ class TestStripBotMention:
         assert result == "Scout"
 
 
-class TestExtractEventContextBotFallback:
-    def test_user_field_preferred(self):
+class TestExtractEventContextSenderIdentity:
+    def test_both_user_and_bot_id_preserved(self):
+        # Bot-user messages carry both; both should be preserved
         ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "bot_id": "B456", "ts": "111"})
         assert ctx["user"] == "U123"
+        assert ctx["bot_id"] == "B456"
 
-    def test_bot_id_fallback_when_no_user(self):
+    def test_bot_only_message(self):
+        # Webhook/legacy bot messages have only bot_id, no user
         ctx = extract_event_context({"text": "hi", "channel": "C1", "bot_id": "B456", "ts": "111"})
-        assert ctx["user"] == "B456"
+        assert ctx["user"] == ""
+        assert ctx["bot_id"] == "B456"
 
-    def test_empty_string_when_neither(self):
+    def test_human_message(self):
+        # Human messages have user, no bot_id
+        ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "ts": "111"})
+        assert ctx["user"] == "U123"
+        assert ctx["bot_id"] == ""
+
+    def test_empty_when_neither(self):
         ctx = extract_event_context({"text": "hi", "channel": "C1", "ts": "111"})
         assert ctx["user"] == ""
+        assert ctx["bot_id"] == ""
 
 
 class TestResolveSlackUserBot:
