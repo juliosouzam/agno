@@ -7,6 +7,7 @@ from agno.os.interfaces.slack.helpers import (
     download_event_files_async,
     extract_event_context,
     member_name,
+    resolve_session_id,
     resolve_slack_user,
     send_slack_message_async,
     should_respond,
@@ -389,19 +390,16 @@ class TestStripBotMention:
 
 class TestExtractEventContextSenderIdentity:
     def test_both_user_and_bot_id_preserved(self):
-        # Bot-user messages carry both; both should be preserved
         ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "bot_id": "B456", "ts": "111"})
         assert ctx["user"] == "U123"
         assert ctx["bot_id"] == "B456"
 
     def test_bot_only_message(self):
-        # Webhook/legacy bot messages have only bot_id, no user
         ctx = extract_event_context({"text": "hi", "channel": "C1", "bot_id": "B456", "ts": "111"})
         assert ctx["user"] == ""
         assert ctx["bot_id"] == "B456"
 
     def test_human_message(self):
-        # Human messages have user, no bot_id
         ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "ts": "111"})
         assert ctx["user"] == "U123"
         assert ctx["bot_id"] == ""
@@ -446,3 +444,51 @@ class TestResolveSlackUserBot:
         mock_client.users_info.assert_awaited_once_with(user="U123456")
         assert resolved_id == "user@example.com"
         assert display_name == "Test User"
+
+
+# -- resolve_session_id --
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_returns_legacy_key_when_session_exists():
+    entity = Mock()
+    entity.aget_session = AsyncMock(return_value={"session_id": "agent-1:111.222"})
+
+    key = await resolve_session_id(entity, "agent-1", "C123", "111.222")
+    assert key == "agent-1:111.222"
+    entity.aget_session.assert_awaited_once_with(session_id="agent-1:111.222")
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_returns_new_key_when_no_legacy_session():
+    entity = Mock()
+    entity.aget_session = AsyncMock(return_value=None)
+
+    key = await resolve_session_id(entity, "agent-1", "C123", "111.222")
+    assert key == "agent-1:C123:111.222"
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_returns_new_key_when_aget_session_raises():
+    entity = Mock()
+    entity.aget_session = AsyncMock(side_effect=Exception("DB error"))
+
+    key = await resolve_session_id(entity, "agent-1", "C123", "111.222")
+    assert key == "agent-1:C123:111.222"
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_returns_new_key_for_remote_entities():
+    entity = Mock(spec=[])
+
+    key = await resolve_session_id(entity, "agent-1", "C123", "111.222")
+    assert key == "agent-1:C123:111.222"
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_returns_new_key_when_no_db_access():
+    entity = Mock(spec=[])
+    entity.db = None
+
+    key = await resolve_session_id(entity, "agent-1", "C123", "111.222")
+    assert key == "agent-1:C123:111.222"
