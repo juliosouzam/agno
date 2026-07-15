@@ -152,6 +152,9 @@ class TestTelegramToolsInit:
             "edit_message",
             "delete_message",
             "react_with_emoji",
+            "pin_message",
+            "get_chat",
+            "get_file",
         )
         for name in expected:
             assert name in tools.functions
@@ -475,3 +478,113 @@ class TestReactWithEmoji:
         parsed = json.loads(result)
         assert parsed["status"] == "error"
         assert "Bad Request" in parsed["message"]
+
+
+class TestPinMessage:
+    def test_success(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_pin_message=True)
+        tools.bot.pin_chat_message = MagicMock(return_value=True)
+
+        result = tools.pin_message(message_id=42)
+        tools.bot.pin_chat_message.assert_called_once_with("12345", 42, disable_notification=False)
+        parsed = json.loads(result)
+        assert parsed["status"] == "success"
+        assert parsed["pinned"] is True
+
+    def test_silent(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_pin_message=True)
+        tools.bot.pin_chat_message = MagicMock(return_value=True)
+
+        result = tools.pin_message(message_id=42, disable_notification=True)
+        tools.bot.pin_chat_message.assert_called_once_with("12345", 42, disable_notification=True)
+        parsed = json.loads(result)
+        assert parsed["status"] == "success"
+
+    def test_api_error(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_pin_message=True)
+        tools.bot.pin_chat_message = MagicMock(
+            side_effect=_FakeApiTelegramException("pinChatMessage", "Bad Request", 400)
+        )
+
+        result = tools.pin_message(message_id=42)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+
+
+class TestGetChat:
+    def test_success(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_get_chat=True)
+        mock_chat = MagicMock()
+        mock_chat.id = 12345
+        mock_chat.type = "group"
+        mock_chat.title = "Test Group"
+        mock_chat.username = None
+        mock_chat.first_name = None
+        mock_chat.last_name = None
+        mock_chat.description = "A test group"
+        tools.bot.get_chat = MagicMock(return_value=mock_chat)
+
+        result = tools.get_chat()
+        tools.bot.get_chat.assert_called_once_with("12345")
+        parsed = json.loads(result)
+        assert parsed["status"] == "success"
+        assert parsed["chat"]["id"] == 12345
+        assert parsed["chat"]["type"] == "group"
+        assert parsed["chat"]["title"] == "Test Group"
+
+    def test_api_error(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_get_chat=True)
+        tools.bot.get_chat = MagicMock(side_effect=_FakeApiTelegramException("getChat", "Chat not found", 400))
+
+        result = tools.get_chat()
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+
+
+class TestGetFile:
+    def test_success(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_get_file=True)
+        mock_file = MagicMock()
+        mock_file.file_id = "ABC123"
+        mock_file.file_path = "photos/file_0.jpg"
+        mock_file.file_size = 12345
+        tools.bot.get_file = MagicMock(return_value=mock_file)
+        tools.bot.download_file = MagicMock(return_value=b"fake-image-bytes")
+
+        result = tools.get_file(file_id="ABC123")
+        tools.bot.get_file.assert_called_once_with("ABC123")
+        tools.bot.download_file.assert_called_once_with("photos/file_0.jpg")
+        parsed = json.loads(result)
+        assert parsed["status"] == "success"
+        assert parsed["file_id"] == "ABC123"
+        assert parsed["file_path"] == "photos/file_0.jpg"
+        assert "content_base64" in parsed
+
+    def test_api_error(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
+        from agno.tools.telegram import TelegramTools
+
+        tools = TelegramTools(chat_id="12345", enable_get_file=True)
+        tools.bot.get_file = MagicMock(side_effect=_FakeApiTelegramException("getFile", "File not found", 400))
+
+        result = tools.get_file(file_id="invalid")
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"

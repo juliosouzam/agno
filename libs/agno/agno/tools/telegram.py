@@ -29,6 +29,9 @@ class TelegramTools(Toolkit):
         enable_edit_message: Enable edit_message tool. Defaults to False.
         enable_delete_message: Enable delete_message tool. Defaults to False.
         enable_react_with_emoji: Enable react_with_emoji tool. Defaults to False.
+        enable_pin_message: Enable pin_message tool. Defaults to False.
+        enable_get_chat: Enable get_chat tool. Defaults to False.
+        enable_get_file: Enable get_file tool. Defaults to False.
         all: Enable all tools. Overrides individual flags when True.
     """
 
@@ -46,6 +49,9 @@ class TelegramTools(Toolkit):
         enable_edit_message: bool = False,
         enable_delete_message: bool = False,
         enable_react_with_emoji: bool = False,
+        enable_pin_message: bool = False,
+        enable_get_chat: bool = False,
+        enable_get_file: bool = False,
         all: bool = False,
         **kwargs: Any,
     ):
@@ -77,6 +83,12 @@ class TelegramTools(Toolkit):
             tools.append(self.delete_message)
         if enable_react_with_emoji or all:
             tools.append(self.react_with_emoji)
+        if enable_pin_message or all:
+            tools.append(self.pin_message)
+        if enable_get_chat or all:
+            tools.append(self.get_chat)
+        if enable_get_file or all:
+            tools.append(self.get_file)
 
         super().__init__(name="telegram", tools=tools, **kwargs)
 
@@ -249,5 +261,76 @@ class TelegramTools(Toolkit):
                 reaction=[ReactionTypeEmoji(emoji=emoji)],
             )
             return json.dumps({"status": "success", "message_id": message_id, "emoji": emoji})
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def pin_message(self, message_id: int, disable_notification: bool = False) -> str:
+        """Pin a message in a Telegram chat.
+
+        Args:
+            message_id: The ID of the message to pin.
+            disable_notification: If True, no notification is sent to chat members.
+
+        Returns:
+            JSON string with status.
+        """
+        try:
+            self.bot.pin_chat_message(self._chat_id, message_id, disable_notification=disable_notification)
+            return json.dumps({"status": "success", "pinned": True})
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def get_chat(self) -> str:
+        """Get information about the current chat.
+
+        Returns:
+            JSON string with chat details (id, type, title, description, etc.).
+        """
+        try:
+            chat = self.bot.get_chat(self._chat_id)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "chat": {
+                        "id": chat.id,
+                        "type": chat.type,
+                        "title": getattr(chat, "title", None),
+                        "username": getattr(chat, "username", None),
+                        "first_name": getattr(chat, "first_name", None),
+                        "last_name": getattr(chat, "last_name", None),
+                        "description": getattr(chat, "description", None),
+                    },
+                }
+            )
+        except ApiTelegramException as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def get_file(self, file_id: str) -> str:
+        """Download a file by its file_id and return as base64.
+
+        Use this for standalone file operations when not using the AgentOS interface.
+        The interface automatically downloads incoming files, but this tool is useful
+        for batch processing, organizing files, or accessing files from message history.
+
+        Args:
+            file_id: The file_id from a Telegram message (photo, document, etc.).
+
+        Returns:
+            JSON string with file metadata and base64-encoded content.
+        """
+        import base64
+
+        try:
+            file_info = self.bot.get_file(file_id)
+            file_content = self.bot.download_file(file_info.file_path)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "file_id": file_info.file_id,
+                    "file_path": file_info.file_path,
+                    "file_size": file_info.file_size,
+                    "content_base64": base64.b64encode(file_content).decode("utf-8"),
+                }
+            )
         except ApiTelegramException as e:
             return json.dumps({"status": "error", "message": str(e)})
