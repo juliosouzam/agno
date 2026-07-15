@@ -527,18 +527,19 @@ class TestGetChat:
 
         tools = TelegramTools(chat_id="12345", enable_get_chat=True)
         mock_chat = MagicMock()
-        mock_chat.__dict__ = {
-            "id": 12345,
-            "type": "group",
-            "title": "Test Group",
-            "username": None,
-            "description": "A test group",
-        }
+        mock_chat.id = 12345
+        mock_chat.type = "group"
+        mock_chat.title = "Test Group"
+        mock_chat.username = None
+        mock_chat.first_name = None
+        mock_chat.last_name = None
+        mock_chat.description = "A test group"
         tools.bot.get_chat = MagicMock(return_value=mock_chat)
 
         result = tools.get_chat()
         tools.bot.get_chat.assert_called_once_with("12345")
         parsed = json.loads(result)
+        assert parsed["status"] == "success"
         assert parsed["id"] == 12345
         assert parsed["type"] == "group"
         assert parsed["title"] == "Test Group"
@@ -552,7 +553,7 @@ class TestGetChat:
 
         result = tools.get_chat()
         parsed = json.loads(result)
-        assert "error" in parsed
+        assert parsed["status"] == "error"
 
 
 class TestGetFile:
@@ -562,8 +563,9 @@ class TestGetFile:
 
         tools = TelegramTools(chat_id="12345", enable_get_file=True)
         mock_file = MagicMock()
+        mock_file.file_id = "ABC123"
         mock_file.file_path = "photos/file_0.jpg"
-        mock_file.__dict__ = {"file_id": "ABC123", "file_path": "photos/file_0.jpg", "file_size": 12345}
+        mock_file.file_size = 12345
         tools.bot.get_file = MagicMock(return_value=mock_file)
         tools.bot.download_file = MagicMock(return_value=b"fake-image-bytes")
 
@@ -571,6 +573,7 @@ class TestGetFile:
         tools.bot.get_file.assert_called_once_with("ABC123")
         tools.bot.download_file.assert_called_once_with("photos/file_0.jpg")
         parsed = json.loads(result)
+        assert parsed["status"] == "success"
         assert parsed["file_id"] == "ABC123"
         assert parsed["file_path"] == "photos/file_0.jpg"
         assert "content_base64" in parsed
@@ -584,13 +587,15 @@ class TestGetFile:
             chat_id="12345", enable_get_file=True, save_downloads=True, output_directory=str(tmp_path)
         )
         mock_file = MagicMock()
+        mock_file.file_id = "ABC123"
         mock_file.file_path = "photos/file_0.jpg"
-        mock_file.__dict__ = {"file_id": "ABC123", "file_path": "photos/file_0.jpg", "file_size": 12345}
+        mock_file.file_size = 12345
         tools.bot.get_file = MagicMock(return_value=mock_file)
         tools.bot.download_file = MagicMock(return_value=b"fake-image-bytes")
 
         result = tools.get_file(file_id="ABC123")
         parsed = json.loads(result)
+        assert parsed["status"] == "success"
         assert "local_path" in parsed
         assert "content_base64" not in parsed
         assert (tmp_path / "file_0.jpg").exists()
@@ -613,4 +618,4 @@ class TestGetFile:
 
         result = tools.get_file(file_id="invalid")
         parsed = json.loads(result)
-        assert "error" in parsed
+        assert parsed["status"] == "error"

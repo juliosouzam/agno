@@ -269,9 +269,20 @@ class TelegramTools(Toolkit):
         """Get information about the current chat."""
         try:
             chat = self.bot.get_chat(self._chat_id)
-            return json.dumps(chat.__dict__)
+            return json.dumps(
+                {
+                    "status": "success",
+                    "id": chat.id,
+                    "type": chat.type,
+                    "title": getattr(chat, "title", None),
+                    "username": getattr(chat, "username", None),
+                    "first_name": getattr(chat, "first_name", None),
+                    "last_name": getattr(chat, "last_name", None),
+                    "description": getattr(chat, "description", None),
+                }
+            )
         except ApiTelegramException as e:
-            return json.dumps({"error": str(e)})
+            return json.dumps({"status": "error", "message": str(e)})
 
     def get_file(self, file_id: str) -> str:
         """Download a file by its file_id. Returns path if save_downloads=True, else base64.
@@ -284,10 +295,15 @@ class TelegramTools(Toolkit):
         try:
             file_info = self.bot.get_file(file_id)
             if not file_info.file_path:
-                return json.dumps({"error": "File path not available"})
+                return json.dumps({"status": "error", "message": "File path not available"})
             file_content = self.bot.download_file(file_info.file_path)
 
-            result = dict(file_info.__dict__)
+            result: dict[str, Any] = {
+                "status": "success",
+                "file_id": file_info.file_id,
+                "file_path": file_info.file_path,
+                "file_size": file_info.file_size,
+            }
             if self.save_downloads and self.output_directory:
                 filename = Path(file_info.file_path).name
                 local_path = self.output_directory / filename
@@ -298,4 +314,4 @@ class TelegramTools(Toolkit):
 
             return json.dumps(result)
         except ApiTelegramException as e:
-            return json.dumps({"error": str(e)})
+            return json.dumps({"status": "error", "message": str(e)})
