@@ -223,7 +223,7 @@ class TestSendMessage:
         result = tools.send_message("Hello")
         tools.bot.send_message.assert_called_once_with("12345", "Hello")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 101
 
     def test_api_error(self, monkeypatch):
@@ -235,8 +235,8 @@ class TestSendMessage:
 
         result = tools.send_message("Hello")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestSendPhoto:
@@ -252,7 +252,7 @@ class TestSendPhoto:
         result = tools.send_photo(b"image-bytes", caption="A photo")
         tools.bot.send_photo.assert_called_once_with("12345", b"image-bytes", caption="A photo")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 103
 
 
@@ -269,7 +269,7 @@ class TestSendDocument:
         result = tools.send_document(b"doc-bytes", "report.pdf")
         tools.bot.send_document.assert_called_once_with("12345", ("report.pdf", b"doc-bytes"), caption=None)
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 105
 
 
@@ -286,7 +286,7 @@ class TestSendVideo:
         result = tools.send_video(b"video-bytes", caption="A video")
         tools.bot.send_video.assert_called_once_with("12345", b"video-bytes", caption="A video")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 107
 
     def test_api_error(self, monkeypatch):
@@ -298,8 +298,8 @@ class TestSendVideo:
 
         result = tools.send_video(b"video-bytes")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestSendAudio:
@@ -315,7 +315,7 @@ class TestSendAudio:
         result = tools.send_audio(b"audio-bytes", caption="A song", title="Song Title")
         tools.bot.send_audio.assert_called_once_with("12345", b"audio-bytes", caption="A song", title="Song Title")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 109
 
     def test_api_error(self, monkeypatch):
@@ -327,8 +327,8 @@ class TestSendAudio:
 
         result = tools.send_audio(b"audio-bytes")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestSendAnimation:
@@ -344,7 +344,7 @@ class TestSendAnimation:
         result = tools.send_animation(b"gif-bytes", caption="A GIF")
         tools.bot.send_animation.assert_called_once_with("12345", b"gif-bytes", caption="A GIF")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 111
 
     def test_api_error(self, monkeypatch):
@@ -356,8 +356,8 @@ class TestSendAnimation:
 
         result = tools.send_animation(b"gif-bytes")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestSendSticker:
@@ -373,7 +373,7 @@ class TestSendSticker:
         result = tools.send_sticker(b"sticker-bytes")
         tools.bot.send_sticker.assert_called_once_with("12345", b"sticker-bytes")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 113
 
     def test_api_error(self, monkeypatch):
@@ -385,8 +385,8 @@ class TestSendSticker:
 
         result = tools.send_sticker(b"sticker-bytes")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestEditMessage:
@@ -402,7 +402,7 @@ class TestEditMessage:
         result = tools.edit_message("Updated text", message_id=42)
         tools.bot.edit_message_text.assert_called_once_with("Updated text", chat_id="12345", message_id=42)
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 42
 
     def test_api_error(self, monkeypatch):
@@ -416,8 +416,8 @@ class TestEditMessage:
 
         result = tools.edit_message("Updated text", message_id=42)
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestDeleteMessage:
@@ -431,7 +431,7 @@ class TestDeleteMessage:
         result = tools.delete_message(message_id=42)
         tools.bot.delete_message.assert_called_once_with("12345", 42)
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["deleted"] is True
 
     def test_api_error(self, monkeypatch):
@@ -443,8 +443,8 @@ class TestDeleteMessage:
 
         result = tools.delete_message(message_id=42)
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestReactWithEmoji:
@@ -461,7 +461,7 @@ class TestReactWithEmoji:
         assert call_kwargs.kwargs["chat_id"] == "12345"
         assert call_kwargs.kwargs["message_id"] == 42
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["message_id"] == 42
         assert parsed["emoji"] == "👍"
 
@@ -476,8 +476,8 @@ class TestReactWithEmoji:
 
         result = tools.react_with_emoji(message_id=42, emoji="👍")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
-        assert "Bad Request" in parsed["message"]
+        assert "error" in parsed
+        assert "Bad Request" in parsed["error"]
 
 
 class TestPinMessage:
@@ -491,7 +491,7 @@ class TestPinMessage:
         result = tools.pin_message(message_id=42)
         tools.bot.pin_chat_message.assert_called_once_with("12345", 42, disable_notification=False)
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["pinned"] is True
 
     def test_silent(self, monkeypatch):
@@ -504,7 +504,7 @@ class TestPinMessage:
         result = tools.pin_message(message_id=42, disable_notification=True)
         tools.bot.pin_chat_message.assert_called_once_with("12345", 42, disable_notification=True)
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
 
     def test_api_error(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN", "fake-token")
@@ -517,7 +517,7 @@ class TestPinMessage:
 
         result = tools.pin_message(message_id=42)
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
+        assert "error" in parsed
 
 
 class TestGetChat:
@@ -539,7 +539,7 @@ class TestGetChat:
         result = tools.get_chat()
         tools.bot.get_chat.assert_called_once_with("12345")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["id"] == 12345
         assert parsed["type"] == "group"
         assert parsed["title"] == "Test Group"
@@ -553,7 +553,7 @@ class TestGetChat:
 
         result = tools.get_chat()
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
+        assert "error" in parsed
 
 
 class TestGetFile:
@@ -573,7 +573,7 @@ class TestGetFile:
         tools.bot.get_file.assert_called_once_with("ABC123")
         tools.bot.download_file.assert_called_once_with("photos/file_0.jpg")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert parsed["file_id"] == "ABC123"
         assert parsed["file_path"] == "photos/file_0.jpg"
         assert "content_base64" in parsed
@@ -595,7 +595,7 @@ class TestGetFile:
 
         result = tools.get_file(file_id="ABC123")
         parsed = json.loads(result)
-        assert parsed["status"] == "success"
+        assert "error" not in parsed
         assert "local_path" in parsed
         assert "content_base64" not in parsed
         assert (tmp_path / "file_0.jpg").exists()
@@ -618,4 +618,4 @@ class TestGetFile:
 
         result = tools.get_file(file_id="invalid")
         parsed = json.loads(result)
-        assert parsed["status"] == "error"
+        assert "error" in parsed
