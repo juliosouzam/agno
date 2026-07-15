@@ -115,18 +115,7 @@ def strip_bot_mention(text: str, bot_user_id: Optional[str], bot_name: Optional[
 
 
 async def resolve_slack_user(async_client: Any, slack_user_id: str) -> Tuple[str, Optional[str]]:
-    """Resolve a Slack user ID to (canonical_user_id, display_name).
-
-    Returns the user's email as canonical_user_id if available, otherwise
-    falls back to the raw Slack user ID. Display name is best-effort.
-
-    Bot senders resolve fail-closed to a stable identifier: a bot USER id
-    ("U...") goes through users_info like any user (bots have no email, so
-    the id stays canonical and the bot's name becomes the display name); a
-    raw bot id ("B...", e.g. a webhook message with no "user") goes through
-    bots_info. Never raises — any failure returns the raw id.
-    """
-    # Slack ids are typed by prefix: users are "U"/"W", bots are "B"
+    # Bot IDs (B...) use bots.info; user IDs (U.../W...) use users.info
     if slack_user_id.startswith("B"):
         try:
             resp = await async_client.bots_info(bot=slack_user_id)

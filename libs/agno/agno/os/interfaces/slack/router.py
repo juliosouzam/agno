@@ -43,15 +43,8 @@ _IGNORED_SUBTYPES = frozenset(
 
 
 def _is_own_bot_event(event: dict, data: dict, own_bot_id: Optional[str] = None) -> bool:
-    """Check if a bot-authored event was produced by this app itself.
-
-    Identity signals checked in order of reliability:
-    1. bot_id — only guaranteed field in bot_message events (via auth.test)
-    2. app_id — reliable when present, but not all bot messages include it
-    3. user_id — fallback; authorizations[0] can be human installer
-
-    Fails closed only when no sender identity signals are present.
-    """
+    # Check order matters: bot_id (guaranteed) > app_id (reliable) > user_id (fallback).
+    # user_id last because authorizations[0] can be human installer in mixed-scope installs.
     message = event.get("message") or {}
     sender_bot_id = event.get("bot_id") or message.get("bot_id")
     sender_user_id = event.get("user") or message.get("user")
@@ -60,47 +53,27 @@ def _is_own_bot_event(event: dict, data: dict, own_bot_id: Optional[str] = None)
     own_app_id = data.get("api_app_id")
     own_bot_user_id = (data.get("authorizations") or [{}])[0].get("user_id")
 
-    # bot_id is the only field guaranteed in all bot messages
     if own_bot_id and sender_bot_id:
         return sender_bot_id == own_bot_id
-
-    # app_id comparison — reliable when present
     if own_app_id and sender_app_id:
         return sender_app_id == own_app_id
-
-    # user_id fallback — less reliable but covers some edge cases
     if own_bot_user_id and sender_user_id:
         return sender_user_id == own_bot_user_id
 
-    # Fail closed only when sender has no identity at all
     return not sender_bot_id and not sender_user_id and not sender_app_id
 
 
 def _should_ignore_event(
     event: dict, data: dict, respond_to_bot_messages: bool, own_bot_id: Optional[str] = None
 ) -> bool:
-    """Decide whether an event should be dropped before dispatch.
-
-    Default (respond_to_bot_messages=False): every bot-authored event and every
-    lifecycle subtype is dropped — self-loop protection, unchanged behavior.
-
-    Opt-in (respond_to_bot_messages=True): only this app's OWN messages are
-    dropped (the echo guard), so other bots' messages flow into normal processing.
-    ``bot_message`` is the delivery subtype for bot-authored channel messages, so
-    it passes when authored by a peer bot; other lifecycle subtypes stay dropped.
-
-    Loop safety: replies don't @-mention the sender and with reply_to_mentions_only=True
-    the receiving side only processes mentions/DMs. Two bots that both set
-    reply_to_mentions_only=False + respond_to_bot_messages=True in a shared channel
-    WILL loop — don't combine those settings.
-    """
     subtype = event.get("subtype")
     is_bot_authored = bool(event.get("bot_id") or (event.get("message") or {}).get("bot_id"))
 
+    # Default: drop all bot events and lifecycle subtypes
     if not respond_to_bot_messages:
         return is_bot_authored or subtype in _IGNORED_SUBTYPES
 
-    # With opt-in: drop only own bot events, let peer bots through
+    # Opt-in: drop only own bot events, let peer bots through
     if is_bot_authored and _is_own_bot_event(event, data, own_bot_id):
         return True
     # bot_message subtype passes for peer bots; other lifecycle subtypes stay dropped
