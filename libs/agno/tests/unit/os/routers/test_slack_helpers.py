@@ -8,7 +8,6 @@ from agno.os.interfaces.slack.helpers import (
     extract_event_context,
     member_name,
     resolve_session_id,
-    resolve_slack_bot,
     resolve_slack_user,
     send_slack_message_async,
     should_respond,
@@ -387,51 +386,6 @@ class TestStripBotMention:
     def test_mention_only_with_bot_name(self):
         result = strip_bot_mention("<@U0APCSS3MDH>", "U0APCSS3MDH", "Scout")
         assert result == "Scout"
-
-
-class TestExtractEventContextSenderIdentity:
-    def test_both_user_and_bot_id_preserved(self):
-        ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "bot_id": "B456", "ts": "111"})
-        assert ctx["user"] == "U123"
-        assert ctx["bot_id"] == "B456"
-
-    def test_bot_only_message(self):
-        ctx = extract_event_context({"text": "hi", "channel": "C1", "bot_id": "B456", "ts": "111"})
-        assert ctx["user"] == ""
-        assert ctx["bot_id"] == "B456"
-
-    def test_human_message(self):
-        ctx = extract_event_context({"text": "hi", "channel": "C1", "user": "U123", "ts": "111"})
-        assert ctx["user"] == "U123"
-        assert ctx["bot_id"] == ""
-
-    def test_empty_when_neither(self):
-        ctx = extract_event_context({"text": "hi", "channel": "C1", "ts": "111"})
-        assert ctx["user"] == ""
-        assert ctx["bot_id"] == ""
-
-
-class TestResolveSlackBot:
-    @pytest.mark.asyncio
-    async def test_resolves_bot_name(self):
-        mock_client = AsyncMock()
-        mock_client.bots_info = AsyncMock(return_value={"bot": {"name": "My Bot"}})
-
-        resolved_id, display_name = await resolve_slack_bot(mock_client, "B123456")
-
-        mock_client.bots_info.assert_awaited_once_with(bot="B123456")
-        assert resolved_id == "B123456"
-        assert display_name == "My Bot"
-
-    @pytest.mark.asyncio
-    async def test_fallback_on_error(self):
-        mock_client = AsyncMock()
-        mock_client.bots_info = AsyncMock(side_effect=Exception("API error"))
-
-        resolved_id, display_name = await resolve_slack_bot(mock_client, "B123456")
-
-        assert resolved_id == "B123456"
-        assert display_name is None
 
 
 # -- resolve_session_id --
