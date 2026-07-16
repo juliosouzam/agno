@@ -27,51 +27,6 @@ from agno.team import RemoteTeam, Team
 from agno.tools.slack import SlackTools
 from agno.workflow import RemoteWorkflow, Workflow
 
-# Slack sends lifecycle events for bots with these subtypes. Without this
-# filter the router would try to process its own messages, causing infinite loops.
-_IGNORED_SUBTYPES = frozenset(
-    {
-        "bot_message",
-        "bot_add",
-        "bot_remove",
-        "bot_enable",
-        "bot_disable",
-        "message_changed",
-        "message_deleted",
-    }
-)
-
-
-def _should_process_event(
-    event: dict,
-    own_bot_id: Optional[str],
-    own_bot_user_id: Optional[str],
-    respond_to_bot_messages: bool,
-) -> bool:
-    """Return True if event should be processed, False to skip."""
-    subtype = event.get("subtype")
-    message = event.get("message") or {}
-    sender_bot_id = event.get("bot_id") or message.get("bot_id")
-    sender_user_id = event.get("user") or message.get("user")
-    is_bot_message = sender_bot_id or subtype == "bot_message"
-
-    # Skip lifecycle subtypes (message_changed, message_deleted, etc.)
-    if subtype in _IGNORED_SUBTYPES and subtype != "bot_message":
-        return False
-
-    # Skip own messages (Bolt SDK IgnoringSelfEvents pattern)
-    if own_bot_id and sender_bot_id == own_bot_id:
-        return False
-    if own_bot_user_id and sender_user_id == own_bot_user_id:
-        return False
-
-    # Skip bot messages unless opted in
-    if is_bot_message and not respond_to_bot_messages:
-        return False
-
-    return True
-
-
 class SlackEventResponse(BaseModel):
     status: str = Field(default="ok")
 
@@ -151,6 +106,9 @@ def attach_routes(
         bot_name_resolver=bot_name_resolver,
         reply_to_mentions_only=reply_to_mentions_only,
         resolve_user_identity=resolve_user_identity,
+        respond_to_bot_messages=respond_to_bot_messages,
+        own_bot_id=own_bot_id,
+        own_bot_user_id=own_bot_user_id,
         loading_text=loading_text,
         loading_messages=loading_messages,
         task_display_mode=task_display_mode,
@@ -202,7 +160,7 @@ def attach_routes(
 
             if event_type == "assistant_thread_started" and streaming:
                 background_tasks.add_task(event_handler.handle_thread_started, event)
-            elif _should_process_event(event, own_bot_id, own_bot_user_id, respond_to_bot_messages):
+            elif event_handler.should_process(event):
                 if streaming:
                     background_tasks.add_task(event_handler.handle_streaming, data)
                 else:

@@ -52,6 +52,22 @@ class EventContext:
     action_token: Optional[str] = None
 
 
+# Subtypes that indicate lifecycle events, not user messages
+_IGNORED_SUBTYPES = frozenset(
+    {
+        "bot_message",
+        "message_changed",
+        "message_deleted",
+        "message_replied",
+        "channel_join",
+        "channel_leave",
+        "channel_topic",
+        "channel_purpose",
+        "thread_broadcast",
+    }
+)
+
+
 @dataclass
 class SlackEventHandler:
     slack_tools: SlackTools
@@ -63,6 +79,9 @@ class SlackEventHandler:
     bot_name_resolver: BotNameResolver
     reply_to_mentions_only: bool
     resolve_user_identity: bool
+    respond_to_bot_messages: bool
+    own_bot_id: Optional[str]
+    own_bot_user_id: Optional[str]
     loading_text: str
     loading_messages: Optional[List[str]]
     task_display_mode: str
@@ -71,6 +90,28 @@ class SlackEventHandler:
 
     def _client(self) -> AsyncWebClient:
         return AsyncWebClient(token=self.slack_tools.token, ssl=self.ssl)
+
+    def should_process(self, event: dict) -> bool:
+        """Return True if event should be processed, False to skip."""
+        ctx = extract_event_context(event)
+        subtype = event.get("subtype")
+        is_bot = ctx["bot_id"] or subtype == "bot_message"
+
+        # Skip lifecycle subtypes (except bot_message which carries content)
+        if subtype in _IGNORED_SUBTYPES and subtype != "bot_message":
+            return False
+
+        # Skip own messages
+        if self.own_bot_id and ctx["bot_id"] == self.own_bot_id:
+            return False
+        if self.own_bot_user_id and ctx["user"] == self.own_bot_user_id:
+            return False
+
+        # Skip bot messages unless opted in
+        if is_bot and not self.respond_to_bot_messages:
+            return False
+
+        return True
 
     async def resolve_context(self, data: dict) -> Optional[EventContext]:
         event = data["event"]
