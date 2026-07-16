@@ -115,16 +115,6 @@ def strip_bot_mention(text: str, bot_user_id: Optional[str], bot_name: Optional[
 
 
 async def resolve_slack_user(async_client: Any, slack_user_id: str) -> Tuple[str, Optional[str]]:
-    # Bot IDs (B...) use bots.info; user IDs (U.../W...) use users.info
-    if slack_user_id.startswith("B"):
-        try:
-            resp = await async_client.bots_info(bot=slack_user_id)
-            bot = resp.get("bot", {}) if resp else {}
-            return (slack_user_id, bot.get("name") or None)
-        except Exception as e:
-            log_warning(f"Failed to resolve Slack bot {slack_user_id}: {str(e)}")
-            return (slack_user_id, None)
-
     try:
         resp = await async_client.users_info(user=slack_user_id)
         user = resp.get("user", {}) if resp else {}
@@ -141,6 +131,16 @@ async def resolve_slack_user(async_client: Any, slack_user_id: str) -> Tuple[str
     except Exception as e:
         log_warning(f"Failed to resolve Slack user {slack_user_id}: {str(e)}")
         return (slack_user_id, None)
+
+
+async def resolve_slack_bot(async_client: Any, bot_id: str) -> Tuple[str, Optional[str]]:
+    try:
+        resp = await async_client.bots_info(bot=bot_id)
+        bot = resp.get("bot", {}) if resp else {}
+        return (bot_id, bot.get("name") or None)
+    except Exception as e:
+        log_warning(f"Failed to resolve Slack bot {bot_id}: {str(e)}")
+        return (bot_id, None)
 
 
 class BotNameResolver:

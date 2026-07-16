@@ -8,6 +8,7 @@ from agno.os.interfaces.slack.helpers import (
     extract_event_context,
     member_name,
     resolve_session_id,
+    resolve_slack_bot,
     resolve_slack_user,
     send_slack_message_async,
     should_respond,
@@ -410,40 +411,27 @@ class TestExtractEventContextSenderIdentity:
         assert ctx["bot_id"] == ""
 
 
-class TestResolveSlackUserBot:
+class TestResolveSlackBot:
     @pytest.mark.asyncio
-    async def test_bot_id_uses_bots_info(self):
+    async def test_resolves_bot_name(self):
         mock_client = AsyncMock()
         mock_client.bots_info = AsyncMock(return_value={"bot": {"name": "My Bot"}})
 
-        resolved_id, display_name = await resolve_slack_user(mock_client, "B123456")
+        resolved_id, display_name = await resolve_slack_bot(mock_client, "B123456")
 
         mock_client.bots_info.assert_awaited_once_with(bot="B123456")
         assert resolved_id == "B123456"
         assert display_name == "My Bot"
 
     @pytest.mark.asyncio
-    async def test_bot_id_fallback_on_error(self):
+    async def test_fallback_on_error(self):
         mock_client = AsyncMock()
         mock_client.bots_info = AsyncMock(side_effect=Exception("API error"))
 
-        resolved_id, display_name = await resolve_slack_user(mock_client, "B123456")
+        resolved_id, display_name = await resolve_slack_bot(mock_client, "B123456")
 
         assert resolved_id == "B123456"
         assert display_name is None
-
-    @pytest.mark.asyncio
-    async def test_user_id_still_uses_users_info(self):
-        mock_client = AsyncMock()
-        mock_client.users_info = AsyncMock(
-            return_value={"user": {"profile": {"email": "user@example.com", "display_name": "Test User"}}}
-        )
-
-        resolved_id, display_name = await resolve_slack_user(mock_client, "U123456")
-
-        mock_client.users_info.assert_awaited_once_with(user="U123456")
-        assert resolved_id == "user@example.com"
-        assert display_name == "Test User"
 
 
 # -- resolve_session_id --
