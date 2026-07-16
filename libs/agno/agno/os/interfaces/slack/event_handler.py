@@ -55,7 +55,6 @@ class EventContext:
 # Subtypes that indicate lifecycle events, not user messages
 _IGNORED_SUBTYPES = frozenset(
     {
-        "bot_message",
         "message_changed",
         "message_deleted",
         "message_replied",
@@ -97,11 +96,10 @@ class SlackEventHandler:
         subtype = event.get("subtype")
         is_bot = ctx["bot_id"] or subtype == "bot_message"
 
-        # Skip lifecycle subtypes (except bot_message which carries content)
-        if subtype in _IGNORED_SUBTYPES and subtype != "bot_message":
+        if subtype in _IGNORED_SUBTYPES:
             return False
 
-        # Skip own messages
+        # Skip own messages (bot_id for bot posts, user for as_user posts)
         if self.own_bot_id and ctx["bot_id"] == self.own_bot_id:
             return False
         if self.own_bot_user_id and ctx["user"] == self.own_bot_user_id:
