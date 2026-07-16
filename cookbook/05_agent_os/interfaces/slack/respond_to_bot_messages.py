@@ -50,7 +50,6 @@ slack_agent = Agent(
         "You are a project coordinator. You help with general questions.",
         "For research-heavy tasks (news, trends, data lookup), delegate to your "
         "coworker Dash by @mentioning them in your response.",
-        "Use list_users to find Dash's user ID, then mention them with <@USER_ID>.",
     ],
     markdown=True,
 )
