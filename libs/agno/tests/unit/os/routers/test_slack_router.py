@@ -1178,4 +1178,3 @@ class TestAdminApprovalFlow:
         mock_client.chat_update.assert_awaited_once()
         call = mock_client.chat_update.call_args
         assert call.kwargs["text"] == "Status: pending"
-

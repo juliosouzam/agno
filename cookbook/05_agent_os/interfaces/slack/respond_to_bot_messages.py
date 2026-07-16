@@ -8,8 +8,8 @@ Use case: Bot orchestrator delegates tasks to specialist bots.
 
 Setup:
   1. Slack app with bot token and signing secret
-  2. Event Subscriptions URL: https://<tunnel>/slack/events
-  3. Environment: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET
+  2. Event Subscriptions URL: https://<tunnel>/slack/dash/events
+  3. Environment: SLACK_DASH_BOT_TOKEN, SLACK_DASH_SIGNING_SECRET
   4. ngrok: ngrok http 7777
 
 Key flag: respond_to_bot_messages=True
@@ -46,8 +46,9 @@ agent_os = AgentOS(
     interfaces=[
         Slack(
             agent=agent,
-            token=getenv("SLACK_BOT_TOKEN"),
-            signing_secret=getenv("SLACK_SIGNING_SECRET"),
+            prefix="/slack/dash",
+            token=getenv("SLACK_DASH_BOT_TOKEN"),
+            signing_secret=getenv("SLACK_DASH_SIGNING_SECRET"),
             reply_to_mentions_only=True,
             respond_to_bot_messages=True,
         ),

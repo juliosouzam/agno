@@ -4,7 +4,6 @@ import pytest
 
 from agno.os.interfaces.slack.helpers import extract_event_context, resolve_slack_bot
 
-
 # -- extract_event_context sender identity --
 
 
