@@ -27,6 +27,7 @@ from agno.team import RemoteTeam, Team
 from agno.tools.slack import SlackTools
 from agno.workflow import RemoteWorkflow, Workflow
 
+
 class SlackEventResponse(BaseModel):
     status: str = Field(default="ok")
 
@@ -73,7 +74,7 @@ def attach_routes(
 
     slack_tools = SlackTools(token=token, user_token=user_token, ssl=ssl, max_file_size=max_file_size)
 
-    # Fetch bot identity once at startup for self-event detection (matches Bolt SDK pattern)
+    # Bot identity for filtering own messages (avoids echo loops)
     own_bot_id: Optional[str] = None
     own_bot_user_id: Optional[str] = None
     try:

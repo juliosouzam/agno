@@ -1219,6 +1219,7 @@ class TestBotMessageFiltering:
         """With respond_to_bot_messages=True, peer bot messages are processed."""
         agent_mock = make_agent_mock()
         mock_slack = make_slack_mock(token="xoxb-test")
+        mock_slack.client.auth_test.return_value = {"bot_id": "B_SELF", "user_id": "U_SELF_BOT"}
 
         with (
             patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
@@ -1231,7 +1232,6 @@ class TestBotMessageFiltering:
             client = TestClient(app)
             body = {
                 "type": "event_callback",
-                "api_app_id": "A_SELF",
                 "authorizations": [{"user_id": "U_SELF_BOT"}],
                 "event": {
                     "type": "message",
@@ -1239,8 +1239,6 @@ class TestBotMessageFiltering:
                     "channel_type": "channel",
                     "text": "hello from peer bot",
                     "bot_id": "B_OTHER_BOT",
-                    "app_id": "A_OTHER",
-                    "user": "U_OTHER_BOT",
                     "channel": "C123",
                     "ts": "1708123456.000100",
                 },
@@ -1249,6 +1247,7 @@ class TestBotMessageFiltering:
 
         assert resp.status_code == 200
         await wait_for_call(agent_mock.arun)
+        agent_mock.arun.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_opt_in_drops_own_messages_by_bot_id(self):
@@ -1352,7 +1351,41 @@ class TestBotMessageFiltering:
             resp = make_signed_request(client, body)
 
         assert resp.status_code == 200
-        await wait_for_call(agent_mock.arun)  # Peer bot message is processed
+        await wait_for_call(agent_mock.arun)
+        agent_mock.arun.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_opt_in_allows_peer_by_user_id_mismatch(self):
+        """Peer message with different user_id is processed (not just bot_id check)."""
+        agent_mock = make_agent_mock()
+        mock_slack = make_slack_mock(token="xoxb-test")
+        mock_slack.client.auth_test.return_value = {"bot_id": "B_SELF", "user_id": "U_SELF_BOT"}
+
+        with (
+            patch("agno.os.interfaces.slack.router.verify_slack_signature", return_value=True),
+            patch("agno.os.interfaces.slack.router.SlackTools", return_value=mock_slack),
+            patch("agno.os.interfaces.slack.event_handler.AsyncWebClient", return_value=make_async_client_mock()),
+        ):
+            app = build_app(agent_mock, reply_to_mentions_only=False, respond_to_bot_messages=True)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(app)
+            body = {
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel_type": "channel",
+                    "text": "message from other user",
+                    "user": "U_OTHER",
+                    "channel": "C123",
+                    "ts": "1708123456.000100",
+                },
+            }
+            resp = make_signed_request(client, body)
+
+        assert resp.status_code == 200
+        await wait_for_call(agent_mock.arun)
+        agent_mock.arun.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_lifecycle_subtypes_still_dropped_with_opt_in(self):
