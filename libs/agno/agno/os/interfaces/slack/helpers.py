@@ -115,6 +115,11 @@ def strip_bot_mention(text: str, bot_user_id: Optional[str], bot_name: Optional[
 
 
 async def resolve_slack_user(async_client: Any, slack_user_id: str) -> Tuple[str, Optional[str]]:
+    """Resolve a Slack user ID to (canonical_user_id, display_name).
+
+    Returns the user's email as canonical_user_id if available, otherwise
+    falls back to the raw Slack user ID. Display name is best-effort.
+    """
     try:
         resp = await async_client.users_info(user=slack_user_id)
         user = resp.get("user", {}) if resp else {}
