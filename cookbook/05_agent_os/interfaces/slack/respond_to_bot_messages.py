@@ -88,8 +88,6 @@ agent_os = AgentOS(
             token=getenv("SLACK_AGENT_BOT_TOKEN"),
             signing_secret=getenv("SLACK_AGENT_SIGNING_SECRET"),
             reply_to_mentions_only=True,
-            # Default: respond_to_bot_messages=False
-            # Slack Agent only responds to humans, not other bots
         ),
         Slack(
             agent=dash,
