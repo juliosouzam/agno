@@ -60,4 +60,4 @@ app = agent_os.get_app()
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    agent_os.serve(app="bot_to_bot:app", reload=True)
+    agent_os.serve(app="respond_to_bot_messages:app", reload=True)
