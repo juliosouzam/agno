@@ -42,44 +42,34 @@ _IGNORED_SUBTYPES = frozenset(
 )
 
 
-def _is_own_bot_event(event: dict, data: dict, own_bot_id: Optional[str] = None) -> bool:
-    # Check order matters: bot_id (guaranteed) > app_id (reliable) > user_id (fallback).
-    # user_id last because authorizations[0] can be human installer in mixed-scope installs.
+def _should_process_event(
+    event: dict,
+    own_bot_id: Optional[str],
+    own_bot_user_id: Optional[str],
+    respond_to_bot_messages: bool,
+) -> bool:
+    """Return True if event should be processed, False to skip."""
+    subtype = event.get("subtype")
     message = event.get("message") or {}
     sender_bot_id = event.get("bot_id") or message.get("bot_id")
     sender_user_id = event.get("user") or message.get("user")
-    sender_app_id = event.get("app_id") or message.get("app_id")
+    is_bot_message = sender_bot_id or subtype == "bot_message"
 
-    own_app_id = data.get("api_app_id")
-    own_bot_user_id = (data.get("authorizations") or [{}])[0].get("user_id")
+    # Skip lifecycle subtypes (message_changed, message_deleted, etc.)
+    if subtype in _IGNORED_SUBTYPES and subtype != "bot_message":
+        return False
 
-    if own_bot_id and sender_bot_id:
-        return sender_bot_id == own_bot_id
-    if own_app_id and sender_app_id:
-        return sender_app_id == own_app_id
-    if own_bot_user_id and sender_user_id:
-        return sender_user_id == own_bot_user_id
+    # Skip own messages (Bolt SDK IgnoringSelfEvents pattern)
+    if own_bot_id and sender_bot_id == own_bot_id:
+        return False
+    if own_bot_user_id and sender_user_id == own_bot_user_id:
+        return False
 
-    return not sender_bot_id and not sender_user_id and not sender_app_id
+    # Skip bot messages unless opted in
+    if is_bot_message and not respond_to_bot_messages:
+        return False
 
-
-def _should_ignore_event(
-    event: dict, data: dict, respond_to_bot_messages: bool, own_bot_id: Optional[str] = None
-) -> bool:
-    subtype = event.get("subtype")
-    is_bot_authored = bool(event.get("bot_id") or (event.get("message") or {}).get("bot_id"))
-
-    # Default: drop all bot events and lifecycle subtypes
-    if not respond_to_bot_messages:
-        return is_bot_authored or subtype in _IGNORED_SUBTYPES
-
-    # Opt-in: drop only own bot events, let peer bots through
-    if is_bot_authored and _is_own_bot_event(event, data, own_bot_id):
-        return True
-    # bot_message subtype passes for peer bots; other lifecycle subtypes stay dropped
-    if subtype in _IGNORED_SUBTYPES and not (is_bot_authored and subtype == "bot_message"):
-        return True
-    return False
+    return True
 
 
 class SlackEventResponse(BaseModel):
@@ -128,11 +118,13 @@ def attach_routes(
 
     slack_tools = SlackTools(token=token, user_token=user_token, ssl=ssl, max_file_size=max_file_size)
 
-    # Fetch own bot_id once at startup for reliable self-event detection.
-    # bot_id is the only field guaranteed in all bot messages.
+    # Fetch bot identity once at startup for self-event detection (matches Bolt SDK pattern)
     own_bot_id: Optional[str] = None
+    own_bot_user_id: Optional[str] = None
     try:
-        own_bot_id = slack_tools.client.auth_test().get("bot_id")
+        auth_result = slack_tools.client.auth_test()
+        own_bot_id = auth_result.get("bot_id")
+        own_bot_user_id = auth_result.get("user_id")
     except Exception:
         pass
 
@@ -207,18 +199,14 @@ def attach_routes(
         if "event" in data:
             event = data["event"]
             event_type = event.get("type")
-            # setSuggestedPrompts requires "Agents & AI Apps" mode (streaming UX only)
+
             if event_type == "assistant_thread_started" and streaming:
                 background_tasks.add_task(event_handler.handle_thread_started, event)
-            # Bot self-loop prevention: with respond_to_bot_messages=False (default),
-            # all bot events are dropped. With =True, only this app's own messages
-            # are dropped and peer bots' messages flow through to normal processing.
-            elif _should_ignore_event(event, data, respond_to_bot_messages, own_bot_id):
-                pass
-            elif streaming:
-                background_tasks.add_task(event_handler.handle_streaming, data)
-            else:
-                background_tasks.add_task(event_handler.handle_non_streaming, data)
+            elif _should_process_event(event, own_bot_id, own_bot_user_id, respond_to_bot_messages):
+                if streaming:
+                    background_tasks.add_task(event_handler.handle_streaming, data)
+                else:
+                    background_tasks.add_task(event_handler.handle_non_streaming, data)
 
         return SlackEventResponse(status="ok")
 
