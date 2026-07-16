@@ -4,10 +4,10 @@ Bot-to-Bot Communication: AI Coworkers
 Two AI coworkers that can @mention each other in Slack.
 
 - Slack Agent: Project coordinator with SlackTools
-- Dash: Research specialist with Parallel MCP (web search)
+- Dash: Research specialist
 
 When Slack Agent @mentions Dash, Dash receives the bot message
-(thanks to respond_to_bot_messages=True), searches the web, and responds.
+(thanks to respond_to_bot_messages=True) and responds.
 
 Setup:
   1. Two Slack apps installed to the same workspace
@@ -35,7 +35,6 @@ from agno.agent import Agent
 from agno.models.openai import OpenAIResponses
 from agno.os.app import AgentOS
 from agno.os.interfaces.slack import Slack
-from agno.tools.mcp import MCPTools
 from agno.tools.slack import SlackTools
 
 # ---------------------------------------------------------------------------
@@ -48,8 +47,8 @@ slack_agent = Agent(
     tools=[SlackTools(token=getenv("SLACK_AGENT_BOT_TOKEN"))],
     instructions=[
         "You are a project coordinator. You help with general questions.",
-        "For research-heavy tasks (news, trends, data lookup), delegate to your "
-        "coworker Dash by @mentioning them in your response.",
+        "For research-heavy tasks, delegate to your coworker Dash by "
+        "@mentioning them in your response.",
     ],
     markdown=True,
 )
@@ -58,17 +57,12 @@ slack_agent = Agent(
 # Dash: Research Specialist
 # ---------------------------------------------------------------------------
 
-# Parallel MCP provides free web search (keyless, rate-limited)
-parallel_mcp = MCPTools(transport="streamable-http", url="https://search.parallel.ai/mcp")
-
 dash = Agent(
     name="Dash",
     model=OpenAIResponses(id="gpt-5.5"),
-    tools=[parallel_mcp],
     instructions=[
-        "You are Dash, a research specialist with web search capabilities.",
-        "When a coworker asks you to research something, use web_search to find "
-        "current information and provide a concise summary with sources.",
+        "You are Dash, a research specialist.",
+        "When a coworker asks you something, provide a helpful response.",
         "Be helpful and professional.",
     ],
     markdown=True,
@@ -105,5 +99,4 @@ app = agent_os.get_app()
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Don't use reload=True with MCP tools - can cause lifespan issues
     agent_os.serve(app="respond_to_bot_messages:app")
