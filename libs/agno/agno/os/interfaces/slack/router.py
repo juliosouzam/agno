@@ -108,11 +108,6 @@ def attach_routes(
     buffer_size: int = 100,
     max_file_size: int = 1_073_741_824,  # 1GB
     resolve_user_identity: bool = False,
-    # Process messages authored by OTHER Slack bots (mentions, DMs, channel messages).
-    # This app's own messages are always dropped (echo guard). Safe against ping-pong
-    # by default: replies don't @-mention the sender and with reply_to_mentions_only=True
-    # only mentions/DMs are processed. Two bots with reply_to_mentions_only=False +
-    # respond_to_bot_messages=True in a shared channel WILL loop.
     respond_to_bot_messages: bool = False,
 ) -> APIRouter:
     # Inner functions capture config via closure to keep each instance isolated
