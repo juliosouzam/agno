@@ -2,11 +2,10 @@
 
 Models with supports_native_structured_outputs=False and
 supports_json_schema_outputs=True must always receive a response_format when
-an output_schema is set. Before the fix, Agent(structured_outputs=True)
-resolved to None for these models: no schema reached the provider and
-structured output failed silently. Cerebras shares Perplexity's exact flag
-combination but requires cerebras-cloud-sdk to import, so Perplexity stands
-in for all json_schema-only models here.
+an output_schema is set, across every use_json_mode and structured_outputs
+combination. Cerebras shares Perplexity's exact flag combination but requires
+cerebras-cloud-sdk to import, so Perplexity stands in for all
+json_schema-only models here.
 """
 
 import pytest
@@ -48,7 +47,7 @@ def test_json_schema_only_model_always_receives_schema(use_json_mode, structured
 
 
 def test_structured_outputs_true_regression():
-    """The exact row that resolved to None before the fix."""
+    """structured_outputs=True with a json_schema-only model must resolve to a json_schema format."""
     agent = Agent(model=Perplexity(), structured_outputs=True)
     response_format = get_response_format(agent, run_context=_run_context())
     assert response_format is not None

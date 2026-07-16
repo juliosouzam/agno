@@ -32,7 +32,7 @@ def _expected_json_schema():
 
 
 def test_team_defaults_regression():
-    """The default Team configuration resolved to None before the fix."""
+    """The default Team configuration must resolve to a json_schema response_format."""
     team = Team(members=[], model=Perplexity())
     response_format = get_response_format(team, run_context=_run_context())
     assert response_format is not None
