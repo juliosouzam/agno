@@ -38,11 +38,15 @@ class PlaywrightMCPBackend(ContextBackend):
         self._mcp_tools: Toolkit | None = None
 
     def status(self) -> Status:
-        mode = "headless" if self.headless else "headed"
-        return Status(ok=True, detail=f"playwright-mcp (chromium, {mode})")
+        if self._mcp_tools is not None and getattr(self._mcp_tools, "initialized", False):
+            return Status(ok=True, detail="playwright-mcp")
+        return Status(ok=True, detail="playwright-mcp (not yet connected)")
 
     async def astatus(self) -> Status:
-        return self.status()
+        await self.asetup()
+        if self._mcp_tools is None or not getattr(self._mcp_tools, "initialized", False):
+            return Status(ok=False, detail="playwright-mcp: connection failed")
+        return Status(ok=True, detail="playwright-mcp")
 
     def get_tools(self) -> list[Toolkit]:
         if self._mcp_tools is None:

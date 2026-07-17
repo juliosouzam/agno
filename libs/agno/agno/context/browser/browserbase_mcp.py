@@ -40,10 +40,22 @@ class BrowserbaseMCPBackend(ContextBackend):
         self._mcp_tools: Toolkit | None = None
 
     def status(self) -> Status:
-        return Status(ok=True, detail="browserbase-mcp (stagehand)")
+        missing = []
+        if not self.api_key:
+            missing.append("BROWSERBASE_API_KEY")
+        if not self.project_id:
+            missing.append("BROWSERBASE_PROJECT_ID")
+        if missing:
+            return Status(ok=False, detail=f"browserbase-mcp: missing {', '.join(missing)}")
+        if self._mcp_tools is not None and getattr(self._mcp_tools, "initialized", False):
+            return Status(ok=True, detail="browserbase-mcp")
+        return Status(ok=True, detail="browserbase-mcp (not yet connected)")
 
     async def astatus(self) -> Status:
-        return self.status()
+        await self.asetup()
+        if self._mcp_tools is None or not getattr(self._mcp_tools, "initialized", False):
+            return Status(ok=False, detail="browserbase-mcp: connection failed")
+        return Status(ok=True, detail="browserbase-mcp")
 
     def get_tools(self) -> list[Toolkit]:
         if self._mcp_tools is None:
