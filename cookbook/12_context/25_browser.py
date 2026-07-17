@@ -121,8 +121,51 @@ async def demo_tools_mode() -> None:
         await browser.aclose()
 
 
+async def demo_structured_output() -> None:
+    """Extract structured data from a webpage."""
+    from pydantic import BaseModel, Field
+
+    print("\n=== Structured Output ===\n")
+
+    class Story(BaseModel):
+        title: str = Field(description="The story title")
+        url: str = Field(description="Link to the story or comments")
+        points: int | None = Field(default=None, description="Points/score if available")
+
+    class TopStories(BaseModel):
+        stories: list[Story] = Field(description="List of top stories")
+
+    browser = BrowserContextProvider(
+        backend=PlaywrightMCPBackend(headless=True),
+        model=OpenAIResponses(id="gpt-5.5"),
+    )
+
+    await browser.asetup()
+    try:
+        agent = Agent(
+            model=OpenAIResponses(id="gpt-5.5"),
+            tools=browser.get_tools(),
+            output_schema=TopStories,
+        )
+
+        response = await agent.arun(
+            "Go to https://news.ycombinator.com and extract the top 3 stories"
+        )
+
+        result: TopStories = response.content
+        for i, story in enumerate(result.stories, 1):
+            print(f"{i}. {story.title}")
+            print(f"   URL: {story.url}")
+            if story.points:
+                print(f"   Points: {story.points}")
+            print()
+    finally:
+        await browser.aclose()
+
+
 if __name__ == "__main__":
     asyncio.run(demo_playwright())
     # Uncomment to run other demos:
     # asyncio.run(demo_browserbase())
     # asyncio.run(demo_tools_mode())
+    # asyncio.run(demo_structured_output())
