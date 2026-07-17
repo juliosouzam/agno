@@ -65,14 +65,6 @@ class BrowserContextProvider(ContextProvider):
         kwargs = self._run_kwargs_for_sub_agent(run_context)
         return answer_from_run(await agent.arun(question, **kwargs))
 
-    def instructions(self) -> str:
-        if self.mode == ContextMode.tools:
-            return f"`{self.name}`: browser tools for navigation, snapshots, and screenshots."
-        return (
-            f"`{self.name}`: call `{self.query_tool_name}(question)` to browse the web, "
-            "navigate pages, and extract information."
-        )
-
     # ------------------------------------------------------------------
     # Mode resolution
     # ------------------------------------------------------------------
