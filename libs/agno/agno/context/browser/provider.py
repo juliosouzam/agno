@@ -24,23 +24,48 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
 
+WRITE_TOOLS = [
+    "browser_type",
+    "browser_select_option",
+    "browser_press_key",
+    "browser_file_upload",
+]
+
+
 class BrowserContextProvider(ContextProvider):
-    """Browser automation via a configurable backend."""
+    """Browser automation via a configurable backend.
+
+    Args:
+        backend: The browser backend (e.g. PlaywrightMCPBackend). If None,
+            creates a PlaywrightMCPBackend with default settings.
+        write: If False (default), write tools are excluded (type, select_option,
+            press_key, file_upload). If True, all tools are available.
+        headless: Whether to run the browser in headless mode (only used if
+            backend is None).
+    """
 
     def __init__(
         self,
-        backend: ContextBackend,
+        backend: ContextBackend | None = None,
         *,
         id: str = "browser",
         name: str = "Browser",
         instructions: str | None = None,
         mode: ContextMode = ContextMode.default,
         model: Model | None = None,
+        write: bool = False,
+        headless: bool = True,
     ) -> None:
         super().__init__(id=id, name=name, mode=mode, model=model)
-        self.backend = backend
+        self.backend = backend if backend is not None else self._create_default_backend(write, headless)
         self.instructions_text = instructions if instructions is not None else DEFAULT_BROWSER_INSTRUCTIONS
         self._agent: Agent | None = None
+
+    def _create_default_backend(self, write: bool, headless: bool) -> ContextBackend:
+        from agno.context.browser.playwright_mcp import PlaywrightMCPBackend
+
+        exclude = None if write else WRITE_TOOLS
+        return PlaywrightMCPBackend(headless=headless, exclude_tools=exclude)
 
     def status(self) -> Status:
         return self.backend.status()
