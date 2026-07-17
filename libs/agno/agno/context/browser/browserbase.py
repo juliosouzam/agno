@@ -68,7 +68,7 @@ class BrowserbaseBackend(ContextBackend):
     async def aclose(self) -> None:
         if self._tools is not None:
             try:
-                await self._tools.aclose_session()
+                self._tools.close_session()
             except Exception:
                 pass
         self._tools = None
