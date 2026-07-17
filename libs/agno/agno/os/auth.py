@@ -17,6 +17,12 @@ from agno.os.service_accounts import TOKEN_PREFIX as SERVICE_ACCOUNT_TOKEN_PREFI
 from agno.os.service_accounts import ServiceAccountVerification, authenticate_service_account_request
 from agno.os.settings import AgnoAPISettings
 
+# Marker set by AuthMiddleware after successfully validating a credential.
+# Must match the value in middleware/jwt.py — kept in sync manually to avoid
+# circular imports. Checking this attribute is the ONLY safe way to know
+# authentication happened for THIS request. See issue #8625.
+AUTH_COMPLETE_ATTR = "_agno_auth_complete"
+
 # Create a global HTTPBearer instance
 security = HTTPBearer(auto_error=False)
 
@@ -209,12 +215,12 @@ def get_authentication_dependency(settings: AgnoAPISettings):
     """
 
     async def auth_dependency(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> bool:
-        # If JWT authorization is enabled via settings (authorization=True on AgentOS)
-        if settings and settings.authorization_enabled:
-            return True
-
-        # Check if JWT middleware has already handled authentication
-        if getattr(request.state, "authenticated", False):
+        # Check if AuthMiddleware already validated this request. This is the ONLY safe
+        # check — it proves the middleware actually ran and cryptographically verified a
+        # credential for THIS request. Do NOT trust config flags (authorization_enabled)
+        # or env var checks (_is_jwt_configured) here; they only prove something is
+        # configured, not that it validated this request. See issue #8625.
+        if getattr(request.state, AUTH_COMPLETE_ATTR, False):
             return True
 
         # Service account tokens (agno_pat_...) are dispatched by prefix: they never
@@ -230,11 +236,7 @@ def get_authentication_dependency(settings: AgnoAPISettings):
                 request, token, treat_unverifiable_as_anonymous=not instance_has_auth
             )
 
-        # Also skip if JWT is configured via environment variables
-        if _is_jwt_configured():
-            return True
-
-        # If no security key is set, skip authentication entirely
+        # If no security key is set, skip authentication entirely (open mode)
         if not settings or not settings.os_security_key:
             return True
 
@@ -252,8 +254,8 @@ def get_authentication_dependency(settings: AgnoAPISettings):
             request.state.scopes = list(INTERNAL_SERVICE_SCOPES)
             return True
 
-        # Verify the token against security key
-        if token != settings.os_security_key:
+        # Verify the token against security key using constant-time comparison
+        if not hmac.compare_digest(token, settings.os_security_key):
             raise HTTPException(status_code=401, detail="Invalid authentication token")
 
         # A valid security key is a trusted, unscoped root. Mark it authenticated like the
@@ -268,32 +270,30 @@ def get_authentication_dependency(settings: AgnoAPISettings):
 
 def validate_websocket_token(token: str, settings: AgnoAPISettings) -> bool:
     """
-    Validate a bearer token for WebSocket authentication (legacy os_security_key method).
+    Validate a bearer token for WebSocket authentication (security_key method only).
 
-    When JWT authorization is enabled (via authorization=True or JWT environment variables),
-    this validation is skipped as JWT middleware handles authentication.
+    This function ONLY handles security key validation. JWT and service account
+    authentication are handled by the WebSocket router before this function is called.
+    Do NOT add config-trust bypasses here — see issue #8625.
 
     Args:
         token: The bearer token to validate
-        settings: The API settings containing the security key and authorization flag
+        settings: The API settings containing the security key
 
     Returns:
-        True if the token is valid or authentication is disabled, False otherwise
+        True if the token matches the security key or no security key is configured,
+        False if the token is missing or invalid.
     """
-    # If JWT authorization is enabled, skip security key validation
-    if settings and settings.authorization_enabled:
-        return True
-
-    # Also skip if JWT is configured via environment variables (manual JWT middleware setup)
-    if _is_jwt_configured():
-        return True
-
-    # If no security key is set, skip authentication entirely
+    # If no security key is set, authentication is disabled (open mode)
     if not settings or not settings.os_security_key:
         return True
 
-    # Verify the token matches the configured security key
-    return token == settings.os_security_key
+    # Security key is configured — require a valid token
+    if not token:
+        return False
+
+    # Verify the token matches using constant-time comparison
+    return hmac.compare_digest(token, settings.os_security_key)
 
 
 async def verify_websocket_service_account(
