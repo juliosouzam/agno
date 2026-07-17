@@ -10,10 +10,14 @@ Requires:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from agno.context.backend import ContextBackend
 from agno.context.provider import Status
+
+if TYPE_CHECKING:
+    from agno.tools import Toolkit
+    from agno.tools.playwright import PlaywrightTools
 
 
 class PlaywrightBackend(ContextBackend):
@@ -25,7 +29,7 @@ class PlaywrightBackend(ContextBackend):
         headless: bool = True,
     ) -> None:
         self.headless = headless
-        self._tools: Any = None
+        self._tools: PlaywrightTools | None = None
 
     def status(self) -> Status:
         mode = "headless" if self.headless else "headed"
@@ -34,12 +38,12 @@ class PlaywrightBackend(ContextBackend):
     async def astatus(self) -> Status:
         return self.status()
 
-    def get_tools(self) -> list:
+    def get_tools(self) -> list[Toolkit]:
         if self._tools is None:
             self._tools = self._build_tools()
         return [self._tools]
 
-    def _build_tools(self) -> Any:
+    def _build_tools(self) -> PlaywrightTools:
         from agno.tools.playwright import PlaywrightTools
 
         return PlaywrightTools(

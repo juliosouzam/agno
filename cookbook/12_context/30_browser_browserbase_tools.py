@@ -1,22 +1,7 @@
 """
 Browser Automation with BrowserbaseTools (SDK)
-===============================================
-
-BrowserbaseTools provides direct access to Browserbase's cloud browser
-via the Python SDK. Unlike BrowserbaseMCPBackend (Stagehand), this uses
-traditional CSS selectors for deterministic, replayable automation.
-
-Features:
-- Cloud-hosted browsers (no local Chromium needed)
-- Session recording via rrweb (viewable in dashboard)
-- Persistent contexts for login state
-- Ad blocking and CAPTCHA solving
-
-Requires:
-    BROWSERBASE_API_KEY
-    BROWSERBASE_PROJECT_ID
-    OPENAI_API_KEY
-    pip install browserbase playwright
+Cloud-hosted browsers with session recording and CSS selectors.
+Requires: BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, OPENAI_API_KEY
 """
 
 import asyncio
@@ -33,14 +18,7 @@ async def main() -> None:
 
     from agno.tools.browserbase import BrowserbaseTools
 
-    # BrowserbaseTools with session recording enabled by default
-    browser_tools = BrowserbaseTools(
-        # API keys default to env vars
-        # context_id="my-session" for persistent cookies
-        # block_ads=True,
-    )
-
-    print(f"Tools available: {[t.__name__ for t in browser_tools.tools]}")
+    browser_tools = BrowserbaseTools()
 
     agent = Agent(
         model=OpenAIResponses(id="gpt-5.5"),
@@ -49,9 +27,10 @@ async def main() -> None:
         markdown=True,
     )
 
-    prompt = "Go to https://example.com, tell me what you see, get the session URL for the recording, then close the session."
-    print(f"\n> {prompt}\n")
-    await agent.aprint_response(prompt)
+    await agent.aprint_response(
+        "Go to https://example.com, tell me what you see, "
+        "get the session URL for the recording, then close the session."
+    )
 
 
 if __name__ == "__main__":

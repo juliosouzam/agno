@@ -12,11 +12,15 @@ Requires:
 from __future__ import annotations
 
 from os import getenv
-from typing import Any
+from typing import TYPE_CHECKING
 
 from agno.context.backend import ContextBackend
 from agno.context.provider import Status
 from agno.utils.log import log_warning
+
+if TYPE_CHECKING:
+    from agno.tools import Toolkit
+    from agno.tools.mcp import MCPTools
 
 
 class BrowserbaseMCPBackend(ContextBackend):
@@ -46,7 +50,7 @@ class BrowserbaseMCPBackend(ContextBackend):
         self.exclude_tools = exclude_tools
         self.tool_name_prefix = tool_name_prefix
         self.timeout_seconds = timeout_seconds
-        self._mcp_tools: Any = None
+        self._mcp_tools: MCPTools | None = None
 
     def status(self) -> Status:
         missing = []
@@ -63,12 +67,12 @@ class BrowserbaseMCPBackend(ContextBackend):
     async def astatus(self) -> Status:
         return self.status()
 
-    def get_tools(self) -> list:
+    def get_tools(self) -> list[Toolkit]:
         if self._mcp_tools is None:
             self._mcp_tools = self._build_tools()
         return [self._mcp_tools]
 
-    def _build_tools(self) -> Any:
+    def _build_tools(self) -> MCPTools:
         from mcp import StdioServerParameters
 
         from agno.tools.mcp import MCPTools

@@ -12,10 +12,14 @@ Requires:
 from __future__ import annotations
 
 from os import getenv
-from typing import Any
+from typing import TYPE_CHECKING
 
 from agno.context.backend import ContextBackend
 from agno.context.provider import Status
+
+if TYPE_CHECKING:
+    from agno.tools import Toolkit
+    from agno.tools.browserbase import BrowserbaseTools
 
 
 class BrowserbaseBackend(ContextBackend):
@@ -29,7 +33,7 @@ class BrowserbaseBackend(ContextBackend):
     ) -> None:
         self.api_key = api_key or getenv("BROWSERBASE_API_KEY")
         self.project_id = project_id or getenv("BROWSERBASE_PROJECT_ID")
-        self._tools: Any = None
+        self._tools: BrowserbaseTools | None = None
 
     def status(self) -> Status:
         missing = []
@@ -44,12 +48,12 @@ class BrowserbaseBackend(ContextBackend):
     async def astatus(self) -> Status:
         return self.status()
 
-    def get_tools(self) -> list:
+    def get_tools(self) -> list[Toolkit]:
         if self._tools is None:
             self._tools = self._build_tools()
         return [self._tools]
 
-    def _build_tools(self) -> Any:
+    def _build_tools(self) -> BrowserbaseTools:
         from agno.tools.browserbase import BrowserbaseTools
 
         return BrowserbaseTools(
