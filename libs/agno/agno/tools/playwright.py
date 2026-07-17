@@ -122,18 +122,12 @@ class PlaywrightTools(Toolkit):
         self.user_agent = user_agent
         self.timeout_ms = timeout_ms
         self.record_video_dir = record_video_dir
-        self.enable_get_console_messages = all or enable_get_console_messages
-        self.enable_get_network_requests = all or enable_get_network_requests
 
         # Playwright state
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
-
-        # Console/network buffers
-        self._console_messages: List[Dict[str, Any]] = []
-        self._network_requests: List[Dict[str, Any]] = []
 
         # Build tool list
         tools: List[Any] = []
@@ -196,26 +190,9 @@ class PlaywrightTools(Toolkit):
 
         context = self._browser.new_context(**context_options)
         context.set_default_timeout(self.timeout_ms)
-        page = context.new_page()
-
-        if self.enable_get_console_messages:
-            page.on("console", self._on_console_message)
-        if self.enable_get_network_requests:
-            page.on("request", self._on_request)
-
         self._context = context
-        self._page = page
+        self._page = context.new_page()
         log_debug(f"Playwright browser initialized: {self.browser_type}, headless={self.headless}")
-
-    def _on_console_message(self, msg):
-        self._console_messages.append({"type": msg.type, "text": msg.text})
-        if len(self._console_messages) > 200:
-            self._console_messages = self._console_messages[-200:]
-
-    def _on_request(self, request):
-        self._network_requests.append({"url": request.url, "method": request.method})
-        if len(self._network_requests) > 100:
-            self._network_requests = self._network_requests[-100:]
 
     def _cleanup(self):
         if self._context:
@@ -228,17 +205,12 @@ class PlaywrightTools(Toolkit):
             self._playwright.stop()
             self._playwright = None
         self._page = None
-        self._console_messages = []
-        self._network_requests = []
 
     def navigate_to(self, url: str) -> str:
         """Navigates to a URL.
 
         Args:
             url: The URL to navigate to
-
-        Returns:
-            JSON string with navigation status, title, and URL
         """
         try:
             self._initialize_browser()
@@ -398,12 +370,22 @@ class PlaywrightTools(Toolkit):
             return json.dumps({"status": "error", "message": str(e), "path": path})
 
     def get_console_messages(self) -> str:
-        """Gets console messages from the browser (up to last 200)."""
-        return json.dumps({"status": "success", "messages": self._console_messages})
+        """Gets console messages from the browser."""
+        try:
+            self._initialize_browser()
+            messages = [{"type": m.type, "text": m.text} for m in self._page.console_messages()]
+            return json.dumps({"status": "success", "messages": messages})
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     def get_network_requests(self) -> str:
-        """Gets recent network requests (up to last 100)."""
-        return json.dumps({"status": "success", "requests": self._network_requests})
+        """Gets network requests made by the page."""
+        try:
+            self._initialize_browser()
+            requests = [{"url": r.url, "method": r.method} for r in self._page.requests()]
+            return json.dumps({"status": "success", "requests": requests})
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
 
     def get_recording(self) -> str:
         """Gets the video recording path. Closes the session to finalize the video."""
