@@ -17,7 +17,6 @@ from agno.context.provider import Status
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
-    from agno.tools.playwright import PlaywrightTools
 
 
 class PlaywrightBackend(ContextBackend):
@@ -29,7 +28,7 @@ class PlaywrightBackend(ContextBackend):
         headless: bool = True,
     ) -> None:
         self.headless = headless
-        self._tools: PlaywrightTools | None = None
+        self._tools: Toolkit | None = None
 
     def status(self) -> Status:
         mode = "headless" if self.headless else "headed"
@@ -43,7 +42,7 @@ class PlaywrightBackend(ContextBackend):
             self._tools = self._build_tools()
         return [self._tools]
 
-    def _build_tools(self) -> PlaywrightTools:
+    def _build_tools(self) -> Toolkit:
         from agno.tools.playwright import PlaywrightTools
 
         return PlaywrightTools(

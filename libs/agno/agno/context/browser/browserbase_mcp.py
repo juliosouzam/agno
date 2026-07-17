@@ -20,7 +20,6 @@ from agno.utils.log import log_warning
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
-    from agno.tools.mcp import MCPTools
 
 
 class BrowserbaseMCPBackend(ContextBackend):
@@ -50,7 +49,7 @@ class BrowserbaseMCPBackend(ContextBackend):
         self.exclude_tools = exclude_tools
         self.tool_name_prefix = tool_name_prefix
         self.timeout_seconds = timeout_seconds
-        self._mcp_tools: MCPTools | None = None
+        self._mcp_tools: Toolkit | None = None
 
     def status(self) -> Status:
         missing = []
@@ -72,7 +71,7 @@ class BrowserbaseMCPBackend(ContextBackend):
             self._mcp_tools = self._build_tools()
         return [self._mcp_tools]
 
-    def _build_tools(self) -> MCPTools:
+    def _build_tools(self) -> Toolkit:
         from mcp import StdioServerParameters
 
         from agno.tools.mcp import MCPTools

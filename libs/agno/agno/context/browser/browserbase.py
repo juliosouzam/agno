@@ -19,7 +19,6 @@ from agno.context.provider import Status
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
-    from agno.tools.browserbase import BrowserbaseTools
 
 
 class BrowserbaseBackend(ContextBackend):
@@ -33,7 +32,7 @@ class BrowserbaseBackend(ContextBackend):
     ) -> None:
         self.api_key = api_key or getenv("BROWSERBASE_API_KEY")
         self.project_id = project_id or getenv("BROWSERBASE_PROJECT_ID")
-        self._tools: BrowserbaseTools | None = None
+        self._tools: Toolkit | None = None
 
     def status(self) -> Status:
         missing = []
@@ -53,7 +52,7 @@ class BrowserbaseBackend(ContextBackend):
             self._tools = self._build_tools()
         return [self._tools]
 
-    def _build_tools(self) -> BrowserbaseTools:
+    def _build_tools(self) -> Toolkit:
         from agno.tools.browserbase import BrowserbaseTools
 
         return BrowserbaseTools(
