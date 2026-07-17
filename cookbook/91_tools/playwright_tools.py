@@ -65,20 +65,55 @@ agent_forms = Agent(
 # Run Agent
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Extract information from a website
+    # Simple: Extract information from a website
     agent_all.print_response(
         "Go to https://news.ycombinator.com and tell me the top 3 stories",
         stream=True,
     )
 
-    # Take a screenshot
-    # agent_readonly.print_response(
-    #     "Go to https://example.com and take a screenshot at /tmp/example.png",
+    # Multi-page navigation with data extraction
+    # agent_all.print_response(
+    #     """
+    #     1. Go to https://quotes.toscrape.com
+    #     2. Extract the first 3 quotes with their authors
+    #     3. Click on the first author's name to see their bio
+    #     4. Extract the author's birth date and location
+    #     5. Go back to the main page
+    #     6. Verify you're back on the quotes page
+    #     7. Close the session
+    #     """,
     #     stream=True,
     # )
 
-    # Fill out a form
+    # Pagination: collect data across multiple pages
+    # agent_all.print_response(
+    #     """
+    #     1. Go to https://quotes.toscrape.com
+    #     2. Extract all quotes from page 1
+    #     3. Click the 'Next' button to go to page 2
+    #     4. Extract all quotes from page 2
+    #     5. Report the total number of quotes collected
+    #     6. Close the session
+    #     """,
+    #     stream=True,
+    # )
+
+    # Form filling
     # agent_forms.print_response(
-    #     "Go to https://httpbin.org/forms/post and fill out the form with test data",
+    #     """
+    #     1. Go to https://httpbin.org/forms/post
+    #     2. Fill out the form with:
+    #        - Customer name: John Doe
+    #        - Telephone: 555-123-4567
+    #        - Email: john.doe@example.com
+    #     3. Take a screenshot at /tmp/form_filled.png
+    #     4. Close the session
+    #     """,
+    #     stream=True,
+    # )
+
+    # Take a screenshot
+    # agent_readonly.print_response(
+    #     "Go to https://example.com and take a screenshot at /tmp/example.png",
     #     stream=True,
     # )
