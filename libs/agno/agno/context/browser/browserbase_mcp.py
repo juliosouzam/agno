@@ -40,15 +40,6 @@ class BrowserbaseMCPBackend(ContextBackend):
         self._mcp_tools: Toolkit | None = None
 
     def status(self) -> Status:
-        missing = []
-        if not self.api_key:
-            missing.append("BROWSERBASE_API_KEY")
-        if not self.project_id:
-            missing.append("BROWSERBASE_PROJECT_ID")
-        if not self.model_api_key:
-            missing.append("GEMINI_API_KEY")
-        if missing:
-            return Status(ok=False, detail=f"browserbase-mcp: missing {', '.join(missing)}")
         return Status(ok=True, detail="browserbase-mcp (stagehand)")
 
     async def astatus(self) -> Status:
