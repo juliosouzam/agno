@@ -43,9 +43,10 @@ class PlaywrightMCPBackend(ContextBackend):
         return Status(ok=True, detail="playwright-mcp (not yet connected)")
 
     async def astatus(self) -> Status:
-        await self.asetup()
-        if self._mcp_tools is None or not getattr(self._mcp_tools, "initialized", False):
-            return Status(ok=False, detail="playwright-mcp: connection failed")
+        try:
+            await self._ensure_session()
+        except Exception as exc:
+            return Status(ok=False, detail=f"playwright-mcp: {type(exc).__name__}: {exc}")
         return Status(ok=True, detail="playwright-mcp")
 
     def get_tools(self) -> list[Toolkit]:
@@ -71,16 +72,23 @@ class PlaywrightMCPBackend(ContextBackend):
             timeout_seconds=self.timeout_seconds,
         )
 
-    async def asetup(self) -> None:
+    async def _ensure_session(self) -> Toolkit:
+        if self._mcp_tools is not None and getattr(self._mcp_tools, "initialized", False):
+            return self._mcp_tools
         if self._mcp_tools is None:
             self._mcp_tools = self._build_tools()
-        if getattr(self._mcp_tools, "initialized", False):
-            return
         try:
             await self._mcp_tools._connect()
+        except Exception:
+            self._mcp_tools = None
+            raise
+        return self._mcp_tools
+
+    async def asetup(self) -> None:
+        try:
+            await self._ensure_session()
         except Exception as exc:
             log_warning(f"PlaywrightMCPBackend setup failed: {type(exc).__name__}: {exc}")
-            self._mcp_tools = None
 
     async def aclose(self) -> None:
         tools = self._mcp_tools

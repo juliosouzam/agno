@@ -66,10 +66,17 @@ class ParallelMCPBackend(ContextBackend):
 
     def status(self) -> Status:
         endpoint = self.url.rsplit("/", 1)[-1]
-        return Status(ok=True, detail=f"search.parallel.ai/{endpoint} ({'keyed' if self.api_key else 'keyless'})")
+        if self._mcp_tools is not None and getattr(self._mcp_tools, "initialized", False):
+            return Status(ok=True, detail=f"search.parallel.ai/{endpoint} ({'keyed' if self.api_key else 'keyless'})")
+        return Status(ok=True, detail=f"search.parallel.ai/{endpoint} ({'keyed' if self.api_key else 'keyless'}, not yet connected)")
 
     async def astatus(self) -> Status:
-        return await asyncio.to_thread(self.status)
+        endpoint = self.url.rsplit("/", 1)[-1]
+        try:
+            await self._ensure_session()
+        except Exception as exc:
+            return Status(ok=False, detail=f"search.parallel.ai/{endpoint}: {type(exc).__name__}: {exc}")
+        return Status(ok=True, detail=f"search.parallel.ai/{endpoint} ({'keyed' if self.api_key else 'keyless'})")
 
     def get_tools(self) -> list:
         if self._mcp_tools is None:
@@ -100,22 +107,24 @@ class ParallelMCPBackend(ContextBackend):
             timeout_seconds=self.timeout_seconds,
         )
 
-    async def asetup(self) -> None:
-        """Connect to the Parallel MCP server.
-
-        On failure, logs a warning; the web backend will be
-        unavailable until the next restart.
-        """
+    async def _ensure_session(self) -> Any:
+        if self._mcp_tools is not None and getattr(self._mcp_tools, "initialized", False):
+            return self._mcp_tools
         if self._mcp_tools is None:
             self._mcp_tools = self._build_tools()
-        if getattr(self._mcp_tools, "initialized", False):
-            return
         log_info(f"ParallelMCPBackend: connecting to {self.url} ({'keyed' if self.api_key else 'keyless'})")
         try:
             await self._mcp_tools._connect()
+        except Exception:
+            self._mcp_tools = None
+            raise
+        return self._mcp_tools
+
+    async def asetup(self) -> None:
+        try:
+            await self._ensure_session()
         except Exception as exc:
             log_warning(f"ParallelMCPBackend setup failed — {type(exc).__name__}: {exc}.")
-            self._mcp_tools = None
 
     async def aclose(self) -> None:
         """Close the MCP session and clear the cached tool handle."""
