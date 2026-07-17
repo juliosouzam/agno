@@ -49,20 +49,66 @@ def member_name(chunk: Any, entity_name: str) -> Optional[str]:
     return None
 
 
-def should_respond(event: dict, reply_to_mentions_only: bool) -> bool:
+def should_respond(
+    event: dict,
+    reply_to_mentions_only: bool,
+    ambient_mode: bool = False,
+    is_ambient: bool = False,
+) -> bool:
+    """Determine if the bot should respond to this Slack event.
+
+    Args:
+        event: The Slack event dict
+        reply_to_mentions_only: If True, only respond to @mentions (not all messages)
+        ambient_mode: If True, respond to thread replies where bot was in first message
+        is_ambient: Pre-computed flag indicating this thread qualifies for ambient mode
+    """
     event_type = event.get("type")
     if event_type not in ("app_mention", "message"):
         return False
+
     channel_type = event.get("channel_type", "")
     is_dm = channel_type == "im"
-    if reply_to_mentions_only and event_type == "message" and not is_dm:
+
+    # DMs always respond
+    if is_dm:
+        return True
+
+    # app_mention always responds (it's an explicit @mention)
+    if event_type == "app_mention":
+        return True
+
+    # From here: event_type == "message" in a channel (not DM)
+    thread_ts = event.get("thread_ts")
+    is_thread_reply = thread_ts and thread_ts != event.get("ts")
+
+    # Ambient mode: respond to thread replies where bot was mentioned in first message
+    if ambient_mode and is_thread_reply and is_ambient:
+        return True
+
+    # reply_to_mentions_only blocks non-mention messages
+    if reply_to_mentions_only:
         return False
-    # When responding to all messages, skip app_mention to avoid duplicates.
-    # Slack fires both app_mention and message for the same @mention — the
-    # message event already covers it.
-    if not reply_to_mentions_only and event_type == "app_mention" and not is_dm:
-        return False
+
     return True
+
+
+async def is_ambient_thread(async_client: Any, channel: str, thread_ts: str, bot_user_id: Optional[str]) -> bool:
+    """Check if this thread qualifies for ambient mode (bot mentioned in first message)."""
+    if not thread_ts or not bot_user_id:
+        return False
+
+    try:
+        resp = await async_client.conversations_replies(channel=channel, ts=thread_ts, limit=1)
+        messages = resp.get("messages", [])
+        if not messages:
+            return False
+
+        first_message_text = messages[0].get("text", "")
+        return f"<@{bot_user_id}>" in first_message_text
+    except Exception as e:
+        log_warning(f"Failed to check ambient thread status: {e}")
+        return False
 
 
 def build_run_metadata(
