@@ -70,12 +70,8 @@ All read+write providers (`WikiContextProvider`, `DatabaseContextProvider`, `Sla
 | `22_wiki_streaming_events.py` | Wiki with streaming context events |
 | `23_wiki_agentos_streaming.py` | Wiki streaming in AgentOS |
 | `24_multi_context_streaming.py` | Multiple providers with streaming |
-| `25_browser_playwright_mcp.py` | Browser automation via Playwright MCP |
-| `26_browser_tools_mode.py` | Direct browser tool access (no sub-agent) |
-| `27_browser_multi_context.py` | Browser + Web + Database multi-provider |
-| `28_browser_playwright_tools.py` | `PlaywrightTools` toolkit with video recording |
-| `29_browser_browserbase_mcp.py` | Cloud browser via Browserbase MCP (Stagehand) |
-| `30_browser_browserbase_tools.py` | `BrowserbaseTools` toolkit with session recording |
+| `25_browser.py` | `BrowserContextProvider` with Playwright and Browserbase backends |
+| `26_browser_direct.py` | Direct toolkit usage (`PlaywrightTools`, `BrowserbaseTools`) |
 
 ## Run
 
