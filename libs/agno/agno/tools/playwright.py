@@ -47,7 +47,6 @@ class PlaywrightTools(Toolkit):
         enable_get_network_requests: Enable network request capture. Defaults to False.
         all: Enable all tools. Defaults to False.
         record_video_dir: Directory to save video recordings. Enables get_recording tool.
-        blocked_url_patterns: URL patterns to block (e.g., ads, trackers).
     """
 
     @classmethod
@@ -116,7 +115,6 @@ class PlaywrightTools(Toolkit):
         enable_get_network_requests: bool = False,
         all: bool = False,
         record_video_dir: Optional[str] = None,
-        blocked_url_patterns: Optional[List[str]] = None,
         **kwargs,
     ):
         self.headless = headless
@@ -124,7 +122,6 @@ class PlaywrightTools(Toolkit):
         self.user_agent = user_agent
         self.timeout_ms = timeout_ms
         self.record_video_dir = record_video_dir
-        self.blocked_url_patterns = blocked_url_patterns or []
         self.enable_get_console_messages = all or enable_get_console_messages
         self.enable_get_network_requests = all or enable_get_network_requests
 
@@ -200,9 +197,6 @@ class PlaywrightTools(Toolkit):
         context = self._browser.new_context(**context_options)
         context.set_default_timeout(self.timeout_ms)
         page = context.new_page()
-
-        for pattern in self.blocked_url_patterns:
-            context.route(pattern, lambda route: route.abort())
 
         if self.enable_get_console_messages:
             page.on("console", self._on_console_message)
