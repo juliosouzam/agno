@@ -1,12 +1,6 @@
-"""BrowserbaseMCPBackend — cloud browser automation via Browserbase's MCP server.
+"""BrowserbaseMCPBackend — cloud browser via Browserbase MCP + Stagehand.
 
-Runs `npx @browserbasehq/mcp-server-browserbase` as a subprocess and exposes
-Stagehand-powered browser tools (navigate, act, observe, extract) to the calling agent.
-
-Requires:
-    Node.js 18+
-    BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables
-    GEMINI_API_KEY (or model_api_key) for Stagehand's internal LLM
+Requires: Node.js 18+, BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, GEMINI_API_KEY
 """
 
 from __future__ import annotations
@@ -23,13 +17,7 @@ if TYPE_CHECKING:
 
 
 class BrowserbaseMCPBackend(ContextBackend):
-    """Backend for `BrowserContextProvider` using Browserbase's MCP server with Stagehand.
-
-    Unlike BrowserbaseBackend (SDK), this uses Stagehand for semantic actions:
-    - `act("click the login button")` instead of CSS selectors
-    - `extract(instruction)` for targeted content extraction
-    - Server-side LLM handles element resolution
-    """
+    """Browserbase MCP backend with Stagehand semantic actions (act, extract)."""
 
     def __init__(
         self,
