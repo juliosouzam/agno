@@ -74,7 +74,7 @@ class PlaywrightTools(Toolkit):
         enable_save_pdf: Enable PDF generation. Defaults to False.
         enable_get_console_messages: Enable console message capture. Defaults to False.
         enable_get_network_requests: Enable network request capture. Defaults to False.
-        all: Enable all tools. Defaults to False.
+        enable_all: Enable all tools. Defaults to False.
         record_video_dir: Directory to save video recordings. Enables get_recording tool.
         blocked_url_patterns: URL patterns to block (e.g., ads, trackers).
         parse_html: Extract text content instead of raw HTML. Defaults to True.
@@ -103,7 +103,7 @@ class PlaywrightTools(Toolkit):
         enable_save_pdf: bool = False,
         enable_get_console_messages: bool = False,
         enable_get_network_requests: bool = False,
-        all: bool = False,
+        enable_all: bool = False,
         record_video_dir: Optional[str] = None,
         blocked_url_patterns: Optional[List[str]] = None,
         parse_html: bool = True,
@@ -120,8 +120,8 @@ class PlaywrightTools(Toolkit):
         self.blocked_url_patterns = blocked_url_patterns or []
         self.parse_html = parse_html
         self.max_content_length = max_content_length
-        self.enable_get_console_messages = all or enable_get_console_messages
-        self.enable_get_network_requests = all or enable_get_network_requests
+        self.enable_get_console_messages = enable_all or enable_get_console_messages
+        self.enable_get_network_requests = enable_all or enable_get_network_requests
 
         # Sync playwright state
         self._playwright: Any = None
@@ -143,46 +143,46 @@ class PlaywrightTools(Toolkit):
         tools: List[Any] = []
         async_tools: List[tuple] = []
 
-        if all or enable_navigate_to:
+        if enable_all or enable_navigate_to:
             tools.append(self.navigate_to)
             async_tools.append((self.anavigate_to, "navigate_to"))
-        if all or enable_go_back:
+        if enable_all or enable_go_back:
             tools.append(self.go_back)
             async_tools.append((self.ago_back, "go_back"))
-        if all or enable_screenshot:
+        if enable_all or enable_screenshot:
             tools.append(self.screenshot)
             async_tools.append((self.ascreenshot, "screenshot"))
-        if all or enable_get_page_content:
+        if enable_all or enable_get_page_content:
             tools.append(self.get_page_content)
             async_tools.append((self.aget_page_content, "get_page_content"))
-        if all or enable_close_session:
+        if enable_all or enable_close_session:
             tools.append(self.close_session)
             async_tools.append((self.aclose_session, "close_session"))
-        if all or enable_click:
+        if enable_all or enable_click:
             tools.append(self.click)
             async_tools.append((self.aclick, "click"))
-        if all or enable_type:
+        if enable_all or enable_type:
             tools.append(self.type_text)
             async_tools.append((self.atype_text, "type_text"))
-        if all or enable_fill_form:
+        if enable_all or enable_fill_form:
             tools.append(self.fill_form)
             async_tools.append((self.afill_form, "fill_form"))
-        if all or enable_get_element_text:
+        if enable_all or enable_get_element_text:
             tools.append(self.get_element_text)
             async_tools.append((self.aget_element_text, "get_element_text"))
-        if all or enable_wait_for:
+        if enable_all or enable_wait_for:
             tools.append(self.wait_for)
             async_tools.append((self.await_for, "wait_for"))
-        if all or enable_evaluate_js:
+        if enable_all or enable_evaluate_js:
             tools.append(self.evaluate_js)
             async_tools.append((self.aevaluate_js, "evaluate_js"))
-        if all or enable_save_pdf:
+        if enable_all or enable_save_pdf:
             tools.append(self.save_pdf)
             async_tools.append((self.asave_pdf, "save_pdf"))
-        if all or enable_get_console_messages:
+        if enable_all or enable_get_console_messages:
             tools.append(self.get_console_messages)
             async_tools.append((self.aget_console_messages, "get_console_messages"))
-        if all or enable_get_network_requests:
+        if enable_all or enable_get_network_requests:
             tools.append(self.get_network_requests)
             async_tools.append((self.aget_network_requests, "get_network_requests"))
         # Recording tool only if video dir is set
@@ -297,10 +297,6 @@ class PlaywrightTools(Toolkit):
             return content
         truncated = content[: self.max_content_length]
         return f"{truncated}\n\n[Content truncated. Original: {len(content)} chars, showing first {self.max_content_length}.]"
-
-    # -------------------------------------------------------------------------
-    # Sync tools
-    # -------------------------------------------------------------------------
 
     def navigate_to(self, url: str) -> str:
         """Navigates to a URL.
@@ -572,10 +568,6 @@ class PlaywrightTools(Toolkit):
         except Exception as e:
             self._cleanup()
             return json.dumps({"status": "error", "message": str(e)})
-
-    # -------------------------------------------------------------------------
-    # Async tools
-    # -------------------------------------------------------------------------
 
     async def _ainitialize_browser(self):
         """Initialize async browser if not already initialized."""
