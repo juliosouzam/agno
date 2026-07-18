@@ -66,6 +66,14 @@
 
 ---
 
+### oracle_db.py
+
+**Status:** PENDING
+
+**Description:** Oracle Database Backend.
+
+---
+
 ### postgres.py
 
 **Status:** PENDING

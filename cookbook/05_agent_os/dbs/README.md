@@ -11,6 +11,7 @@ Examples for `dbs` in AgentOS.
 - `mongo.py` — Mongo Database Backend.
 - `mysql.py` — MySQL Database Backend.
 - `neon.py` — Example showing how to use AgentOS with Neon as our database provider.
+- `oracle_db.py` — Oracle Database Backend.
 - `postgres.py` — Postgres Database Backend.
 - `redis_db.py` — Example showing how to use AgentOS with Redis as database.
 - `singlestore.py` — Example showing how to use AgentOS with SingleStore as our database provider.
