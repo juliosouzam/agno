@@ -34,11 +34,18 @@ from agno.utils.string import generate_id
 try:
     from sqlalchemy import ForeignKey, Index, Text, UniqueConstraint, func, literal_column, type_coerce, update
     from sqlalchemy.engine import Engine, create_engine
+    from sqlalchemy.exc import IntegrityError
     from sqlalchemy.orm import scoped_session, sessionmaker
     from sqlalchemy.schema import Column, MetaData, Table
     from sqlalchemy.sql.expression import select, text
 except ImportError:
     raise ImportError("`sqlalchemy` not installed. Please install it using `pip install sqlalchemy`")
+
+
+# Guard for the WHEN MATCHED branch of bulk session MERGEs: never update (in
+# particular, never reassign) a session that already belongs to a different user.
+# Mirrors the Postgres bulk upsert `ON CONFLICT DO UPDATE ... WHERE` predicate.
+_SESSION_OWNER_GUARD = "t.user_id = src.user_id OR t.user_id IS NULL"
 
 
 class OracleDb(BaseDb):
@@ -971,10 +978,9 @@ class OracleDb(BaseDb):
                     agent_ids = []
                     for session in agent_sessions:
                         session_dict = session.to_dict()
-                        agent_ids.append(session_dict.get("session_id"))
                         # Use preserved updated_at if flag is set and value exists, otherwise use current time
                         updated_at = session_dict.get("updated_at") if preserve_updated_at else int(time.time())
-                        merge_upsert(
+                        affected = merge_upsert(
                             session=sess,
                             table=table,
                             key_columns=["session_id"],
@@ -1001,30 +1007,35 @@ class OracleDb(BaseDb):
                                 "runs",
                                 "updated_at",
                             ],
+                            matched_where=_SESSION_OWNER_GUARD,
                         )
+                        # 0 affected = row exists but belongs to another user: skip it
+                        # from the results, like the Postgres conditional upsert does.
+                        if affected:
+                            agent_ids.append(session_dict.get("session_id"))
 
                     # Fetch the results for agent sessions
-                    select_stmt = select(table).where(table.c.session_id.in_(agent_ids))
-                    result = sess.execute(select_stmt).fetchall()
+                    if agent_ids:
+                        select_stmt = select(table).where(table.c.session_id.in_(agent_ids))
+                        result = sess.execute(select_stmt).fetchall()
 
-                    for row in result:
-                        session_dict = dict(row._mapping)
-                        if deserialize:
-                            deserialized_agent_session = AgentSession.from_dict(session_dict)
-                            if deserialized_agent_session is None:
-                                continue
-                            results.append(deserialized_agent_session)
-                        else:
-                            results.append(session_dict)
+                        for row in result:
+                            session_dict = dict(row._mapping)
+                            if deserialize:
+                                deserialized_agent_session = AgentSession.from_dict(session_dict)
+                                if deserialized_agent_session is None:
+                                    continue
+                                results.append(deserialized_agent_session)
+                            else:
+                                results.append(session_dict)
 
                 # Bulk upsert team sessions
                 if team_sessions:
                     team_ids = []
                     for session in team_sessions:
                         session_dict = session.to_dict()
-                        team_ids.append(session_dict.get("session_id"))
                         updated_at = session_dict.get("updated_at") if preserve_updated_at else int(time.time())
-                        merge_upsert(
+                        affected = merge_upsert(
                             session=sess,
                             table=table,
                             key_columns=["session_id"],
@@ -1051,30 +1062,35 @@ class OracleDb(BaseDb):
                                 "runs",
                                 "updated_at",
                             ],
+                            matched_where=_SESSION_OWNER_GUARD,
                         )
+                        # 0 affected = row exists but belongs to another user: skip it
+                        # from the results, like the Postgres conditional upsert does.
+                        if affected:
+                            team_ids.append(session_dict.get("session_id"))
 
                     # Fetch the results for team sessions
-                    select_stmt = select(table).where(table.c.session_id.in_(team_ids))
-                    result = sess.execute(select_stmt).fetchall()
+                    if team_ids:
+                        select_stmt = select(table).where(table.c.session_id.in_(team_ids))
+                        result = sess.execute(select_stmt).fetchall()
 
-                    for row in result:
-                        session_dict = dict(row._mapping)
-                        if deserialize:
-                            deserialized_team_session = TeamSession.from_dict(session_dict)
-                            if deserialized_team_session is None:
-                                continue
-                            results.append(deserialized_team_session)
-                        else:
-                            results.append(session_dict)
+                        for row in result:
+                            session_dict = dict(row._mapping)
+                            if deserialize:
+                                deserialized_team_session = TeamSession.from_dict(session_dict)
+                                if deserialized_team_session is None:
+                                    continue
+                                results.append(deserialized_team_session)
+                            else:
+                                results.append(session_dict)
 
                 # Bulk upsert workflow sessions
                 if workflow_sessions:
                     workflow_ids = []
                     for session in workflow_sessions:
                         session_dict = session.to_dict()
-                        workflow_ids.append(session_dict.get("session_id"))
                         updated_at = session_dict.get("updated_at") if preserve_updated_at else int(time.time())
-                        merge_upsert(
+                        affected = merge_upsert(
                             session=sess,
                             table=table,
                             key_columns=["session_id"],
@@ -1101,21 +1117,27 @@ class OracleDb(BaseDb):
                                 "runs",
                                 "updated_at",
                             ],
+                            matched_where=_SESSION_OWNER_GUARD,
                         )
+                        # 0 affected = row exists but belongs to another user: skip it
+                        # from the results, like the Postgres conditional upsert does.
+                        if affected:
+                            workflow_ids.append(session_dict.get("session_id"))
 
                     # Fetch the results for workflow sessions
-                    select_stmt = select(table).where(table.c.session_id.in_(workflow_ids))
-                    result = sess.execute(select_stmt).fetchall()
+                    if workflow_ids:
+                        select_stmt = select(table).where(table.c.session_id.in_(workflow_ids))
+                        result = sess.execute(select_stmt).fetchall()
 
-                    for row in result:
-                        session_dict = dict(row._mapping)
-                        if deserialize:
-                            deserialized_workflow_session = WorkflowSession.from_dict(session_dict)
-                            if deserialized_workflow_session is None:
-                                continue
-                            results.append(deserialized_workflow_session)
-                        else:
-                            results.append(session_dict)
+                        for row in result:
+                            session_dict = dict(row._mapping)
+                            if deserialize:
+                                deserialized_workflow_session = WorkflowSession.from_dict(session_dict)
+                                if deserialized_workflow_session is None:
+                                    continue
+                                results.append(deserialized_workflow_session)
+                            else:
+                                results.append(session_dict)
 
             return results
 
@@ -2483,18 +2505,24 @@ class OracleDb(BaseDb):
         from sqlalchemy import case, literal
 
         if spans_table is not None:
-            # JOIN with spans table to calculate total_spans and error_count
-            return (
+            # Aggregate spans in a derived subquery joined by trace_id. Grouping the
+            # join itself by trace_id (the MySQL approach) raises ORA-00979 on Oracle,
+            # which does not allow selecting columns that are only functionally
+            # dependent on the grouped primary key.
+            span_agg = (
                 select(
-                    table,
-                    func.coalesce(func.count(spans_table.c.span_id), 0).label("total_spans"),
-                    func.coalesce(func.sum(case((spans_table.c.status_code == "ERROR", 1), else_=0)), 0).label(
-                        "error_count"
-                    ),
+                    spans_table.c.trace_id,
+                    func.count(spans_table.c.span_id).label("total_spans"),
+                    func.sum(case((spans_table.c.status_code == "ERROR", 1), else_=0)).label("error_count"),
                 )
-                .select_from(table.outerjoin(spans_table, table.c.trace_id == spans_table.c.trace_id))
-                .group_by(table.c.trace_id)
+                .group_by(spans_table.c.trace_id)
+                .subquery()
             )
+            return select(
+                table,
+                func.coalesce(span_agg.c.total_spans, 0).label("total_spans"),
+                func.coalesce(span_agg.c.error_count, 0).label("error_count"),
+            ).select_from(table.outerjoin(span_agg, table.c.trace_id == span_agg.c.trace_id))
         else:
             # Fallback if spans table doesn't exist
             return select(table, literal(0).label("total_spans"), literal(0).label("error_count"))
@@ -2576,80 +2604,91 @@ class OracleDb(BaseDb):
                 """Preserve an already non-null context value over an incoming one."""
                 return existing_value if existing_value is not None else new_value
 
-            with self.Session() as sess, sess.begin():
-                existing_row = sess.execute(
-                    select(table).where(table.c.trace_id == trace_dict["trace_id"]).with_for_update()
-                ).fetchone()
+            def locked_merge() -> None:
+                with self.Session() as sess, sess.begin():
+                    existing_row = sess.execute(
+                        select(table).where(table.c.trace_id == trace_dict["trace_id"]).with_for_update()
+                    ).fetchone()
 
-                if existing_row is None:
-                    values = trace_dict
-                    update_columns = None
-                else:
-                    existing = dict(existing_row._mapping)
+                    if existing_row is None:
+                        values = trace_dict
+                        update_columns = None
+                    else:
+                        existing = dict(existing_row._mapping)
 
-                    # Timestamps are ISO 8601 strings that compare lexicographically
-                    # like the underlying datetimes, so plain min/max mirror LEAST/GREATEST.
-                    merged_start = min(existing["start_time"], trace_dict["start_time"])
-                    merged_end = max(existing["end_time"], trace_dict["end_time"])
-                    start_dt = datetime.fromisoformat(merged_start.replace("Z", "+00:00"))
-                    end_dt = datetime.fromisoformat(merged_end.replace("Z", "+00:00"))
+                        # Timestamps are ISO 8601 strings that compare lexicographically
+                        # like the underlying datetimes, so plain min/max mirror LEAST/GREATEST.
+                        merged_start = min(existing["start_time"], trace_dict["start_time"])
+                        merged_end = max(existing["end_time"], trace_dict["end_time"])
+                        start_dt = datetime.fromisoformat(merged_start.replace("Z", "+00:00"))
+                        end_dt = datetime.fromisoformat(merged_end.replace("Z", "+00:00"))
 
-                    new_level = component_level(
-                        trace_dict.get("workflow_id"),
-                        trace_dict.get("team_id"),
-                        trace_dict.get("agent_id"),
-                        trace_dict.get("name"),
+                        new_level = component_level(
+                            trace_dict.get("workflow_id"),
+                            trace_dict.get("team_id"),
+                            trace_dict.get("agent_id"),
+                            trace_dict.get("name"),
+                        )
+                        existing_level = component_level(
+                            existing.get("workflow_id"),
+                            existing.get("team_id"),
+                            existing.get("agent_id"),
+                            existing.get("name"),
+                        )
+
+                        values = {
+                            "trace_id": existing["trace_id"],
+                            # Update name only if the new trace is from a higher-level component
+                            "name": trace_dict.get("name") if new_level > existing_level else existing.get("name"),
+                            "status": trace_dict.get("status"),
+                            "start_time": merged_start,
+                            "end_time": merged_end,
+                            "duration_ms": round((end_dt - start_dt).total_seconds() * 1000),
+                            # Preserve existing non-null context values: a later upsert from a
+                            # child span (e.g. a post-hook agent's run with a different
+                            # session_id) must not overwrite the trace's already-correct context.
+                            "run_id": coalesce(existing.get("run_id"), trace_dict.get("run_id")),
+                            "session_id": coalesce(existing.get("session_id"), trace_dict.get("session_id")),
+                            "user_id": coalesce(existing.get("user_id"), trace_dict.get("user_id")),
+                            "agent_id": coalesce(existing.get("agent_id"), trace_dict.get("agent_id")),
+                            "team_id": coalesce(existing.get("team_id"), trace_dict.get("team_id")),
+                            "workflow_id": coalesce(existing.get("workflow_id"), trace_dict.get("workflow_id")),
+                            "created_at": existing["created_at"],
+                        }
+                        update_columns = [
+                            "name",
+                            "status",
+                            "start_time",
+                            "end_time",
+                            "duration_ms",
+                            "run_id",
+                            "session_id",
+                            "user_id",
+                            "agent_id",
+                            "team_id",
+                            "workflow_id",
+                            # created_at intentionally NOT listed: MERGE only touches listed
+                            # columns, so the existing value is preserved on match.
+                        ]
+
+                    merge_upsert(
+                        session=sess,
+                        table=table,
+                        key_columns=["trace_id"],
+                        values=values,
+                        update_columns=update_columns,
                     )
-                    existing_level = component_level(
-                        existing.get("workflow_id"),
-                        existing.get("team_id"),
-                        existing.get("agent_id"),
-                        existing.get("name"),
-                    )
 
-                    values = {
-                        "trace_id": existing["trace_id"],
-                        # Update name only if the new trace is from a higher-level component
-                        "name": trace_dict.get("name") if new_level > existing_level else existing.get("name"),
-                        "status": trace_dict.get("status"),
-                        "start_time": merged_start,
-                        "end_time": merged_end,
-                        "duration_ms": round((end_dt - start_dt).total_seconds() * 1000),
-                        # Preserve existing non-null context values: a later upsert from a
-                        # child span (e.g. a post-hook agent's run with a different
-                        # session_id) must not overwrite the trace's already-correct context.
-                        "run_id": coalesce(existing.get("run_id"), trace_dict.get("run_id")),
-                        "session_id": coalesce(existing.get("session_id"), trace_dict.get("session_id")),
-                        "user_id": coalesce(existing.get("user_id"), trace_dict.get("user_id")),
-                        "agent_id": coalesce(existing.get("agent_id"), trace_dict.get("agent_id")),
-                        "team_id": coalesce(existing.get("team_id"), trace_dict.get("team_id")),
-                        "workflow_id": coalesce(existing.get("workflow_id"), trace_dict.get("workflow_id")),
-                        "created_at": existing["created_at"],
-                    }
-                    update_columns = [
-                        "name",
-                        "status",
-                        "start_time",
-                        "end_time",
-                        "duration_ms",
-                        "run_id",
-                        "session_id",
-                        "user_id",
-                        "agent_id",
-                        "team_id",
-                        "workflow_id",
-                        # created_at intentionally NOT listed: MERGE only touches listed
-                        # columns, so the existing value is preserved on match.
-                    ]
-
-                merge_upsert(
-                    session=sess,
-                    table=table,
-                    key_columns=["trace_id"],
-                    values=values,
-                    update_columns=update_columns,
-                )
-
+            try:
+                locked_merge()
+            except IntegrityError:
+                # Two concurrent upserts of a brand-new trace_id both pass the
+                # FOR UPDATE read (there is no row to lock yet) and both take the
+                # insert branch; the losing MERGE then hits the unique key
+                # (ORA-00001). Retry once: the row now exists, so the locked read
+                # takes the update path and merges this writer's data instead of
+                # dropping it.
+                locked_merge()
         except Exception as e:
             log_error(f"Error creating trace: {str(e)}")
             # Don't raise - tracing should not break the main application flow

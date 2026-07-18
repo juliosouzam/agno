@@ -965,6 +965,43 @@ def test_build_merge_stmt_custom_update_columns():
     assert "t.created_at = src.created_at" not in sql
 
 
+def test_build_merge_stmt_matched_where_guards_update_branch():
+    """Test build_merge_stmt appends matched_where to the WHEN MATCHED UPDATE branch only"""
+    table = _make_table()
+
+    stmt, params = build_merge_stmt(
+        ORACLE_DIALECT,
+        table,
+        key_columns=["session_id"],
+        values={"session_id": "s1", "session_type": "agent", "created_at": 1},
+        matched_where="t.user_id = src.user_id OR t.user_id IS NULL",
+    )
+
+    sql = str(stmt)
+    assert (
+        "WHEN MATCHED THEN UPDATE SET t.session_type = src.session_type, t.created_at = src.created_at "
+        "WHERE (t.user_id = src.user_id OR t.user_id IS NULL)" in sql
+    )
+    assert sql.index("WHERE (") < sql.index("WHEN NOT MATCHED")
+    assert params == {"session_id": "s1", "session_type": "agent", "created_at": 1}
+
+
+def test_merge_upsert_returns_affected_rowcount(mock_session):
+    """Test merge_upsert surfaces the MERGE rowcount (0 = matched row skipped by the guard)"""
+    table = _make_table()
+    mock_session.get_bind.return_value.dialect = ORACLE_DIALECT
+    mock_session.execute.return_value = Mock(rowcount=0)
+
+    affected = merge_upsert(
+        session=mock_session,
+        table=table,
+        key_columns=["session_id"],
+        values={"session_id": "s1", "session_type": "agent"},
+    )
+
+    assert affected == 0
+
+
 def test_build_merge_stmt_no_update_clause_when_all_columns_are_keys():
     """Test build_merge_stmt omits WHEN MATCHED entirely when there is nothing to update"""
     table = _make_table()

@@ -154,6 +154,7 @@ def build_merge_stmt(
     key_columns: List[str],
     values: Dict[str, Any],
     update_columns: Optional[List[str]] = None,
+    matched_where: Optional[str] = None,
 ) -> Tuple[TextClause, Dict[str, Any]]:
     """Build an Oracle MERGE upsert statement and its bind params.
 
@@ -170,6 +171,11 @@ def build_merge_stmt(
         key_columns: Columns forming the match condition (e.g. the primary key).
         values: Full row values, keyed by column name.
         update_columns: Columns updated on match. Defaults to all non-key columns in values.
+        matched_where: Optional SQL condition appended to the WHEN MATCHED UPDATE
+            branch (aliases: `t` = target row, `src` = incoming values). When it
+            evaluates false the existing row is left untouched (the executed
+            statement reports 0 affected rows), mirroring the conditional
+            `ON CONFLICT DO UPDATE ... WHERE` guard of the Postgres provider.
 
     Returns:
         Tuple of (statement, bind params).
@@ -201,6 +207,8 @@ def build_merge_stmt(
     )
     if update_set:
         merge_sql += f" WHEN MATCHED THEN UPDATE SET {update_set}"
+        if matched_where:
+            merge_sql += f" WHERE ({matched_where})"
     merge_sql += f" WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
 
     return text(merge_sql), params
@@ -212,7 +220,8 @@ def merge_upsert(
     key_columns: List[str],
     values: Dict[str, Any],
     update_columns: Optional[List[str]] = None,
-) -> None:
+    matched_where: Optional[str] = None,
+) -> int:
     """Upsert a single row using Oracle MERGE (sync executor over build_merge_stmt).
 
     Args:
@@ -222,9 +231,17 @@ def merge_upsert(
         values (Dict[str, Any]): Full row values, keyed by column name.
         update_columns (Optional[List[str]]): Columns updated on match. Defaults to all
             non-key columns in values.
+        matched_where (Optional[str]): Optional guard on the WHEN MATCHED UPDATE branch
+            (aliases `t`/`src`); when false the existing row is left untouched.
+
+    Returns:
+        int: Number of rows affected (0 when the row matched but the guard skipped it).
     """
-    stmt, params = build_merge_stmt(session.get_bind().dialect, table, key_columns, values, update_columns)
-    session.execute(stmt, params)
+    stmt, params = build_merge_stmt(
+        session.get_bind().dialect, table, key_columns, values, update_columns, matched_where
+    )
+    result = session.execute(stmt, params)
+    return result.rowcount or 0  # type: ignore
 
 
 # -- Metrics util methods --

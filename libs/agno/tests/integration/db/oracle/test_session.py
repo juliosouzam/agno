@@ -410,3 +410,48 @@ def test_upsert_session_ownership_check_rejects_divergent_user_id(oracle_db_real
     assert retrieved is not None
     assert retrieved.user_id == "alice"
     assert retrieved.session_data.get("owner") == "alice"
+
+
+def test_upsert_sessions_bulk_does_not_reassign_owner(oracle_db_real):
+    """Bulk upsert must not update (nor reassign) a session owned by another user."""
+    session = AgentSession(
+        session_id="test-bulk-owner-guard",
+        agent_id="test-agent",
+        user_id="owner-user",
+        session_data={"original": True},
+        created_at=int(time.time()),
+    )
+    assert oracle_db_real.upsert_session(session) is not None
+
+    hijack = AgentSession(
+        session_id="test-bulk-owner-guard",
+        agent_id="test-agent",
+        user_id="other-user",
+        session_data={"hijacked": True},
+        created_at=int(time.time()),
+    )
+    results = oracle_db_real.upsert_sessions([hijack])
+    assert results == []
+
+    retrieved = oracle_db_real.get_session(session_id="test-bulk-owner-guard", session_type=SessionType.AGENT)
+    assert retrieved is not None
+    assert retrieved.user_id == "owner-user"
+    assert (retrieved.session_data or {}).get("original") is True
+    assert "hijacked" not in (retrieved.session_data or {})
+
+
+def test_upsert_sessions_bulk_same_owner_updates(oracle_db_real):
+    """Bulk upsert still updates rows that belong to the same user."""
+    session = AgentSession(
+        session_id="test-bulk-owner-update",
+        agent_id="test-agent",
+        user_id="owner-user",
+        session_data={"version": 1},
+        created_at=int(time.time()),
+    )
+    assert oracle_db_real.upsert_session(session) is not None
+
+    session.session_data = {"version": 2}
+    results = oracle_db_real.upsert_sessions([session])
+    assert len(results) == 1
+    assert (results[0].session_data or {}).get("version") == 2

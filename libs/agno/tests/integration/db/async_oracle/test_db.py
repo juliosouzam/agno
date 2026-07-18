@@ -187,3 +187,128 @@ async def test_upsert_schema_version_merge_is_idempotent(async_oracle_db_real):
     assert len(result) == 1
     assert result[0][0] == "2.1.0"
     assert result[0][1] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_trace_aggregates_span_counts(async_oracle_engine):
+    """get_trace/get_traces must aggregate span counts once spans exist.
+
+    Grouping the trace-span join by trace_id alone raises ORA-00979 on Oracle,
+    so the provider aggregates spans in a derived subquery instead.
+    """
+    from agno.tracing.schemas import Span, Trace
+
+    db = AsyncOracleDb(db_engine=async_oracle_engine, traces_table="test_traces_agg", spans_table="test_spans_agg")
+    now = datetime.now(timezone.utc)
+    await db.upsert_trace(
+        Trace(
+            trace_id="test-agg-trace",
+            name="agent.run",
+            status="OK",
+            start_time=now,
+            end_time=now,
+            duration_ms=10,
+            total_spans=0,
+            error_count=0,
+            run_id=None,
+            session_id=None,
+            user_id=None,
+            agent_id="agent-1",
+            team_id=None,
+            workflow_id=None,
+            created_at=now,
+        )
+    )
+    for span_id, status_code in (("test-agg-span-ok", "OK"), ("test-agg-span-err", "ERROR")):
+        await db.create_span(
+            Span(
+                span_id=span_id,
+                trace_id="test-agg-trace",
+                parent_span_id=None,
+                name="step",
+                span_kind="INTERNAL",
+                status_code=status_code,
+                status_message=None,
+                start_time=now,
+                end_time=now,
+                duration_ms=10,
+                attributes={},
+                created_at=now,
+            )
+        )
+
+    trace = await db.get_trace(trace_id="test-agg-trace")
+    assert trace is not None
+    assert trace.total_spans == 2
+    assert trace.error_count == 1
+
+    traces, total = await db.get_traces()
+    assert total >= 1
+    assert any(t.trace_id == "test-agg-trace" for t in traces)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upsert_trace_retries_on_unique_violation(async_oracle_engine):
+    """The losing MERGE of two concurrent inserts of a brand-new trace_id must retry.
+
+    Both writers pass the FOR UPDATE read (no row to lock yet) and take the insert
+    branch; the loser hits ORA-00001 and, without the retry, its trace data would be
+    silently dropped.
+    """
+    import asyncio
+
+    from sqlalchemy import create_engine
+
+    from agno.tracing.schemas import Trace
+
+    db = AsyncOracleDb(db_engine=async_oracle_engine, traces_table="test_traces_race")
+    now = datetime.now(timezone.utc)
+
+    def make_trace(trace_id: str, agent_id: str) -> Trace:
+        return Trace(
+            trace_id=trace_id,
+            name="agent.run",
+            status="OK",
+            start_time=now,
+            end_time=now,
+            duration_ms=10,
+            total_spans=0,
+            error_count=0,
+            run_id=None,
+            session_id=None,
+            user_id=None,
+            agent_id=agent_id,
+            team_id=None,
+            workflow_id=None,
+            created_at=now,
+        )
+
+    # Create the table outside the race window
+    await db.upsert_trace(make_trace("test-race-warmup", "warmup-agent"))
+
+    # Writer A (a plain sync connection): uncommitted insert of the contended trace_id
+    sync_url = async_oracle_engine.url.render_as_string(hide_password=False).replace("+oracledb_async", "+oracledb")
+    sync_engine = create_engine(sync_url)
+    blocker = sync_engine.connect()
+    tx = blocker.begin()
+    blocker.execute(text("SELECT * FROM test_traces_race WHERE trace_id = 'test-race-1' FOR UPDATE"))
+    blocker.execute(
+        text(
+            "INSERT INTO test_traces_race (trace_id, name, status, start_time, end_time, duration_ms, created_at) "
+            "VALUES ('test-race-1', 'agent.run', 'OK', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:01+00:00', 1000, '2026-01-01T00:00:00+00:00')"
+        )
+    )
+
+    # Writer B: blocks on writer A's uncommitted unique index entry, then loses
+    loser = asyncio.create_task(db.upsert_trace(make_trace("test-race-1", "loser-agent")))
+    await asyncio.sleep(2)
+    tx.commit()
+    await asyncio.wait_for(loser, timeout=30)
+    blocker.close()
+
+    async with async_oracle_engine.connect() as conn:
+        result = await conn.execute(text("SELECT agent_id FROM test_traces_race WHERE trace_id = 'test-race-1'"))
+        agent_id = result.scalar()
+    sync_engine.dispose()
+    assert agent_id == "loser-agent"
