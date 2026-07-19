@@ -84,7 +84,10 @@ EVAL_TABLE_SCHEMA = {
 KNOWLEDGE_TABLE_SCHEMA = {
     "id": {"type": lambda: String(128), "primary_key": True, "nullable": False},
     "name": {"type": lambda: String(255), "nullable": False},
-    "description": {"type": Text, "nullable": False},
+    # Oracle stores the empty string as NULL, and callers legitimately pass an
+    # empty description, so this column cannot carry the NOT NULL constraint the
+    # other providers use.
+    "description": {"type": Text, "nullable": True},
     "metadata": {"type": OracleJSON, "nullable": True},
     "type": {"type": lambda: String(50), "nullable": True},
     "size": {"type": BigInteger, "nullable": True},

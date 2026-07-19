@@ -14,6 +14,7 @@ from agno.db.oracle.utils import (
     bulk_upsert_metrics,
     calculate_date_metrics,
     deserialize_cultural_knowledge_from_db,
+    deserialize_knowledge_row,
     fetch_all_sessions_data,
     get_dates_to_calculate_metrics_for,
     is_table_available,
@@ -395,9 +396,17 @@ class OracleDb(BaseDb):
         ):
             raise ValueError(f"Table {self.db_schema or 'default schema'}.{table_name} has an invalid schema")
 
+        # Reflection (autoload_with) loses custom column types: JSON columns come back
+        # as plain CLOB, so raw MERGE binds would skip OracleJSON serialization and fail
+        # on dict values (DPY-3002). Build the table from the schema definition instead;
+        # _create_table skips DDL when the table already exists.
+        metadata_key = f"{self.db_schema}.{table_name}" if self.db_schema else table_name
+        existing_table = self.metadata.tables.get(metadata_key)
+        if existing_table is not None:
+            return existing_table
+
         try:
-            table = Table(table_name, self.metadata, schema=self.db_schema, autoload_with=self.db_engine)
-            return table
+            return self._create_table(table_name=table_name, table_type=table_type)
 
         except Exception as e:
             log_error(f"Error loading existing table {self.db_schema or 'default schema'}.{table_name}: {str(e)}")
@@ -741,6 +750,35 @@ class OracleDb(BaseDb):
             Optional[Union[Session, Dict[str, Any]]]:
                 - When deserialize=True: Session object
                 - When deserialize=False: Session dictionary
+        """
+        try:
+            return self._upsert_session_attempt(session=session, deserialize=deserialize)
+        except IntegrityError:
+            # Two concurrent first saves of the same session find no row to lock and
+            # both take the MERGE's insert branch; the loser hits the primary key
+            # (ORA-00001). The row exists once the winner commits, so a single retry
+            # lands on the update branch, still guarded by the ownership check.
+            log_debug("Session upsert hit a concurrent insert, retrying once")
+            try:
+                return self._upsert_session_attempt(session=session, deserialize=deserialize)
+            except Exception as e:
+                log_error(f"Exception upserting into sessions table: {str(e)}")
+                return None
+
+    def _upsert_session_attempt(
+        self, session: Session, deserialize: Optional[bool] = True
+    ) -> Optional[Union[Session, Dict[str, Any]]]:
+        """
+        Single attempt of upsert_session; raises IntegrityError so the caller can retry.
+
+        Args:
+            session (Session): The session data to upsert.
+            deserialize (Optional[bool]): Whether to deserialize the session. Defaults to True.
+
+        Returns:
+            Optional[Union[Session, Dict[str, Any]]]:
+                - When deserialize=True: Session object
+                - When deserialize=False: Session dictionary
 
         Raises:
             Exception: If an error occurs during upsert.
@@ -918,6 +956,8 @@ class OracleDb(BaseDb):
                         return session_dict
                     return WorkflowSession.from_dict(session_dict)
 
+        except IntegrityError:
+            raise
         except Exception as e:
             log_error(f"Exception upserting into sessions table: {str(e)}")
             return None
@@ -1884,7 +1924,7 @@ class OracleDb(BaseDb):
                 result = sess.execute(stmt).fetchone()
                 if result is None:
                     return None
-                return KnowledgeRow.model_validate(dict(result._mapping))
+                return deserialize_knowledge_row(dict(result._mapping))
 
         except Exception as e:
             log_error(f"Exception getting knowledge content: {str(e)}")
@@ -1942,7 +1982,7 @@ class OracleDb(BaseDb):
                 if not result:
                     return [], 0
 
-                return [KnowledgeRow.model_validate(dict(record._mapping)) for record in result], total_count
+                return [deserialize_knowledge_row(dict(record._mapping)) for record in result], total_count
 
         except Exception as e:
             log_error(f"Exception getting knowledge contents: {str(e)}")

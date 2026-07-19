@@ -1,5 +1,6 @@
 """Integration tests for AsyncOracleDb session methods"""
 
+import asyncio
 import time
 
 import pytest
@@ -431,3 +432,33 @@ async def test_upsert_sessions_bulk_same_owner_updates(async_oracle_db_real):
     results = await async_oracle_db_real.upsert_sessions([session])
     assert len(results) == 1
     assert (results[0].session_data or {}).get("version") == 2
+
+
+@pytest.mark.asyncio
+async def test_upsert_session_concurrent_first_save_retries(async_oracle_db_real):
+    """Two concurrent first saves of the same new session race into the MERGE's
+    insert branch; the loser hits ORA-00001 and must retry onto the update branch
+    instead of dropping the session."""
+    warmup = WorkflowSession(
+        session_id="test-race-warmup",
+        workflow_id="test-workflow",
+        user_id="test-user",
+        created_at=int(time.time()),
+    )
+    assert await async_oracle_db_real.upsert_session(warmup) is not None
+
+    session = WorkflowSession(
+        session_id="test-race-session",
+        workflow_id="test-workflow",
+        user_id="test-user",
+        created_at=int(time.time()),
+    )
+
+    results = await asyncio.gather(
+        async_oracle_db_real.upsert_session(session),
+        async_oracle_db_real.upsert_session(session),
+    )
+    assert all(result is not None for result in results)
+
+    persisted = await async_oracle_db_real.get_session("test-race-session", session_type=SessionType.WORKFLOW)
+    assert persisted is not None

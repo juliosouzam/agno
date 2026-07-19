@@ -490,19 +490,24 @@ def test_get_table_invalid_type(oracle_db):
 @patch("agno.db.oracle.oracle.is_table_available")
 @patch("agno.db.oracle.oracle.is_valid_table")
 def test_get_or_create_table_existing_valid(mock_is_valid, mock_is_available, oracle_db, mock_session):
-    """Test getting existing valid table"""
+    """An existing valid table is rebuilt from the schema definition, not reflected.
+
+    Reflection (autoload_with) loses the OracleJSON column type, which breaks JSON
+    serialization on the raw MERGE binds (DPY-3002).
+    """
     mock_is_available.return_value = True
     mock_is_valid.return_value = True
 
     oracle_db.Session = Mock(return_value=mock_session)
 
     mock_table = Mock(spec=Table)
-    with patch.object(Table, "__new__", return_value=mock_table):
+    with patch.object(oracle_db, "_create_table", return_value=mock_table) as mock_create:
         table = oracle_db._get_or_create_table("test_table", "sessions")
 
     assert table == mock_table
     mock_is_available.assert_called_once()
     mock_is_valid.assert_called_once()
+    mock_create.assert_called_once_with(table_name="test_table", table_type="sessions")
 
 
 @patch("agno.db.oracle.oracle.is_table_available")
@@ -1107,3 +1112,36 @@ def test_deserialize_cultural_knowledge_from_db_missing_content():
     assert cultural_knowledge.content is None
     assert cultural_knowledge.categories is None
     assert cultural_knowledge.notes is None
+
+
+# -- Regression tests: fixes found while exercising the provider externally --
+
+
+def test_knowledge_description_is_nullable():
+    """Oracle stores '' as NULL, so description cannot carry a NOT NULL constraint"""
+    assert KNOWLEDGE_TABLE_SCHEMA["description"]["nullable"] is True
+
+
+def test_deserialize_knowledge_row_restores_empty_description():
+    """A NULL description read back from Oracle must validate as an empty string"""
+    row = oracle_utils_module.deserialize_knowledge_row(
+        {"id": "kr-1", "name": "Doc", "description": None, "metadata": {"a": 1}}
+    )
+    assert row.description == ""
+    assert row.metadata == {"a": 1}
+
+    row = oracle_utils_module.deserialize_knowledge_row({"id": "kr-2", "name": "Doc", "description": "kept"})
+    assert row.description == "kept"
+
+
+def test_get_or_create_table_existing_returns_cached_metadata_table(oracle_db):
+    """A table already registered in the MetaData must be reused, not redefined"""
+    cached_table = Table("test_sessions", oracle_db.metadata)
+
+    with patch("agno.db.oracle.oracle.is_table_available", return_value=True):
+        with patch("agno.db.oracle.oracle.is_valid_table", return_value=True):
+            with patch.object(oracle_db, "_create_table") as mock_create:
+                table = oracle_db._get_or_create_table(table_name="test_sessions", table_type="sessions")
+
+    assert table is cached_table
+    mock_create.assert_not_called()

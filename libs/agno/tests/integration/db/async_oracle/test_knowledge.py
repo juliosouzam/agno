@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from agno.db.oracle import AsyncOracleDb
 from agno.db.schemas.knowledge import KnowledgeRow
 
 
@@ -100,3 +101,69 @@ async def test_upsert_knowledge_updates_existing(async_oracle_db_real):
     retrieved = await async_oracle_db_real.get_knowledge_content("test-update-knowledge")
     assert retrieved is not None
     assert retrieved.name == "Updated Name"
+
+
+@pytest.mark.asyncio
+async def test_upsert_knowledge_with_empty_description_round_trips(async_oracle_db_real):
+    """Oracle stores the empty string as NULL; the row must still write and validate on read"""
+    knowledge = KnowledgeRow(
+        id="test-knowledge-empty-desc",
+        name="Empty Description Document",
+        description="",
+        metadata={"origin": "test"},
+        type="Text",
+        size=10,
+        created_at=int(time.time()),
+        updated_at=int(time.time()),
+    )
+
+    result = await async_oracle_db_real.upsert_knowledge_content(knowledge)
+    assert result is not None
+
+    retrieved = await async_oracle_db_real.get_knowledge_content("test-knowledge-empty-desc")
+    assert retrieved is not None
+    assert retrieved.description == ""
+    assert retrieved.metadata == {"origin": "test"}
+
+
+@pytest.mark.asyncio
+async def test_fresh_instance_against_existing_tables_serializes_json(async_oracle_db_real, async_oracle_engine):
+    """A new AsyncOracleDb over already-created tables must keep JSON binds working.
+
+    Regression: the exists-path reflected the table with autoload_with, which loses
+    the OracleJSON column type and made dict binds fail with DPY-3002.
+    """
+    seed = KnowledgeRow(
+        id="test-knowledge-seed",
+        name="Seed Document",
+        description="seed",
+        type="Text",
+        created_at=int(time.time()),
+        updated_at=int(time.time()),
+    )
+    assert await async_oracle_db_real.upsert_knowledge_content(seed) is not None
+
+    fresh_db = AsyncOracleDb(
+        db_engine=async_oracle_engine,
+        session_table="test_sessions",
+        memory_table="test_memories",
+        metrics_table="test_metrics",
+        eval_table="test_evals",
+        knowledge_table="test_knowledge",
+    )
+    knowledge = KnowledgeRow(
+        id="test-knowledge-fresh",
+        name="Fresh Instance Document",
+        description="written by a second instance",
+        metadata={"tier": "pro", "hosts": 3},
+        type="Text",
+        created_at=int(time.time()),
+        updated_at=int(time.time()),
+    )
+
+    result = await fresh_db.upsert_knowledge_content(knowledge)
+    assert result is not None
+
+    retrieved = await fresh_db.get_knowledge_content("test-knowledge-fresh")
+    assert retrieved is not None
+    assert retrieved.metadata == {"tier": "pro", "hosts": 3}

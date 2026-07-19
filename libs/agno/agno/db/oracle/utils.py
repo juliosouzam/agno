@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from agno.db.oracle.schemas import OracleJSON, get_table_schema_definition
 from agno.db.schemas.culture import CulturalKnowledge
+from agno.db.schemas.knowledge import KnowledgeRow
 from agno.db.utils import json_serializer
 from agno.utils.log import log_debug, log_error, log_warning
 
@@ -499,6 +500,17 @@ def serialize_cultural_knowledge_for_db(
         content_dict["notes"] = cultural_knowledge.notes
 
     return content_dict if content_dict else {}
+
+
+def deserialize_knowledge_row(db_row: Dict[str, Any]) -> KnowledgeRow:
+    """Build a KnowledgeRow from a DB row, restoring Oracle's empty-string-as-NULL.
+
+    Oracle stores the empty string as NULL, so required text fields written as ""
+    come back as None and would fail KnowledgeRow validation.
+    """
+    if db_row.get("description") is None:
+        db_row["description"] = ""
+    return KnowledgeRow.model_validate(db_row)
 
 
 def deserialize_cultural_knowledge_from_db(db_row: Dict[str, Any]) -> CulturalKnowledge:
